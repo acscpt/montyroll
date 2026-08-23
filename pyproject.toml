@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "montyroll"
-version = "0.1.0"
+version = "0.2.0"
 description = "A lightweight MIDI visualiser, piano-roll editor and player, stdlib-only Python with tkinter"
 readme = "README.md"
 license = { text = "MIT" }

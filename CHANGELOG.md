@@ -6,6 +6,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-23
+
 ### Added
 
 - **Play from here**: right-click the piano roll for Play from the nearest bar or from the nearest beat. **Change All** beside the channel strip's header sets every channel's instrument to one GM program, leaving Ch 10 alone, and **Clear** now also restores the instruments the file was opened with.
