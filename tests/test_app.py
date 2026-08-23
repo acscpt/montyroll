@@ -301,10 +301,14 @@ class TestChannelStrip:
         assert app._audibleChannels() == set(app.song.channels)
         assert not any(v.get() for v in app.soloVars.values())
 
-    def testProgramChangeWritesEvents(self, app: MidiEditorApp) -> None:
-        """Choosing an instrument rewrites the channel's program changes."""
+    def testProgramChangeWritesEvents(self, app: MidiEditorApp,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        """Choosing an instrument rewrites the channel's program changes and restarts play."""
+        restarts: list[int] = []
+        monkeypatch.setattr(app, "_liveUpdate", lambda *a, **k: restarts.append(1))
         var = tk.StringVar(value=" 40  Violin")
         app._programChanged(1, var)
+        assert restarts == [1]
         programs = {e.data[0] for t in app.song.mf.tracks for e in t if e.status == 0xC1}
         assert programs == {40}
         assert app.song.dirty
@@ -806,36 +810,66 @@ class TestTempoEditing:
 
 
 class TestReportTab:
-    """The Report tab and its Save button."""
+    """The Report tab: Original and Reduced sub-tabs and the Save button."""
 
-    def testReportIsGeneratedWhenShown(self, app: MidiEditorApp) -> None:
+    def testOriginalIsGeneratedWhenShown(self, app: MidiEditorApp) -> None:
         """Nothing is generated until the tab is selected; then the text appears."""
-        assert app.report is None
+        assert app.reports == {"original": None, "reduced": None}
         app.nb.select(2)
         app.update()
-        text = app.reportText.get("1.0", "end")
+        text = app.reportTexts["original"].get("1.0", "end")
         assert text.startswith("MontyRoll report: song.mid")
         assert "Instruments sounding at once" in text
-        assert app.reportText.cget("state") == "disabled"
+        assert app.reportTexts["original"].cget("state") == "disabled"
+        assert app.reports["reduced"] is None
 
-    def testReportFollowsEdits(self, app: MidiEditorApp) -> None:
-        """Deleting every note regenerates the report on the visible tab."""
+    def testReducedIsANoteWhileReductionIsOff(self, app: MidiEditorApp) -> None:
+        """The Reduced sub-tab explains itself until the reduction is on."""
+        app.nb.select(2)
+        app.reportNb.select(1)
+        app.update()
+        assert app.reportTexts["reduced"].get("1.0", "end").startswith("Reduction is off.")
+
+    def testReducedFollowsTheReduction(self, app: MidiEditorApp) -> None:
+        """With Reduce on, the Reduced sub-tab describes the reduced song and says so."""
+        app.nb.select(2)
+        app.reportNb.select(1)
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app.update()
+        text = app.reportTexts["reduced"].get("1.0", "end")
+        assert text.startswith("MontyRoll report: song.mid (reduced to 1 voices)")
+        assert "notes as written           1" in text
+        original = app._ensureReport("original")
+        assert original.startswith("MontyRoll report: song.mid\n")
+        app.reduceVar.set(False)
+        app._reductionChanged()
+        app.update()
+        assert app.reportTexts["reduced"].get("1.0", "end").startswith("Reduction is off.")
+
+    def testReportsFollowEdits(self, app: MidiEditorApp) -> None:
+        """Deleting every note regenerates the report on view."""
         app.nb.select(2)
         app.update()
         app.selectAll()
         app.deleteSelection()
         app.update()
-        assert "No notes." in app.reportText.get("1.0", "end")
+        assert "No notes." in app.reportTexts["original"].get("1.0", "end")
 
-    def testSaveReport(self, app: MidiEditorApp, tmp_path: Path,
-                       monkeypatch: pytest.MonkeyPatch) -> None:
-        """Save writes the same text the tab shows, as ASCII."""
+    def testSaveReportWritesTheOneOnView(self, app: MidiEditorApp, tmp_path: Path,
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        """Save writes the visible sub-tab's text, as ASCII."""
         out = tmp_path / "report.txt"
         monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
         app.saveReport()
-        saved = out.read_text(encoding="ascii")
-        assert saved == app._ensureReport()
-        assert "Saved report" in app.status.cget("text")
+        assert out.read_text(encoding="ascii") == app._ensureReport("original")
+        assert "Saved original report" in app.status.cget("text")
+        app.nb.select(2)
+        app.reportNb.select(1)
+        app.update()
+        app.saveReport()
+        assert out.read_text(encoding="ascii").startswith("Reduction is off.")
 
 
 class TestEventList:

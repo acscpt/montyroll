@@ -63,7 +63,7 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 
 - Status bar tracking the pointer in musical time, naming the chord and the note (or drum sound) under the cursor
 
-- A Report tab: the file's analysis as text, including how many instruments play at once and which pairs of channels rarely coincide, with a Save button
+- A Report tab: the file's analysis as text, including how many instruments play at once and which pairs of channels rarely coincide, with a Save button; a second sub-tab reports on the reduced song while the reduction is on
 
 - Key estimation for the whole file, shown in the toolbar summary
 

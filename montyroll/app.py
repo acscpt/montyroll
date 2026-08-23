@@ -223,7 +223,7 @@ class MidiEditorApp(tk.Tk):
         self.priorityVars: dict[int, tk.DoubleVar] = {}
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
-        self.report: str | None = None      # the Report tab's text, None when stale
+        self.reports: dict[str, str | None] = {"original": None, "reduced": None}
         self._demandAfter: str | None = None
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
 
@@ -538,25 +538,38 @@ class MidiEditorApp(tk.Tk):
         self.evTree.pack(side="left", fill="both", expand=True)
         ev_bar.pack(side="right", fill="y")
 
-        # Report tab: the file's analysis as text, generated when the tab is
-        # shown and regenerated after the notes change.
+        # Report tab: the file's analysis as text, in two sub-tabs. Original
+        # describes the song; Reduced describes the reduction and is only
+        # generated while the reduction is on. Each is produced when first
+        # shown and again after the notes or the plan change.
         reportTab = ttk.Frame(self.nb)
         self.nb.add(reportTab, text="Report")
         bar = ttk.Frame(reportTab)
         bar.pack(fill="x")
         b = ttk.Button(bar, text="Save report...", command=self.saveReport)
         b.pack(side="left", padx=4, pady=2)
-        Tooltip(b, "Write the report as a text file")
+        Tooltip(b, "Write the report on view as a text file")
+        self.reportNb = ttk.Notebook(reportTab)
+        self.reportNb.pack(fill="both", expand=True)
+        self.reportTexts: dict[str, tk.Text] = {}
+
         # A named font must be used by name: ("TkFixedFont", 9) asks for a
         # family called TkFixedFont, which falls back to a proportional face.
         reportFont = tkfont.nametofont("TkFixedFont").copy()
         reportFont.configure(size=9)
-        self.reportText = tk.Text(reportTab, font=reportFont, wrap="none", state="disabled")
-        rbar = ttk.Scrollbar(reportTab, orient="vertical", command=self.reportText.yview)
-        self.reportText.configure(yscrollcommand=rbar.set)
-        rbar.pack(side="right", fill="y")
-        self.reportText.pack(side="left", fill="both", expand=True)
+
+        for key, title in (("original", "Original"), ("reduced", "Reduced")):
+            page = ttk.Frame(self.reportNb)
+            self.reportNb.add(page, text=title)
+            text = tk.Text(page, font=reportFont, wrap="none", state="disabled")
+            rbar = ttk.Scrollbar(page, orient="vertical", command=text.yview)
+            text.configure(yscrollcommand=rbar.set)
+            rbar.pack(side="right", fill="y")
+            text.pack(side="left", fill="both", expand=True)
+            self.reportTexts[key] = text
+
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
+        self.reportNb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
 
         # Mouse bindings for the roll. Wheel events are bound on the ruler and
         # keys as well, so scrolling and Ctrl-zoom work wherever the pointer
@@ -716,7 +729,7 @@ class MidiEditorApp(tk.Tk):
         self.chords = None
         self.reduction = None
         self.reducedSong = None
-        self.report = None
+        self.reports = {"original": None, "reduced": None}
         self.priorityVars.clear()
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
 
@@ -1025,6 +1038,7 @@ class MidiEditorApp(tk.Tk):
         self.song.setProgram(ch, program)
         self._markDirty()
         self._setStatus(f"Ch {ch + 1} {ARROW} {gm.programName(program)}")
+        self._liveUpdate()
 
     def _volumeChanged(self, ch: int, value: str):
         """Channel volume slider moved: write CC7 into the song and restart
@@ -1399,44 +1413,70 @@ class MidiEditorApp(tk.Tk):
         self.chords = None
         self.reduction = None
         self.reducedSong = None
-        self.report = None
+        self.reports = {"original": None, "reduced": None}
         self._scheduleDemand()
         self._showReportIfSelected()
 
-    def _ensureReport(self) -> str:
-        """Return the report text, generating it if the song changed.
+    def _reportKey(self) -> str:
+        """Name the report sub-tab on view.
 
         Returns:
-            str: the report.
+            str: "original" or "reduced".
         """
-        if self.report is None:
-            names = {ch: info.instrument for ch, info in self.song.channels.items()}
-            self.report = analysis.report(self.song, names)
+        key = "reduced" if self.reportNb.index(self.reportNb.select()) == 1 else "original"
+        return key
 
-        return self.report
+    def _ensureReport(self, key: str) -> str:
+        """Return one of the reports, generating it if it is stale.
+
+        Args:
+            key: "original" for the song as it is, "reduced" for the reduction.
+
+        Returns:
+            str: the report text. The reduced report is a one-line note while
+            the reduction is off.
+        """
+        if self.reports[key] is None:
+            names = {ch: info.instrument for ch, info in self.song.channels.items()}
+
+            if key == "original":
+                self.reports[key] = analysis.report(self.song, names)
+            elif not self.reduceVar.get():
+                self.reports[key] = ("Reduction is off. Tick 'Reduce to the voice budget' in "
+                                     "the Reduce panel for a report on the reduced song.\n")
+            else:
+                reduced = self._ensureReducedSong()
+                reduced.path = self.song.path
+                voices = self._ensureReduction().voicesUsed
+                text = analysis.report(reduced, names)
+                self.reports[key] = text.replace("\n", f" (reduced to {voices} voices)\n", 1)
+
+        return self.reports[key]
 
     def _showReportIfSelected(self):
-        """Fill the Report tab when it is the one on view."""
+        """Fill the report sub-tab on view when the Report tab is showing."""
         if self.nb.index(self.nb.select()) != 2:
             return
 
-        text = self._ensureReport()
-        self.reportText.configure(state="normal")
-        self.reportText.delete("1.0", "end")
-        self.reportText.insert("1.0", text)
-        self.reportText.configure(state="disabled")
+        key = self._reportKey()
+        widget = self.reportTexts[key]
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", self._ensureReport(key))
+        widget.configure(state="disabled")
 
     def saveReport(self):
-        """Write the report to a text file of the user's choosing."""
+        """Write the report on view to a text file of the user's choosing."""
+        key = self._reportKey()
         path = filedialog.asksaveasfilename(
-            title="Save the report", defaultextension=".txt",
+            title=f"Save the {key} report", defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*")])
 
         if path:
             with open(path, "w", encoding="ascii") as f:
-                f.write(self._ensureReport())
+                f.write(self._ensureReport(key))
 
-            self._setStatus(f"Saved report to {path}")
+            self._setStatus(f"Saved {key} report to {path}")
 
     def _ensureChords(self) -> list[tuple[int, int, str]]:
         """Return the chord runs, one per beat merged, rebuilding if needed.
@@ -1741,12 +1781,15 @@ class MidiEditorApp(tk.Tk):
         self.reduction = None
         self.reducedSong = None
         self.demand = None
+        self.reports["reduced"] = None
 
         if self.reduceVar.get():
             self.redraw()
         else:
             self.lossLbl.config(text="")
             self._scheduleDemand()
+
+        self._showReportIfSelected()
 
         if self.playStart is not None:
             self._liveUpdate()
