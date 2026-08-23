@@ -392,3 +392,50 @@ class TestChordTrack:
         runs = analysis.chordTrack(danube, danube.mf.division)
         assert runs[0][2] == "A"
         assert any(n == "E7" for _, _, n in runs[:6])
+
+
+class TestReport:
+    """Instruments at once and the text report."""
+
+    def testInstrumentsAtOnce(self, song: model.Song) -> None:
+        """Channels sounding per segment: three at the start, one when only the piano plays."""
+        demand = analysis.sweep(song)
+        together = analysis.instrumentsAtOnce(demand)
+        assert together[0] == 3                    # piano, flute, drums
+        assert together[demand.index(1100)] == 1   # piano's G4 alone
+        assert together[demand.index(1500)] == 0
+        assert max(together) == 3
+
+    def testAtLeastShares(self) -> None:
+        """The share at or above each count, over sounding time only."""
+        shares = analysis.atLeast([2, 0, 1, 3], [1.0, 5.0, 1.0, 2.0])
+        assert shares == {1: pytest.approx(1.0), 2: pytest.approx(0.75), 3: pytest.approx(0.5)}
+        assert analysis.atLeast([], []) == {}
+
+    def testReportSections(self, song: model.Song) -> None:
+        """The report names the file, the key, every section and every channel with notes."""
+        text = analysis.report(song, {0: "Piano", 1: "Flute", 9: "Drum Kit"})
+        assert text.startswith("MontyRoll report: song.mid")
+        for heading in ("How to read this report", "File", "Voices sounding at once",
+                        "Instruments sounding at once", "Channels", "Doubling",
+                        "Busiest moments"):
+            assert heading in text
+        assert "key: C major" in text
+        assert "tempo: 3 event(s), 100 to 150 bpm" in text
+        assert " 1  Piano " in text and "10  Drum Kit" in text
+        assert "peak 3 channels" in text
+        assert all(ord(c) < 128 for c in text)
+
+    def testReportOnAnEmptySong(self) -> None:
+        """A song with no notes reports its file facts and stops."""
+        text = analysis.report(model.Song.new())
+        assert "No notes." in text
+        assert "Busiest moments\n---" not in text
+
+    def testReportCoActivityNeedsBusyChannels(self, song: model.Song) -> None:
+        """The co-activity table appears only with two channels playing a tenth of the piece."""
+        text = analysis.report(song)
+        assert "Channels playing together\n---" in text
+        piano = [n for n in song.notes if n.channel == 0]
+        song.notes = piano
+        assert "Channels playing together\n---" not in analysis.report(song)

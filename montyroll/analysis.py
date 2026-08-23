@@ -723,3 +723,232 @@ def chordTrack(song: model.Song, stepTicks: int, smooth: int = 1) -> list[tuple[
             runs.append((start, end, name))
 
     return runs
+
+
+# ----------------------------------------------------------------- report
+def instrumentsAtOnce(demand: Demand) -> list[int]:
+    """Count the channels sounding in each segment.
+
+    A note counts its channel once however many notes the channel has
+    going, so this is the number of instruments playing together, which is
+    what a target that can re-patch voices on the fly needs to know.
+
+    Args:
+        demand: a sweep.
+
+    Returns:
+        list[int]: one count per segment, parallel to `demand.ticks`.
+    """
+    columns = list(demand.channels.values())
+    counts = [sum(1 for c in columns if c[i]) for i in range(len(demand.ticks))]
+    return counts
+
+
+def atLeast(counts: list[int], seconds: list[float]) -> dict[int, float]:
+    """The share of sounding time at or above each count.
+
+    Args:
+        counts: a per-segment count series.
+        seconds: the matching durations.
+
+    Returns:
+        dict[int, float]: for n from 1 to the peak, the fraction of sounding
+        time with the count at least n.
+    """
+    peak = max(counts, default=0)
+    sounding = sum(d for c, d in zip(counts, seconds) if c)
+    shares: dict[int, float] = {}
+
+    for n in range(1, peak + 1):
+        above = sum(d for c, d in zip(counts, seconds) if c >= n)
+        shares[n] = above / sounding if sounding else 0.0
+
+    return shares
+
+
+def _table(rows: list[list[str]], align: str) -> list[str]:
+    """Lay out rows as fixed-width text columns.
+
+    Args:
+        rows: the header row followed by data rows; every row the same length.
+        align: one character per column, "l" or "r".
+
+    Returns:
+        list[str]: the lines, with a rule under the header.
+    """
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    lines: list[str] = []
+
+    for k, row in enumerate(rows):
+        cells = [c.rjust(w) if a == "r" else c.ljust(w)
+                 for c, w, a in zip(row, widths, align)]
+        lines.append("  ".join(cells).rstrip())
+
+        if k == 0:
+            lines.append("  ".join("-" * w for w in widths))
+
+    return lines
+
+
+def report(song: model.Song, instrumentNames: dict[int, str] | None = None) -> str:
+    """Write the file's analysis as plain text.
+
+    Args:
+        song: the song.
+        instrumentNames: a display name per channel, as the channel strip
+            shows them; channel numbers alone when omitted.
+
+    Returns:
+        str: the report, ASCII, fixed-width tables.
+    """
+    demand = sweep(song)
+    names = instrumentNames or {}
+    out: list[str] = []
+    name = song.path.rsplit("/", 1)[-1] if song.path else "untitled"
+    withNotes = sorted({n.channel for n in song.notes})
+    tempos = [60e6 / u for _, u, _ in song.tempoMap]
+    key = songKey(song)
+    out += [f"MontyRoll report: {name}", "",
+            "How to read this report", "-----------------------",
+            "",
+            "File",
+            "  Format, tracks, resolution, note and channel counts, length, time",
+            "  signatures, the number of tempo events and their range, and the",
+            "  estimated key.",
+            "",
+            "Voices sounding at once",
+            "  Simultaneous notes, counted three ways: every note as written;",
+            "  distinct pitches, so a unison on two channels counts once; distinct",
+            "  pitch classes, so an octave doubling counts once too. Peak and mean",
+            "  are over the time anything sounds, and each 'more than N' column is",
+            "  the share of that time with the count above N.",
+            "",
+            "Instruments sounding at once",
+            "  Channels with a note sounding, counted together however many notes",
+            "  each has. Peak and mean, then the share of sounding time with at",
+            "  least N channels playing, for every N up to the peak.",
+            "",
+            "Channels",
+            "  Per channel: the instrument, note count, pitch range as MIDI note",
+            "  numbers, most notes at once, mean notes while sounding, and the share",
+            "  of the piece during which the channel sounds.",
+            "",
+            "Doubling",
+            "  Every note's duration summed, divided into the share that is a unison",
+            "  of a pitch already sounding on another channel, an octave of one, the",
+            "  same pitch already held on the same channel, and the remainder.",
+            "",
+            "Channels playing together",
+            "  For channels sounding at least a tenth of the piece, the share of the",
+            "  piece during which both channels of a pair sound: the eight pairs",
+            "  that coincide least and the eight that coincide most.",
+            "",
+            "Busiest moments",
+            "  The five bars with the most simultaneous notes: the bar, the time, the",
+            "  three counts at that moment, and each channel sounding with its note",
+            "  count, as 16(6) for six notes on channel 16.",
+            "",
+            "File", "----",
+            f"format {song.mf.format}, {len(song.mf.tracks)} tracks, "
+            f"{song.mf.division} ticks per quarter",
+            f"{len(song.notes)} notes on {len(withNotes)} channels, "
+            f"{song.barBeat(song.maxTick)[0]} bars, {song.duration:.1f} s",
+            "time signatures: " + ", ".join(f"{n}/{d} at bar {song.barBeat(t)[0]}"
+                                             for t, n, d in song.timeSigs),
+            f"tempo: {len(song.tempoMap)} event(s), {min(tempos):.0f} to {max(tempos):.0f} bpm",
+            f"key: {key.name if key else 'none'}", ""]
+
+    if not song.notes:
+        out += ["No notes.", ""]
+        return "\n".join(out) + "\n"
+
+    # Demand: the three counts with the threshold columns.
+    out += ["Voices sounding at once", "-----------------------",
+            "Over the time anything sounds; 'more than N' is the share of that time",
+            "with the count above N.", ""]
+    rows = [["count of", "peak", "mean"] + [f">{k}" for k in THRESHOLDS]]
+
+    for label, series in (("notes as written", demand.raw),
+                          ("distinct pitches", demand.pitches),
+                          ("distinct pitch classes", demand.classes)):
+        st = stats(series, demand.seconds)
+        rows.append([label, str(st.peak), f"{st.mean:.1f}"]
+                    + [f"{st.above[k] * 100:.0f}%" for k in THRESHOLDS])
+
+    out += _table(rows, "lrr" + "r" * len(THRESHOLDS)) + [""]
+
+    # Instruments at once.
+    together = instrumentsAtOnce(demand)
+    togetherStats = stats(together, demand.seconds, ())
+    shares = atLeast(together, demand.seconds)
+    out += ["Instruments sounding at once", "----------------------------",
+            f"peak {togetherStats.peak} channels, mean {togetherStats.mean:.1f} while anything "
+            "sounds.", "Share of sounding time with at least N channels playing:", ""]
+    rows = [["channels", "at least"]] + [[str(n), f"{f * 100:.0f}%"] for n, f in shares.items()]
+    out += _table(rows, "rr") + [""]
+
+    # Per channel.
+    figures = channelDemand(demand)
+    out += ["Channels", "--------"]
+    rows = [["ch", "instrument", "notes", "range", "peak", "mean", "plays"]]
+
+    for ch in withNotes:
+        info = song.channels[ch]
+        f = figures[ch]
+        rows.append([str(ch + 1), names.get(ch, ""), str(info.noteCount),
+                     f"{info.lo}-{info.hi}", str(f.peak), f"{f.mean:.1f}",
+                     f"{f.fraction * 100:.0f}%"])
+
+    out += _table(rows, "rlrrrrr") + [""]
+
+    # Doubling.
+    d = doubling(demand)
+    out += ["Doubling", "--------",
+            "Every note's duration summed, divided by kind:", ""]
+    rows = [["kind", "share"],
+            ["unison with another channel", f"{d.unison / d.total * 100:.0f}%"],
+            ["octave of another channel", f"{d.octave / d.total * 100:.0f}%"],
+            ["same channel, same pitch", f"{d.sameChannel / d.total * 100:.0f}%"],
+            ["harmonically distinct", f"{d.distinct / d.total * 100:.0f}%"]]
+    out += _table(rows, "lr") + [""]
+
+    # Co-activity among channels that play at least a tenth of the piece.
+    busy = [ch for ch in withNotes if figures[ch].fraction >= 0.1]
+    pairs = [(a, b, sec) for (a, b), sec in coActivity(demand).items()
+             if a in busy and b in busy]
+
+    if pairs:
+        ordered = sorted(pairs, key=lambda p: p[2])
+        out += ["Channels playing together", "-------------------------",
+                "Share of the piece during which both channels sound, for channels that",
+                "play at least a tenth of it.", ""]
+        rows = [["least together", "share", "", "most together", "share"]]
+
+        for (a, b, sec), (c, d2, sec2) in zip(ordered[:8], ordered[::-1][:8]):
+            rows.append([f"ch {a + 1} + ch {b + 1}", f"{sec / demand.length * 100:.0f}%", "",
+                         f"ch {c + 1} + ch {d2 + 1}", f"{sec2 / demand.length * 100:.0f}%"])
+
+        out += _table(rows, "lrllr") + [""]
+
+    # Busiest moments.
+    out += ["Busiest moments", "---------------"]
+    byBar: dict[int, tuple[int, int]] = {}
+
+    for i, tick in enumerate(demand.ticks):
+        bar = song.barBeat(tick)[0]
+
+        if demand.raw[i] > byBar.get(bar, (0, 0))[0]:
+            byBar[bar] = (demand.raw[i], i)
+
+    rows = [["bar", "time", "notes", "pitches", "classes", "channels"]]
+
+    for bar, (count, i) in sorted(byBar.items(), key=lambda kv: (-kv[1][0], kv[0]))[:5]:
+        tick = demand.ticks[i]
+        secs = song.tickToSeconds(tick)
+        playing = [f"{ch + 1}({c[i]})" for ch, c in sorted(demand.channels.items()) if c[i]]
+        rows.append([str(bar), f"{int(secs) // 60}:{secs % 60:04.1f}", str(count),
+                     str(demand.pitches[i]), str(demand.classes[i]), " ".join(playing)])
+
+    out += _table(rows, "rrrrrl") + [""]
+    text = "\n".join(out) + "\n"
+    return text

@@ -201,6 +201,7 @@ class MidiEditorApp(tk.Tk):
         self.playSpeed = 1.0           # speed factor of the running synth
         self._replayAfter: str | None = None
         self.cursorItem = None
+        self.demandCursorItem = None      # the cursor's twin on the demand strip
 
         # Voice demand: the sweep is rebuilt lazily after any change to the
         # notes, and the strip is redrawn through an idle callback so a burst
@@ -222,6 +223,7 @@ class MidiEditorApp(tk.Tk):
         self.priorityVars: dict[int, tk.DoubleVar] = {}
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
+        self.report: str | None = None      # the Report tab's text, None when stale
         self._demandAfter: str | None = None
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
 
@@ -327,8 +329,9 @@ class MidiEditorApp(tk.Tk):
         # Position readout, refreshed by _tickCursor at 30 Hz while playing.
         # A fixed-width font and a reserved width keep the digits from
         # shuffling the rest of the toolbar as they change.
-        self.posLbl = ttk.Label(bar, text="", width=26,
-                                 font=("TkFixedFont", 9))
+        readoutFont = tkfont.nametofont("TkFixedFont").copy()
+        readoutFont.configure(size=9)
+        self.posLbl = ttk.Label(bar, text="", width=26, font=readoutFont)
         self.posLbl.pack(side="left", padx=(10, 0))
         Tooltip(self.posLbl, "Playback position: time, bar:beat and current\n"
                 "tempo from the file's tempo events. (If a file has\n"
@@ -535,6 +538,26 @@ class MidiEditorApp(tk.Tk):
         self.evTree.pack(side="left", fill="both", expand=True)
         ev_bar.pack(side="right", fill="y")
 
+        # Report tab: the file's analysis as text, generated when the tab is
+        # shown and regenerated after the notes change.
+        reportTab = ttk.Frame(self.nb)
+        self.nb.add(reportTab, text="Report")
+        bar = ttk.Frame(reportTab)
+        bar.pack(fill="x")
+        b = ttk.Button(bar, text="Save report...", command=self.saveReport)
+        b.pack(side="left", padx=4, pady=2)
+        Tooltip(b, "Write the report as a text file")
+        # A named font must be used by name: ("TkFixedFont", 9) asks for a
+        # family called TkFixedFont, which falls back to a proportional face.
+        reportFont = tkfont.nametofont("TkFixedFont").copy()
+        reportFont.configure(size=9)
+        self.reportText = tk.Text(reportTab, font=reportFont, wrap="none", state="disabled")
+        rbar = ttk.Scrollbar(reportTab, orient="vertical", command=self.reportText.yview)
+        self.reportText.configure(yscrollcommand=rbar.set)
+        rbar.pack(side="right", fill="y")
+        self.reportText.pack(side="left", fill="both", expand=True)
+        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
+
         # Mouse bindings for the roll. Wheel events are bound on the ruler and
         # keys as well, so scrolling and Ctrl-zoom work wherever the pointer
         # sits within the roll.
@@ -693,6 +716,7 @@ class MidiEditorApp(tk.Tk):
         self.chords = None
         self.reduction = None
         self.reducedSong = None
+        self.report = None
         self.priorityVars.clear()
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
 
@@ -710,6 +734,7 @@ class MidiEditorApp(tk.Tk):
         self._fillEvents()
         self._updateTitle()
         self._updateSummary()
+        self._showReportIfSelected()
 
     def _updateSummary(self):
         """Refresh the toolbar file summary: name, format, tracks, resolution,
@@ -1369,12 +1394,49 @@ class MidiEditorApp(tk.Tk):
         return self.demand
 
     def _invalidateDemand(self):
-        """Forget the sweep, the chords and the reduction after an edit."""
+        """Forget the sweep, the chords, the reduction and the report after an edit."""
         self.demand = None
         self.chords = None
         self.reduction = None
         self.reducedSong = None
+        self.report = None
         self._scheduleDemand()
+        self._showReportIfSelected()
+
+    def _ensureReport(self) -> str:
+        """Return the report text, generating it if the song changed.
+
+        Returns:
+            str: the report.
+        """
+        if self.report is None:
+            names = {ch: info.instrument for ch, info in self.song.channels.items()}
+            self.report = analysis.report(self.song, names)
+
+        return self.report
+
+    def _showReportIfSelected(self):
+        """Fill the Report tab when it is the one on view."""
+        if self.nb.index(self.nb.select()) != 2:
+            return
+
+        text = self._ensureReport()
+        self.reportText.configure(state="normal")
+        self.reportText.delete("1.0", "end")
+        self.reportText.insert("1.0", text)
+        self.reportText.configure(state="disabled")
+
+    def saveReport(self):
+        """Write the report to a text file of the user's choosing."""
+        path = filedialog.asksaveasfilename(
+            title="Save the report", defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*")])
+
+        if path:
+            with open(path, "w", encoding="ascii") as f:
+                f.write(self._ensureReport())
+
+            self._setStatus(f"Saved report to {path}")
 
     def _ensureChords(self) -> list[tuple[int, int, str]]:
         """Return the chord runs, one per beat merged, rebuilding if needed.
@@ -2272,6 +2334,10 @@ class MidiEditorApp(tk.Tk):
             self.canvas.delete(self.cursorItem)
             self.cursorItem = None
 
+        if self.demandCursorItem:
+            self.demandCanvas.delete(self.demandCursorItem)
+            self.demandCursorItem = None
+
     def _tickCursor(self):
         """Advance the playback cursor; reschedules itself every 33 ms.
 
@@ -2309,6 +2375,18 @@ class MidiEditorApp(tk.Tk):
         else:
             self.cursorItem = self.canvas.create_line(
                 x, 0, x, 128 * self.rowH, fill="#ffffff", width=1)
+
+        # The strip is a viewport, so its cursor sits at the roll's x less
+        # the scroll offset; the strip's own redraw forgets it, and it is
+        # recreated on the next tick.
+        stripX = x - self.canvas.canvasx(0)
+        stripH = self.demandCanvas.winfo_height()
+
+        if self.demandCursorItem and self.demandCanvas.type(self.demandCursorItem):
+            self.demandCanvas.coords(self.demandCursorItem, stripX, 0, stripX, stripH)
+        else:
+            self.demandCursorItem = self.demandCanvas.create_line(
+                stripX, 0, stripX, stripH, fill="#ffffff", width=1)
 
         # keep the cursor on screen: once it leaves the visible span, scroll
         # so it sits 40 px in from the left edge

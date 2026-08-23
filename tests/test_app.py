@@ -805,6 +805,39 @@ class TestTempoEditing:
         assert scheduled == [1]
 
 
+class TestReportTab:
+    """The Report tab and its Save button."""
+
+    def testReportIsGeneratedWhenShown(self, app: MidiEditorApp) -> None:
+        """Nothing is generated until the tab is selected; then the text appears."""
+        assert app.report is None
+        app.nb.select(2)
+        app.update()
+        text = app.reportText.get("1.0", "end")
+        assert text.startswith("MontyRoll report: song.mid")
+        assert "Instruments sounding at once" in text
+        assert app.reportText.cget("state") == "disabled"
+
+    def testReportFollowsEdits(self, app: MidiEditorApp) -> None:
+        """Deleting every note regenerates the report on the visible tab."""
+        app.nb.select(2)
+        app.update()
+        app.selectAll()
+        app.deleteSelection()
+        app.update()
+        assert "No notes." in app.reportText.get("1.0", "end")
+
+    def testSaveReport(self, app: MidiEditorApp, tmp_path: Path,
+                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """Save writes the same text the tab shows, as ASCII."""
+        out = tmp_path / "report.txt"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        app.saveReport()
+        saved = out.read_text(encoding="ascii")
+        assert saved == app._ensureReport()
+        assert "Saved report" in app.status.cget("text")
+
+
 class TestEventList:
     """The decoded event table."""
 
@@ -880,6 +913,24 @@ class TestPlayback:
         app.stopPlayback()
         assert app.playBtn.cget("text") == f"{PLAY_GLYPH} Play"
         assert app.cursorItem is None
+
+    def testCursorAlsoRunsOnTheStrip(self, app: MidiEditorApp,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """While playing, the demand strip carries the cursor too; stop clears both."""
+        calls: list[int] = []
+        monkeypatch.setattr(app.player, "play", lambda *a, **k: calls.append(1) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        monkeypatch.setattr(type(app.player), "playing", property(lambda self: bool(calls)))
+        app.togglePlay()
+        app._tickCursor()
+        assert app.cursorItem is not None
+        assert app.demandCanvas.type(app.demandCursorItem) == "line"
+        app._drawDemand()
+        app._tickCursor()
+        assert app.demandCanvas.type(app.demandCursorItem) == "line"
+        app.stopPlayback()
+        assert app.cursorItem is None
+        assert app.demandCursorItem is None
 
     def testLiveUpdateIsDebounced(self, app: MidiEditorApp,
                                   monkeypatch: pytest.MonkeyPatch) -> None:
