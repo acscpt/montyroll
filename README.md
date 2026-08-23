@@ -13,7 +13,7 @@ MontyRoll is a lightweight and simple MIDI visualiser written in Python. It can 
 
 MontyRoll can also play the file through a [synth](#synths) such as `timidity`, if one is installed.
 
-<a href="docs/images/note-display.png"><img src="docs/images/note-display.png" width="400" alt="The piano roll showing the bundled Chopsticks demo, with the channel strip on the left"></a> <a href="docs/images/events.png"><img src="docs/images/events.png" width="400" alt="The Events tab listing every event in the demo file, decoded"></a>
+<a href="docs/images/tempo_and_demand.png"><img src="docs/images/tempo_and_demand.png" width="600" alt="The piano roll with a tempo track, the chord row and the voice-demand strip, with the channel strip on the left"></a> <a href="docs/images/events.png"><img src="docs/images/events.png" width="600" alt="The Events tab listing every event in the demo file, decoded"></a>
 
 ## Requirements
 
@@ -97,7 +97,7 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 
 - Play and stop from the toolbar or `Space`, with a cursor that follows the file's tempo map and auto-scrolls the roll.
 
-- Mute and solo per channel. Mute silences a channel; solo plays only the soloed channels.
+- Mute and solo per channel. Mute silences a channel; solo plays only the soloed channels. Change All sets every channel's instrument at once (Ch 10 excepted); Clear resets mutes, solos and instruments.
 
 - Each channel's instrument can be previewed from the channel strip, in that channel's own pitch range.
 
@@ -121,7 +121,8 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 | Zoom horizontally | `Ctrl` + mouse wheel (anchored at the pointer) |
 | Scroll horizontally | `Shift` + mouse wheel |
 | Scroll vertically | Mouse wheel |
-| Note context menu | Right-click |
+| Play from the nearest bar or beat | Right-click the piano roll |
+| Note context menu | Right-click a note |
 | Set tempo from a bar | Double-click the ruler's tempo row |
 | Tempo menu (set, remove, scale all) | Right-click the ruler's tempo row |
 

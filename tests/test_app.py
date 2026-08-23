@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
+from tkinter import ttk
 from typing import Any
 
 import pytest
@@ -985,6 +986,141 @@ class TestPlayback:
         monkeypatch.setattr(app, "_restartPlayback", lambda: pytest.fail("should not restart"))
         app._liveUpdate(delay=10)
         assert app._replayAfter is None
+
+
+class TestPlayFromAndChangeAll:
+    """Play from here, Change All and Clear restoring instruments."""
+
+    def testBeatStart(self, app: MidiEditorApp) -> None:
+        """Ticks snap to the nearest beat, numbered within the bar."""
+        assert app._beatStart(0) == (0, 1)
+        assert app._beatStart(700) == (480, 2)
+        assert app._beatStart(1900) == (1920, 1)
+        assert app._beatStart(2200) == (2400, 2)
+
+    def testContextMenuOffersPlayFrom(self, app: MidiEditorApp,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        """Right-click anywhere offers bar and beat; on a note the edit items follow."""
+        menus = []
+
+        class FakeMenu:
+            def __init__(self, *a, **k):
+                self.items = []
+                menus.append(self)
+
+            def add_command(self, label, command=None, state="normal"):
+                self.items.append(label)
+
+            def add_separator(self):
+                self.items.append("---")
+
+            def tk_popup(self, x, y):
+                pass
+
+        monkeypatch.setattr("montyroll.app.tk.Menu", FakeMenu)
+        app.onContext(FakeEvent(x=int(3500 * app.ppt), y=3))     # late in bar 2, empty
+        assert menus[-1].items == ["Play from bar 3", "Play from beat 2:4"]
+        note = app.song.notes[0]
+        app.onContext(FakeEvent(*_noteCentre(app, note)))
+        assert menus[-1].items[2:] == ["---", "Delete", "Set Velocity..."]
+        assert app.selection == {note}
+
+    def testPlayFromStartsAtTheTick(self, app: MidiEditorApp,
+                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        """Playback begins at the chosen tick's time, from a slice of the song."""
+        handed: list[Any] = []
+        monkeypatch.setattr(app.player, "play", lambda mf, *a, **k: handed.append(mf) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        monkeypatch.setattr(type(app.player), "playing", property(lambda self: bool(handed)))
+        app.playFrom(1920)
+        assert app.playOffset == pytest.approx(app.song.tickToSeconds(1920))
+        assert handed[0] is not app.song.mf
+        assert "Playing from bar 2:1" in app.status.cget("text")
+        assert app.playBtn.cget("text") == f"{STOP_GLYPH} Stop"
+        app.playFrom(0)                                   # restarts from the top
+        assert len(handed) == 2 and handed[1] is app.song.mf
+        app.stopPlayback()
+
+    def testPlayFromWithoutSynthWarns(self, app: MidiEditorApp,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        """With no synth the same dialog as Play appears."""
+        warned: list[str] = []
+        monkeypatch.setattr("montyroll.app.messagebox.showwarning",
+                            lambda title, msg: warned.append(title))
+        app.playFrom(960)
+        assert warned == ["No usable MIDI synth found"]
+
+    def testChangeAllSkipsTheDrums(self, app: MidiEditorApp) -> None:
+        """Every channel but Ch 10 takes the program; the cards and song follow."""
+        app.changeAll(40)
+        assert app.song.channels[0].program == 40
+        assert app.song.channels[1].program == 40
+        assert app.song.channels[9].program == 0
+        programs = {e.channel: e.data[0] for t in app.song.mf.tracks for e in t
+                    if e.status & 0xF0 == 0xC0}
+        assert programs[0] == 40 and programs[1] == 40
+        assert app.song.dirty
+        assert "set to Violin" in app.status.cget("text")
+
+    def testClearRestoresTheInstruments(self, app: MidiEditorApp) -> None:
+        """Clear puts every program back to what the file was opened with."""
+        assert app.originalPrograms == {0: 0, 1: 73, 2: 0, 9: 0}
+        app.changeAll(40)
+        app.muteVars[0].set(True)
+        app.clearMuteSolo()
+        assert app.song.channels[0].program == 0
+        assert app.song.channels[1].program == 73
+        assert not app.muteVars[0].get()
+        assert "3 instruments restored" in app.status.cget("text")
+        app.clearMuteSolo()
+        assert app.status.cget("text") == "Mutes and solos cleared"
+
+    def testChangeAllDialog(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The dialog applies the chosen program on Change and nothing on Cancel."""
+        applied: list[int] = []
+        monkeypatch.setattr(app, "changeAll", lambda program: applied.append(program))
+        app.changeAllDialog()
+        dialog = [w for w in app.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+        combo = [w for w in dialog.winfo_children() if isinstance(w, ttk.Combobox)][0]
+        combo.set(" 73  Flute")
+        buttons = [w for f in dialog.winfo_children() if isinstance(f, ttk.Frame)
+                   for w in f.winfo_children() if isinstance(w, ttk.Button)]
+        next(b for b in buttons if b.cget("text") == "Change").invoke()
+        app.update()
+        assert applied == [73]
+        assert dialog not in app.winfo_children()
+
+
+    def testInstrumentChangesReachReducedPlayback(self, app: MidiEditorApp,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        """With Reduce on, Change All, a card's instrument and a volume all reach the synth."""
+        handed: list[Any] = []
+        monkeypatch.setattr(app.player, "play", lambda mf, *a, **k: handed.append(mf) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        app.budgetVar.set(8)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app._ensureReducedSong()                  # the cached copy, with the old programs
+
+        def programs(mf: smf.MidiFile) -> dict[int, int]:
+            return {e.channel: e.data[0] for t in mf.tracks for e in t
+                    if e.status & 0xF0 == 0xC0}
+
+        app.changeAll(40)
+        app._startPlayback(0.0)
+        assert programs(handed[-1])[0] == 40 and programs(handed[-1])[1] == 40
+        app._programChanged(1, tk.StringVar(value=" 73  Flute"))
+        app._startPlayback(0.0)
+        assert programs(handed[-1])[1] == 73
+        app._volumeChanged(0, "33")
+        app._startPlayback(0.0)
+        volumes = [e.data[1] for t in handed[-1].tracks for e in t
+                   if e.status == 0xB0 and e.data[0] == 7]
+        assert volumes == [33]
+        app.clearMuteSolo()                        # back to the file's programs
+        app._startPlayback(0.0)
+        assert programs(handed[-1])[0] == 0
+        assert programs(handed[-1])[1] == 73
 
 
 class TestFileOperations:

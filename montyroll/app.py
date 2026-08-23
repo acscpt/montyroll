@@ -186,6 +186,7 @@ class MidiEditorApp(tk.Tk):
         self.soloVars: dict[int, tk.BooleanVar] = {}
         self.channelRows: dict[int, tk.Frame] = {}
         self.activeChannel = 0
+        self.originalPrograms: dict[int, int] = {}   # per channel, as the file was opened
 
         # View geometry and the drag in progress, if any.
         self.zoomX = 60.0            # pixels per quarter note
@@ -393,9 +394,14 @@ class MidiEditorApp(tk.Tk):
         b = ttk.Button(head, text="Mute All", width=8, command=self.muteAll)
         b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Mute every channel")
+        b = ttk.Button(head, text="Change All", width=10, command=self.changeAllDialog)
+        b.pack(side="right", padx=(2, 0))
+        Tooltip(b, "Set every channel's instrument to one GM program\n"
+                   "(Ch 10, the percussion channel, is left alone)")
         b = ttk.Button(head, text="Clear", width=6, command=self.clearMuteSolo)
         b.pack(side="right")
-        Tooltip(b, "Clear all mutes and solos")
+        Tooltip(b, "Clear all mutes and solos and restore the\n"
+                   "instruments the file was opened with")
 
         # Reduce panel, packed at the bottom before the strip so the strip
         # gives way to it rather than pushing it off the window.
@@ -739,9 +745,11 @@ class MidiEditorApp(tk.Tk):
         self.muteVars.clear()
         self.soloVars.clear()
 
-        # New notes go to the lowest channel the file uses.
+        # New notes go to the lowest channel the file uses, and Clear can put
+        # the instruments back to what the file was opened with.
         chans = sorted(self.song.channels)
         self.activeChannel = chans[0] if chans else 0
+        self.originalPrograms = {ch: info.program for ch, info in self.song.channels.items()}
         self._buildChannelRows()
         self.redraw()
         self._fillEvents()
@@ -935,13 +943,86 @@ class MidiEditorApp(tk.Tk):
         self._setStatus("All channels muted")
 
     def clearMuteSolo(self):
-        """Clear every mute and solo, redraw and restart the synth if playing."""
+        """Clear every mute and solo and put the instruments back as opened.
+
+        Redraws, rebuilds the channel strip when an instrument changed, and
+        restarts the synth if playing.
+        """
         for var in list(self.muteVars.values()) + list(self.soloVars.values()):
             var.set(False)
 
+        restored = 0
+
+        for ch, program in self.originalPrograms.items():
+            info = self.song.channels.get(ch)
+
+            if info is not None and info.program != program:
+                self.song.setProgram(ch, program)
+                restored += 1
+
+        if restored:
+            self._markDirty()
+            self._invalidateReducedSong()
+            self._buildChannelRows()
+
         self.redraw()
         self._liveUpdate()
-        self._setStatus("Mutes and solos cleared")
+        message = "Mutes and solos cleared"
+
+        if restored:
+            message += f", {restored} instrument{'s' if restored != 1 else ''} restored"
+
+        self._setStatus(message)
+
+    def changeAllDialog(self):
+        """Set every channel's instrument to one GM program, leaving Ch 10 alone."""
+        names = [f"{i:3d}  {n}" for i, n in enumerate(gm.GM_PROGRAMS)]
+        dialog = tk.Toplevel(self)
+        dialog.title("Change all instruments")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        ttk.Label(dialog, text="Instrument for every channel except Ch 10:").pack(
+            padx=12, pady=(12, 4), anchor="w")
+        choice = tk.StringVar(value=names[0])
+        combo = ttk.Combobox(dialog, textvariable=choice, values=names, state="readonly",
+                             width=32)
+        combo.pack(padx=12, pady=4)
+        buttons = ttk.Frame(dialog)
+        buttons.pack(padx=12, pady=(4, 12), fill="x")
+
+        def apply():
+            dialog.destroy()
+            self.changeAll(int(choice.get().split()[0]))
+
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right")
+        ttk.Button(buttons, text="Change", command=apply).pack(side="right", padx=(0, 6))
+        dialog.bind("<Return>", lambda e: apply())
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.grab_set()
+        combo.focus_set()
+
+    def changeAll(self, program: int):
+        """Write one program to every channel with notes except Ch 10.
+
+        Args:
+            program: the GM program number.
+        """
+        changed = 0
+
+        for ch in sorted(self.song.channels):
+            if ch != model.DRUM_CHANNEL and self.song.channels[ch].program != program:
+                self.song.setProgram(ch, program)
+                changed += 1
+
+        if changed:
+            self._markDirty()
+            self._invalidateReducedSong()
+            self._buildChannelRows()
+            self.redraw()
+            self._liveUpdate()
+
+        self._setStatus(f"{changed} channel{'s' if changed != 1 else ''} set to "
+                        f"{gm.programName(program)}")
 
     def _previewChannel(self, ch: int):
         """Play a short sample of the channel's instrument on that channel.
@@ -1037,6 +1118,7 @@ class MidiEditorApp(tk.Tk):
         program = int(var.get().split()[0])
         self.song.setProgram(ch, program)
         self._markDirty()
+        self._invalidateReducedSong()
         self._setStatus(f"Ch {ch + 1} {ARROW} {gm.programName(program)}")
         self._liveUpdate()
 
@@ -1058,6 +1140,7 @@ class MidiEditorApp(tk.Tk):
 
         self.song.setVolume(ch, value)
         self._markDirty()
+        self._invalidateReducedSong()
         self._liveUpdate()
         self._setStatus(f"Ch {ch + 1} volume {value}")
 
@@ -1747,6 +1830,16 @@ class MidiEditorApp(tk.Tk):
 
         return self.reduction
 
+    def _invalidateReducedSong(self):
+        """Discard the playable copy of the reduction after a channel event edit.
+
+        Programs and controllers are copied into that file when it is built,
+        so an instrument or volume change must rebuild it; the reduction
+        itself (which notes sound on which voice) is unaffected.
+        """
+        self.reducedSong = None
+        self.reports["reduced"] = None
+
     def _ensureReducedSong(self) -> model.Song:
         """Return the reduced song as a playable Song, building it if needed.
 
@@ -1818,6 +1911,21 @@ class MidiEditorApp(tk.Tk):
         barLen = self.song.mf.division * 4 * num // den
         index = max(0, int(round(tick / barLen)))
         snapped = (index * barLen, index + 1)
+        return snapped
+
+    def _beatStart(self, tick: float) -> tuple[int, int]:
+        """Snap a tick to the nearest beat line.
+
+        Args:
+            tick: absolute tick.
+
+        Returns:
+            tuple[int, int]: (tick of the beat line, 1-based beat within its bar).
+        """
+        num, den = self.song.timeSigs[0][1], self.song.timeSigs[0][2]
+        beatLen = self.song.mf.division * 4 // den
+        index = max(0, int(round(tick / beatLen)))
+        snapped = (index * beatLen, index % num + 1)
         return snapped
 
     def _applyTempo(self, tick: int, bpm: float):
@@ -2131,19 +2239,29 @@ class MidiEditorApp(tk.Tk):
         """
         x, y = self._eventPos(event)
         note = self._noteAt(x, y)
+        tick = max(0, x / self.ppt)
+        menu = tk.Menu(self, tearoff=0)
 
-        if note is None:
-            return
+        # Play from the bar or the beat under the pointer, whatever was
+        # clicked.
+        barTick, bar = self._barStart(tick)
+        beatTick, _ = self._beatStart(tick)
+        beatBar, beat = self.song.barBeat(beatTick)
+        menu.add_command(label=f"Play from bar {bar}", command=lambda: self.playFrom(barTick))
+        menu.add_command(label=f"Play from beat {beatBar}:{beat}",
+                         command=lambda: self.playFrom(beatTick))
 
         # A right-click on a note outside the selection selects it alone; on
         # a selected note the menu acts on the whole selection.
-        if note not in self.selection:
-            self.selection = {note}
-            self._applySelectionStyle()
+        if note is not None:
+            if note not in self.selection:
+                self.selection = {note}
+                self._applySelectionStyle()
 
-        menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Delete", command=self.deleteSelection)
-        menu.add_command(label="Set Velocity...", command=self.setVelocityDialog)
+            menu.add_separator()
+            menu.add_command(label="Delete", command=self.deleteSelection)
+            menu.add_command(label="Set Velocity...", command=self.setVelocityDialog)
+
         menu.tk_popup(event.x_root, event.y_root)
 
     def onMotion(self, event):
@@ -2285,6 +2403,24 @@ class MidiEditorApp(tk.Tk):
         # Start the cursor loop; it reschedules itself and stops playback
         # when the song ends or the synth exits.
         self._setStatus(f"Playing via {player.findPlayer()[0]}")
+        self.playBtn.config(text=f"{STOP_GLYPH} Stop")
+        self._tickCursor()
+
+    def playFrom(self, tick: int):
+        """Start playback at a tick, stopping anything already playing.
+
+        Args:
+            tick: absolute tick to start from.
+        """
+        if self.player.playing:
+            self.stopPlayback()
+
+        if not self._startPlayback(self.song.tickToSeconds(tick)):
+            self.togglePlay()         # shows the no-synth dialog
+            return
+
+        bar, beat = self.song.barBeat(tick)
+        self._setStatus(f"Playing from bar {bar}:{beat} via {player.findPlayer()[0]}")
         self.playBtn.config(text=f"{STOP_GLYPH} Stop")
         self._tickCursor()
 

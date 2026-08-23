@@ -8,6 +8,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ### Added
 
+- **Play from here**: right-click the piano roll for Play from the nearest bar or from the nearest beat. **Change All** beside the channel strip's header sets every channel's instrument to one GM program, leaving Ch 10 alone, and **Clear** now also restores the instruments the file was opened with.
+
 - **Report tab** with the file's analysis as text: voices sounding at once in the three counting modes, how many instruments play together and for what share of the piece, per-channel figures, doubling, the channel pairs that least and most coincide, and the busiest bars; with a Save button. The playback cursor now runs on the demand strip as well as the roll.
 
 - **Voice reduction.** A Reduce panel under the channel strip reduces the song to the voice budget: unison and octave doublings folded, optional tremolo merge, legato, top-line and chord thinning per pool, then allocation to the budget's voices with the weakest note stolen when they run out, where a note's weight comes from its channel priority, velocity, place in its part's texture and whether it doubles another part. The roll draws dropped and cut notes stippled, the demand strip follows the reduced song, Play auditions it, and File > Save Reduced As writes it out; the original is never modified. New module `reduce.py`.

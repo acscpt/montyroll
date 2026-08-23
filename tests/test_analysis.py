@@ -200,8 +200,12 @@ class TestLocalFiles:
         assert d.octave / d.total == pytest.approx(0.274, abs=0.002)
 
     def testDanubeDemand(self) -> None:
-        """The retempo'd Danube: half of all note-time is cross-channel unison."""
-        demand = analysis.sweep(_localSong("blue-danube-1-retempo.mid"))
+        """The Danube transcription: half of all note-time is cross-channel unison.
+
+        The untouched single-tempo file is used; a retempo'd working copy
+        changes the seconds-weighted figures as its tempo track is edited.
+        """
+        demand = analysis.sweep(_localSong("blue-danube-1.mid"))
         raw = analysis.stats(demand.raw, demand.seconds)
         pitches = analysis.stats(demand.pitches, demand.seconds)
         assert (raw.peak, pitches.peak) == (32, 15)
