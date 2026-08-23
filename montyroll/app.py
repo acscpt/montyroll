@@ -260,6 +260,9 @@ class MidiEditorApp(tk.Tk):
         em.add_command(label="Select All", accelerator="Ctrl+A", command=self.selectAll)
         em.add_command(label="Delete Selection", accelerator="Del", command=self.deleteSelection)
         em.add_command(label="Set Velocity...", command=self.setVelocityDialog)
+        em.add_separator()
+        em.add_command(label="Set Tempo at Bar...", command=self.setTempoDialog)
+        em.add_command(label="Scale All Tempos...", command=self.scaleTemposDialog)
         m.add_cascade(label="Edit", menu=em)
 
         # Closing the window goes through the same unsaved-changes check as
@@ -540,6 +543,8 @@ class MidiEditorApp(tk.Tk):
         self.canvas.bind("<ButtonRelease-1>", self.onRelease)
         self.canvas.bind("<Double-Button-1>", self.onDouble)
         self.canvas.bind("<Button-3>", self.onContext)
+        self.ruler.bind("<Double-Button-1>", self.onRulerDouble)
+        self.ruler.bind("<Button-3>", self.onRulerContext)
         self.canvas.bind("<Motion>", self.onMotion)
 
         for w in (self.canvas, self.keys, self.ruler, self.demandCanvas):
@@ -704,9 +709,11 @@ class MidiEditorApp(tk.Tk):
         self.redraw()
         self._fillEvents()
         self._updateTitle()
+        self._updateSummary()
 
-        # Toolbar file summary: name, format, tracks, resolution, time
-        # signature, starting tempo, note count and duration.
+    def _updateSummary(self):
+        """Refresh the toolbar file summary: name, format, tracks, resolution,
+        time signature, starting tempo, note count and duration."""
         s = self.song
         name = s.path.rsplit("/", 1)[-1] if s.path else "untitled"
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
@@ -1095,6 +1102,23 @@ class MidiEditorApp(tk.Tk):
             c.create_line(x, 0, x, height,
                           fill="#3d3d48" if is_bar else "#26262e")
             t += beat
+
+        # Tempo changes as lines down the roll in the ruler's tempo colour,
+        # collapsing runs of the same bpm as the ruler does, so a file with
+        # hundreds of tempo events is not a picket fence.
+        lastBpm = None
+
+        for tick, uspb, _sec in s.tempoMap:
+            bpm = round(60e6 / uspb, 1)
+
+            if bpm == lastBpm:
+                continue
+
+            lastBpm = bpm
+
+            if tick > 0:
+                x = tick * self.ppt
+                c.create_line(x, 0, x, height, fill="#a04848", dash=(6, 4), tags="tempo")
 
         # Notes: brighter with velocity on audible channels, flat grey on
         # muted ones so the mute/solo state shows in the roll. Both maps are
@@ -1674,6 +1698,136 @@ class MidiEditorApp(tk.Tk):
         if path:
             smf.write(reduce.toMidiFile(self.song, self._ensureReduction()), path)
             self._setStatus(f"Saved reduced song to {path}")
+
+    # -------------------------------------------------------------- tempo
+    def _barStart(self, tick: float) -> tuple[int, int]:
+        """Snap a tick to the nearest bar line.
+
+        Args:
+            tick: absolute tick.
+
+        Returns:
+            tuple[int, int]: (tick of the bar line, 1-based bar number).
+        """
+        num, den = self.song.timeSigs[0][1], self.song.timeSigs[0][2]
+        barLen = self.song.mf.division * 4 * num // den
+        index = max(0, int(round(tick / barLen)))
+        snapped = (index * barLen, index + 1)
+        return snapped
+
+    def _applyTempo(self, tick: int, bpm: float):
+        """Set a tempo and refresh everything that depends on timing.
+
+        Args:
+            tick: absolute tick of the change.
+            bpm: the new tempo.
+        """
+        self.song.setTempo(tick, bpm)
+        self._afterTempoEdit(f"Tempo {bpm:g} bpm from bar {self._barStart(tick)[1]}")
+
+    def _afterTempoEdit(self, message: str):
+        """Redraw after the tempo map changed and restart playback if running.
+
+        Args:
+            message: status bar text.
+        """
+        self._markDirty()
+        self._invalidateDemand()
+        self.redraw()
+        self._fillEvents()
+        self._updateSummary()
+        self._setStatus(message)
+        self._liveUpdate()
+
+    def _askTempo(self, tick: int) -> None:
+        """Ask for a tempo at a bar and apply it.
+
+        Args:
+            tick: the bar line's tick.
+        """
+        bar = self._barStart(tick)[1]
+        current = self.song.tempoAt(tick)
+        bpm = simpledialog.askfloat("Tempo", f"Tempo from bar {bar} (bpm):",
+                                    initialvalue=round(current, 1), minvalue=4,
+                                    maxvalue=1000, parent=self)
+
+        if bpm is not None:
+            self._applyTempo(tick, bpm)
+
+    def setTempoDialog(self):
+        """Edit menu: ask for a bar number, then the tempo from that bar."""
+        lastBar = self.song.barBeat(self.song.maxTick)[0]
+        bar = simpledialog.askinteger("Tempo", f"Bar number (1 to {lastBar}):",
+                                      initialvalue=1, minvalue=1, maxvalue=lastBar,
+                                      parent=self)
+
+        if bar is not None:
+            num, den = self.song.timeSigs[0][1], self.song.timeSigs[0][2]
+            barLen = self.song.mf.division * 4 * num // den
+            self._askTempo((bar - 1) * barLen)
+
+    def scaleTemposDialog(self):
+        """Edit menu: multiply every tempo in the file by a percentage."""
+        percent = simpledialog.askfloat("Scale tempos", "Scale every tempo by (%):",
+                                        initialvalue=100.0, minvalue=1, maxvalue=10000,
+                                        parent=self)
+
+        if percent is not None and percent != 100.0:
+            self.song.scaleTempos(percent / 100)
+            self._afterTempoEdit(f"Tempos scaled by {percent:g}%")
+
+    def _rulerTempoRow(self, event) -> bool:
+        """Report whether a ruler event lies on the tempo and marker row.
+
+        Args:
+            event: `y` within the ruler.
+
+        Returns:
+            bool: True on the tempo and marker row (the third of the four).
+        """
+        onRow = self.rulerRows[2] <= event.y < self.rulerRows[3]
+        return onRow
+
+    def onRulerDouble(self, event):
+        """Double-click on the ruler's tempo row: set the tempo from that bar.
+
+        Args:
+            event: `x` and `y` within the ruler.
+        """
+        if not self._rulerTempoRow(event):
+            return
+
+        tick = self._barStart(self.ruler.canvasx(event.x) / self.ppt)[0]
+        self._askTempo(tick)
+
+    def onRulerContext(self, event):
+        """Right-click on the ruler's tempo row: the tempo menu for that bar.
+
+        Args:
+            event: `x`, `y`, `x_root` and `y_root`.
+        """
+        if not self._rulerTempoRow(event):
+            return
+
+        tick, bar = self._barStart(self.ruler.canvasx(event.x) / self.ppt)
+        hasEvent = any(t == tick for t, _, _ in self.song.tempoMap) and tick > 0
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label=f"Set tempo from bar {bar}...", command=lambda: self._askTempo(tick))
+        menu.add_command(label=f"Remove tempo change at bar {bar}",
+                         state="normal" if hasEvent else "disabled",
+                         command=lambda: self._removeTempo(tick))
+        menu.add_separator()
+        menu.add_command(label="Scale all tempos...", command=self.scaleTemposDialog)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _removeTempo(self, tick: int):
+        """Remove the tempo change at a bar line.
+
+        Args:
+            tick: the bar line's tick.
+        """
+        if self.song.removeTempo(tick):
+            self._afterTempoEdit(f"Tempo change at bar {self._barStart(tick)[1]} removed")
 
     # ---------------------------------------------------------- interaction
     def _eventPos(self, event) -> tuple[float, float]:
