@@ -23,7 +23,7 @@ from bisect import bisect_right
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 
-from . import analysis, gm, model, player, smf
+from . import analysis, gm, model, player, reduce, smf
 
 CHANNEL_COLORS = [
     "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
@@ -208,6 +208,20 @@ class MidiEditorApp(tk.Tk):
         self.demand: analysis.Demand | None = None
         self.chords: list[tuple[int, int, str]] | None = None
         self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
+
+        # Reduction: the plan's switches live in these variables, the result
+        # is cached beside the demand, and the roll, strip and playback all
+        # read the reduction instead of the song while reduceVar is on.
+        self.reduceVar = tk.BooleanVar(value=False)
+        self.dedupUnisonVar = tk.BooleanVar(value=True)
+        self.dedupOctaveVar = tk.BooleanVar(value=False)
+        self.monoTopVar = tk.BooleanVar(value=False)
+        self.tremoloVar = tk.IntVar(value=0)
+        self.legatoVar = tk.IntVar(value=0)
+        self.maxChordVar = tk.IntVar(value=0)
+        self.priorityVars: dict[int, tk.DoubleVar] = {}
+        self.reduction: reduce.Reduction | None = None
+        self.reducedSong: model.Song | None = None
         self._demandAfter: str | None = None
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
 
@@ -237,6 +251,7 @@ class MidiEditorApp(tk.Tk):
         fm.add_command(label="Open...", accelerator="Ctrl+O", command=self.openDialog)
         fm.add_command(label="Save", accelerator="Ctrl+S", command=self.save)
         fm.add_command(label="Save As...", command=self.saveAs)
+        fm.add_command(label="Save Reduced As...", command=self.saveReducedAs)
         fm.add_separator()
         fm.add_command(label="Quit", command=self.onClose)
         m.add_cascade(label="File", menu=fm)
@@ -376,6 +391,10 @@ class MidiEditorApp(tk.Tk):
         b.pack(side="right")
         Tooltip(b, "Clear all mutes and solos")
 
+        # Reduce panel, packed at the bottom before the strip so the strip
+        # gives way to it rather than pushing it off the window.
+        self._buildReducePanel(left)
+
         # Scrollable strip: the cards live in chanHolder, which is embedded in
         # chanCanvas through create_window. The holder's <Configure> keeps the
         # scrollregion in step with the cards' total height, and the canvas's
@@ -469,9 +488,9 @@ class MidiEditorApp(tk.Tk):
         ttk.Label(gutter, text="Voices", font=("TkDefaultFont", 7)).pack(pady=(4, 0))
         self.budgetSpin = ttk.Spinbox(gutter, from_=1, to=64, width=3,
                                       textvariable=self.budgetVar,
-                                      command=self._scheduleDemand)
+                                      command=self._reductionChanged)
         self.budgetSpin.pack()
-        self.budgetSpin.bind("<KeyRelease>", lambda e: self._scheduleDemand())
+        self.budgetSpin.bind("<KeyRelease>", lambda e: self._reductionChanged())
         Tooltip(gutter, "Voice budget: the line on the demand strip.\n"
                 "Where the stack crosses it, notes would have to go.")
         self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg="#202026",
@@ -667,6 +686,9 @@ class MidiEditorApp(tk.Tk):
         self.playStart = None
         self.demand = None
         self.chords = None
+        self.reduction = None
+        self.reducedSong = None
+        self.priorityVars.clear()
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
 
         # Selection and mute/solo variables refer to the old song's notes and
@@ -825,7 +847,16 @@ class MidiEditorApp(tk.Tk):
                          f"plays {figure.fraction:.0%}")
                 ul = tk.Label(row, text=usage, anchor="w", font=("TkDefaultFont", 8),
                               fg="#555")
-                ul.pack(fill="x", padx=(22, 0))
+                ul.pack(side="left", padx=(22, 0))
+
+                # Priority: how hard the reduction tries to keep this channel.
+                var = self.priorityVars.setdefault(ch, tk.DoubleVar(value=1.0))
+                pr = ttk.Spinbox(row, from_=0.5, to=5.0, increment=0.5, width=4,
+                                 textvariable=var, command=self._reductionChanged)
+                pr.pack(side="right", padx=(0, 6))
+                pr.bind("<KeyRelease>", lambda e: self._reductionChanged())
+                Tooltip(pr, "Reduction priority: 1 is neutral, higher keeps\n"
+                            "this channel's notes at the expense of others")
                 Tooltip(ul, "Voice demand: most notes at once, average while\n"
                             "sounding, and how much of the piece the channel plays")
 
@@ -1069,10 +1100,14 @@ class MidiEditorApp(tk.Tk):
         # muted ones so the mute/solo state shows in the roll. Both maps are
         # filled here so hit-testing and dragging can find the items.
         audible = self._audibleChannels()
+        reduction = self._ensureReduction() if self.reduceVar.get() else None
+        segments: dict[int, list[reduce.Placed]] = {}
+
+        if reduction is not None:
+            for placed in reduction.placed:
+                segments.setdefault(id(placed.note), []).append(placed)
 
         for note in s.notes:
-            x1 = note.start * self.ppt
-            x2 = max(note.end * self.ppt, x1 + 2)
             y1 = (127 - note.pitch) * self.rowH + 1
             y2 = y1 + self.rowH - 2
             base = CHANNEL_COLORS[note.channel]
@@ -1083,10 +1118,34 @@ class MidiEditorApp(tk.Tk):
             else:
                 fill, outline = "#3a3a40", "#2c2c31"
 
-            item = c.create_rectangle(x1, y1, x2, y2, fill=fill,
-                                      outline=outline, tags="note")
-            self.itemToNote[item] = note
-            self.noteToItem[id(note)] = item
+            # With the reduction on, a note is drawn as the segments that
+            # sound, over a stippled ghost of its original extent wherever
+            # it was dropped or cut; otherwise as itself.
+            if reduction is None:
+                spans = [(note.start, note.end)]
+                ghost = False
+            else:
+                spans = [(p.start, p.end) for p in segments.get(id(note), [])]
+                ghost = not spans or reduction.isDropped(note) or id(note) in reduction.cut
+
+            if ghost:
+                x1 = note.start * self.ppt
+                x2 = max(note.end * self.ppt, x1 + 2)
+                item = c.create_rectangle(x1, y1, x2, y2, fill=_shade(base, 0.5),
+                                          stipple="gray25", outline=_shade(base, 0.3),
+                                          tags="note")
+                self.itemToNote[item] = note
+                self.noteToItem[id(note)] = item
+
+            for start, end in spans:
+                x1 = start * self.ppt
+                x2 = max(end * self.ppt, x1 + 2)
+                item = c.create_rectangle(x1, y1, x2, y2, fill=fill,
+                                          outline=outline, tags="note")
+                self.itemToNote[item] = note
+
+                if not ghost:
+                    self.noteToItem[id(note)] = item
 
         # Selection outlines, then the ruler and keys at the same width and
         # height as the roll so they scroll in step with it.
@@ -1278,14 +1337,19 @@ class MidiEditorApp(tk.Tk):
             analysis.Demand: the sweep of the current song.
         """
         if self.demand is None:
-            self.demand = analysis.sweep(self.song)
+            if self.reduceVar.get():
+                self.demand = analysis.sweep(self.song, self._ensureReduction().placed)
+            else:
+                self.demand = analysis.sweep(self.song)
 
         return self.demand
 
     def _invalidateDemand(self):
-        """Forget the sweep and the chords after an edit and queue a redraw."""
+        """Forget the sweep, the chords and the reduction after an edit."""
         self.demand = None
         self.chords = None
+        self.reduction = None
+        self.reducedSong = None
         self._scheduleDemand()
 
     def _ensureChords(self) -> list[tuple[int, int, str]]:
@@ -1472,6 +1536,144 @@ class MidiEditorApp(tk.Tk):
         excess = f"   over by {over}" if over > 0 else ""
         self._setStatus(f"bar {bar}:{beat}  {secs:6.2f}s   voices {raw} | pitches {pitches} "
                         f"| classes {classes}{excess}   {busiest}")
+
+    # ----------------------------------------------------------- reduction
+    def _buildReducePanel(self, parent: ttk.Frame):
+        """Create the reduction controls under the channel strip.
+
+        Args:
+            parent: the left column frame.
+        """
+        panel = ttk.LabelFrame(parent, text="Reduce", padding=(6, 2))
+        panel.pack(side="bottom", fill="x", padx=4, pady=(0, 4))
+        top = ttk.Frame(panel)
+        top.pack(fill="x")
+        cb = ttk.Checkbutton(top, text="Reduce to the voice budget", variable=self.reduceVar,
+                             command=self._reductionChanged)
+        cb.pack(side="left")
+        Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
+                    "Dropped notes are stippled; the file is not changed.")
+        self.lossLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8))
+        self.lossLbl.pack(fill="x", pady=(2, 0))
+
+        # Transform switches, each one a pool setting.
+        switches = ttk.Frame(panel)
+        switches.pack(fill="x")
+
+        for text, var, tip in (
+                ("Merge unisons", self.dedupUnisonVar,
+                 "The same pitch struck together on two parts costs one voice"),
+                ("Fold octaves", self.dedupOctaveVar,
+                 "An octave doubling struck together with its note is dropped"),
+                ("Top line", self.monoTopVar,
+                 "Each channel keeps only its highest sounding note")):
+            w = ttk.Checkbutton(switches, text=text, variable=var,
+                                command=self._reductionChanged)
+            w.pack(side="left", padx=(0, 6))
+            Tooltip(w, tip)
+
+        gaps = ttk.Frame(panel)
+        gaps.pack(fill="x", pady=(2, 0))
+
+        for text, var, limit, tip in (
+                ("Tremolo", self.tremoloVar, 480,
+                 "Ticks: a pitch re-struck within this gap continues; 0 is off"),
+                ("Legato", self.legatoVar, 960,
+                 "Ticks: a note reaches the next onset within this gap; 0 is off"),
+                ("Chord", self.maxChordVar, 8,
+                 "Notes kept per chord on a channel, outer voices first; 0 is all")):
+            ttk.Label(gaps, text=text, font=("TkDefaultFont", 8)).pack(side="left")
+            sp = ttk.Spinbox(gaps, from_=0, to=limit, width=4, textvariable=var,
+                             command=self._reductionChanged)
+            sp.pack(side="left", padx=(2, 8))
+            sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
+            Tooltip(sp, tip)
+
+    def _currentPlan(self) -> reduce.Plan:
+        """Build the plan from the controls: one pool of every channel with notes.
+
+        Returns:
+            reduce.Plan: the plan.
+        """
+        plan = reduce.Plan.single(self.song, max(1, self.budgetVar.get()),
+                                  dedupUnison=self.dedupUnisonVar.get(),
+                                  dedupOctave=self.dedupOctaveVar.get(),
+                                  tremoloGap=max(0, self.tremoloVar.get()),
+                                  legatoGap=max(0, self.legatoVar.get()),
+                                  monoTop=self.monoTopVar.get(),
+                                  maxChord=max(0, self.maxChordVar.get()))
+
+        for ch, var in self.priorityVars.items():
+            plan.priority[ch] = max(0.1, var.get())
+
+        return plan
+
+    def _ensureReduction(self) -> reduce.Reduction:
+        """Return the reduction for the current plan, computing it if needed.
+
+        Returns:
+            reduce.Reduction: the result.
+        """
+        if self.reduction is None:
+            self.reduction = reduce.reduce(self.song, self._currentPlan())
+            self.reducedSong = None
+            self._showLoss(self.reduction)
+
+        return self.reduction
+
+    def _ensureReducedSong(self) -> model.Song:
+        """Return the reduced song as a playable Song, building it if needed.
+
+        Returns:
+            model.Song: a song over the reduced file, for slicing.
+        """
+        if self.reducedSong is None:
+            self.reducedSong = model.Song(reduce.toMidiFile(self.song, self._ensureReduction()))
+
+        return self.reducedSong
+
+    def _showLoss(self, reduction: reduce.Reduction):
+        """Put the reduction's totals on the panel label.
+
+        Args:
+            reduction: the result to describe.
+        """
+        total = len(self.song.notes)
+        dropped = len(reduction.dropped)
+        reasons: dict[str, int] = {}
+
+        for reason in reduction.dropped.values():
+            reasons[reason] = reasons.get(reason, 0) + 1
+
+        detail = ", ".join(f"{n} {reason}" for reason, n in sorted(reasons.items(),
+                                                                   key=lambda kv: -kv[1]))
+        self.lossLbl.config(text=(f"kept {total - dropped} of {total} notes, {len(reduction.cut)}"
+                                  f" cut, loss {reduction.loss:,.0f}\n{detail}"))
+
+    def _reductionChanged(self):
+        """A reduction control changed: recompute and redraw what depends on it."""
+        self.reduction = None
+        self.reducedSong = None
+        self.demand = None
+
+        if self.reduceVar.get():
+            self.redraw()
+        else:
+            self.lossLbl.config(text="")
+            self._scheduleDemand()
+
+        if self.playStart is not None:
+            self._liveUpdate()
+
+    def saveReducedAs(self):
+        """Write the reduced song to a new file; the original is untouched."""
+        path = filedialog.asksaveasfilename(
+            title="Save the reduced song", defaultextension=".mid",
+            filetypes=[("MIDI files", "*.mid *.midi"), ("All files", "*")])
+
+        if path:
+            smf.write(reduce.toMidiFile(self.song, self._ensureReduction()), path)
+            self._setStatus(f"Saved reduced song to {path}")
 
     # ---------------------------------------------------------- interaction
     def _eventPos(self, event) -> tuple[float, float]:
@@ -1839,7 +2041,8 @@ class MidiEditorApp(tk.Tk):
         # buildSlice re-emits the tempo, programs, controllers and pitch bend
         # in force at start_tick, so a mid-song start sounds right.
         start_tick = int(self.song.secondsToTick(offset_sec)) if offset_sec > 0 else 0
-        mf = self.song.buildSlice(start_tick)
+        source = self._ensureReducedSong() if self.reduceVar.get() else self.song
+        mf = source.buildSlice(start_tick)
         speed = self.speedVar.get() / 100
 
         # Mute/solo, master volume and speed are applied to the playback copy

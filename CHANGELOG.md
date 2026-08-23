@@ -8,6 +8,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ### Added
 
+- **Voice reduction.** A Reduce panel under the channel strip reduces the song to the voice budget: unison and octave doublings folded, optional tremolo merge, legato, top-line and chord thinning per pool, then allocation to the budget's voices with the weakest note stolen when they run out, where a note's weight comes from its channel priority, velocity, place in its part's texture and whether it doubles another part. The roll draws dropped and cut notes stippled, the demand strip follows the reduced song, Play auditions it, and File > Save Reduced As writes it out; the original is never modified. New module `reduce.py`.
+
 - **Chord and key analysis.** The ruler gains a fourth row naming the chord in each beat (triads, sevenths and suspensions matched against a duration-weighted pitch-class profile, with the bass note settling fuller chords and a one-beat island absorbed between two runs of the same chord); the status bar names the chord under the pointer; the toolbar summary ends with the file's estimated key, from Krumhansl-Kessler profile correlation.
 
 - **Voice-demand strip** under the piano roll, showing how many notes sound at once stacked per channel, the distinct-pitch and pitch-class counts over it, and a voice budget line, with the counts reported in the status bar on hover and each channel card carrying its peak, mean and share of the piece. The figures come from a new `analysis.py`, a sweep over the song's notes that also measures unison and octave doubling and how much of the piece each pair of channels sounds together.

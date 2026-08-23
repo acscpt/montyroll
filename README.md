@@ -79,6 +79,16 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 
 - Saving re-serialises the original tracks, so any event the editor does not understand is written back unchanged.
 
+**Reduce**
+
+- Reduce the song to the voice budget set on the demand strip: every note scored by what is lost without it (priority, velocity, whether it is the top or bass of its part, whether it doubles another part), and when the budget is full the weakest note playing gives way.
+
+- Per-pool transforms before any stealing: merge unisons (on by default), fold octave doublings, continue tremolo re-strikes within a gap, legato to the next onset within a gap, keep only the top line, thin chords to a number of notes.
+
+- A priority per channel on its card, to keep one part at the expense of others.
+
+- The roll shows the result with dropped and cut notes stippled, the strip shows the reduced demand, the panel reports what was kept, cut and lost, and Play auditions the reduced song. The file on disk is never changed; Save Reduced As writes the result to a new file.
+
 **Listen**
 
 - Play and stop from the toolbar or `Space`, with a cursor that follows the file's tempo map and auto-scrolls the roll.

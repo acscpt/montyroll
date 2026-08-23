@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
-from montyroll import model, player, smf
+from montyroll import analysis, model, player, smf
 from montyroll.app import (
     DEMAND_MAX_H,
     DEMAND_MIN_H,
@@ -576,6 +576,123 @@ class TestTonal:
         rebuilt = app._ensureChords()
         assert rebuilt is not first
         assert all(name == "N.C." for _, _, name in rebuilt)
+
+
+class TestReduction:
+    """The Reduce panel, the reduced roll, playback and Save Reduced As."""
+
+    def _stippled(self, app: MidiEditorApp) -> list[int]:
+        """Canvas items drawn as ghosts."""
+        items = [i for i in app.canvas.find_withtag("note")
+                 if app.canvas.itemcget(i, "stipple") == "gray25"]
+        return items
+
+    def testOffByDefault(self, app: MidiEditorApp) -> None:
+        """With the reduction off the roll is the song and nothing is computed."""
+        assert not app.reduceVar.get()
+        assert app.reduction is None
+        assert self._stippled(app) == []
+        assert app.lossLbl.cget("text") == ""
+
+    def testReducingDrawsGhosts(self, app: MidiEditorApp) -> None:
+        """At one voice most notes are dropped and drawn stippled; the label reports it."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app.update()
+        ghosts = self._stippled(app)
+        assert ghosts
+        assert len(ghosts) == len(app.reduction.dropped) + len(app.reduction.cut)
+        assert app.lossLbl.cget("text").startswith("kept ")
+        assert "no voice" in app.lossLbl.cget("text")
+        assert all(app.itemToNote[i] in app.song.notes for i in ghosts)
+
+    def testStripFollowsTheReduction(self, app: MidiEditorApp) -> None:
+        """The demand strip sweeps the reduced notes, so it never exceeds the budget."""
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        assert app._ensureDemand().peak <= 2
+        app.reduceVar.set(False)
+        app._reductionChanged()
+        assert app._ensureDemand().peak > 2
+
+    def testControlsRebuildThePlan(self, app: MidiEditorApp) -> None:
+        """Every switch and gap ends up in the plan's pool; priorities too."""
+        app.dedupOctaveVar.set(True)
+        app.monoTopVar.set(True)
+        app.tremoloVar.set(8)
+        app.legatoVar.set(120)
+        app.maxChordVar.set(3)
+        app.priorityVars[0].set(2.5)
+        pool = app._currentPlan().pools[0]
+        assert (pool.dedupOctave, pool.monoTop, pool.tremoloGap, pool.legatoGap,
+                pool.maxChord) == (True, True, 8, 120, 3)
+        assert app._currentPlan().priorityOf(0) == 2.5
+        assert pool.voices == app.budgetVar.get()
+
+    def testPriorityMovesTheLoss(self, app: MidiEditorApp) -> None:
+        """Raising a channel's priority keeps more of its notes."""
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        before = sum(1 for n in app.song.notes if n.channel == 1 and app.reduction.isDropped(n))
+        app.priorityVars[1].set(5.0)
+        app._reductionChanged()
+        after = sum(1 for n in app.song.notes if n.channel == 1 and app.reduction.isDropped(n))
+        assert after < before
+
+    def testEditsInvalidateTheReduction(self, app: MidiEditorApp) -> None:
+        """Deleting notes while reducing recomputes against the new song."""
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        first = app.reduction
+        app.selectAll()
+        app.deleteSelection()
+        app.update()
+        assert app._ensureReduction() is not first
+        assert app._ensureReduction().placed == []
+
+    def testPlaybackUsesTheReducedSong(self, app: MidiEditorApp,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """With the reduction on, the synth is handed the reduced file."""
+        handed: list[smf.MidiFile] = []
+        monkeypatch.setattr(app.player, "play", lambda mf, *a, **k: handed.append(mf) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app.togglePlay()
+        assert handed
+        assert handed[0] is not app.song.mf
+        reduced = model.Song(handed[0])
+        assert analysis.sweep(reduced).peak <= 2
+        app.stopPlayback()
+
+    def testPlaybackUsesTheSongWhenOff(self, app: MidiEditorApp,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """With the reduction off the synth gets the song itself."""
+        handed: list[smf.MidiFile] = []
+        monkeypatch.setattr(app.player, "play", lambda mf, *a, **k: handed.append(mf) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        app.togglePlay()
+        assert handed[0] is app.song.mf
+        app.stopPlayback()
+
+    def testSaveReducedAs(self, app: MidiEditorApp, tmp_path: Path,
+                          monkeypatch: pytest.MonkeyPatch) -> None:
+        """Save Reduced As writes a file within the budget and leaves the song alone."""
+        out = tmp_path / "reduced.mid"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        app.budgetVar.set(2)
+        app.saveReducedAs()
+        assert out.exists()
+        saved = model.Song.load(str(out))
+        assert analysis.sweep(saved).peak <= 2
+        assert len(saved.notes) < len(app.song.notes)
+        assert not app.song.dirty
+        assert "Saved reduced song" in app.status.cget("text")
 
 
 class TestEventList:
