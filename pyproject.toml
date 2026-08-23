@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: 2026 Heisenberg (acscpt)
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "montyroll"
+version = "0.1.0"
+description = "A lightweight MIDI visualiser, piano-roll editor and player, stdlib-only Python with tkinter"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "acscpt" }]
+keywords = ["midi", "piano-roll", "music", "tkinter", "editor", "visualiser", "player"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: MIDI",
+    "Topic :: Multimedia :: Sound/Audio :: Editors",
+]
+# The application is pure standard library; tkinter ships with CPython.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.6"]
+
+[project.scripts]
+montyroll = "montyroll.app:main"
+
+[project.urls]
+Repository = "https://github.com/acscpt/montyroll"
+Issues = "https://github.com/acscpt/montyroll/issues"
+
+[tool.setuptools]
+packages = ["montyroll"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Match camelCase test functions (testFoo) as well as the classic test_foo style.
+python_functions = "test*"
+addopts = "-v --cov --cov-report=term-missing --report"
+
+[tool.coverage.run]
+source = ["montyroll"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = [".", "tests"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes. I: import sorting. Deliberately no pep8-naming
+# (N) rules: the house style uses camelCase methods and attributes.
+select = ["E", "F", "I"]
