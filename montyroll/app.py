@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
+from bisect import bisect_right
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 
@@ -31,7 +32,7 @@ CHANNEL_COLORS = [
 ]
 
 KEYS_W = 52          # piano keyboard gutter width
-RULER_H = 44         # seconds row + bar row + tempo/marker row
+RULER_FONT_SIZES = (7, 8, 7, 7)   # seconds, bars, tempo and markers, chords
 DEMAND_H = 90        # initial height of the voice-demand strip under the roll
 DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
@@ -205,6 +206,7 @@ class MidiEditorApp(tk.Tk):
         # notes, and the strip is redrawn through an idle callback so a burst
         # of scroll events costs one redraw.
         self.demand: analysis.Demand | None = None
+        self.chords: list[tuple[int, int, str]] | None = None
         self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
         self._demandAfter: str | None = None
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
@@ -417,7 +419,18 @@ class MidiEditorApp(tk.Tk):
         self.nb.add(roll, text="Piano Roll")
         roll.rowconfigure(1, weight=1)
         roll.columnconfigure(1, weight=1)
-        self.ruler = tk.Canvas(roll, height=RULER_H, bg="#2a2a30", highlightthickness=0)
+        # Ruler rows are sized from their fonts, so the text fits at any
+        # display scaling; rulerRows holds the five boundaries of the four
+        # rows, top to bottom.
+        self.rulerFonts = [tkfont.Font(font=("TkDefaultFont", size))
+                           for size in RULER_FONT_SIZES]
+        self.rulerRows = [0]
+
+        for f in self.rulerFonts:
+            self.rulerRows.append(self.rulerRows[-1] + f.metrics("linespace") + 3)
+
+        self.ruler = tk.Canvas(roll, height=self.rulerRows[-1], bg="#2a2a30",
+                               highlightthickness=0)
         self.ruler.grid(row=0, column=1, sticky="ew")
         self.keys = tk.Canvas(roll, width=KEYS_W, bg="#1c1c20", highlightthickness=0)
         self.keys.grid(row=1, column=0, sticky="ns")
@@ -653,6 +666,7 @@ class MidiEditorApp(tk.Tk):
         self.player.stop()
         self.playStart = None
         self.demand = None
+        self.chords = None
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
 
         # Selection and mute/solo variables refer to the old song's notes and
@@ -674,10 +688,12 @@ class MidiEditorApp(tk.Tk):
         s = self.song
         name = s.path.rsplit("/", 1)[-1] if s.path else "untitled"
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
+        key = analysis.songKey(s)
+        keyText = f" | {key.name}" if key else ""
         self.infoLbl.config(text=(
             f"{name}   fmt {s.mf.format} | {len(s.mf.tracks)} trk | "
             f"{s.mf.division} tpq | {num}/{den} | {s.initialBpm():.0f} bpm | "
-            f"{len(s.notes)} notes | {s.duration:.1f}s"))
+            f"{len(s.notes)} notes | {s.duration:.1f}s{keyText}"))
 
     def _updateTitle(self):
         """Set the window title to the file path, starred when unsaved."""
@@ -1080,20 +1096,24 @@ class MidiEditorApp(tk.Tk):
         self._scheduleDemand()
 
     def _drawRuler(self, width: int):
-        """Redraw the three-row ruler above the roll.
+        """Redraw the four-row ruler above the roll.
 
-        Top row: a seconds scale. Middle row: bar numbers. Bottom row: tempo
-        changes and markers.
+        Top row: a seconds scale. Second row: bar numbers. Third row: tempo
+        changes and markers. Bottom row: the chord named in each beat,
+        merged into runs, labelled where the run is wide enough to read.
 
         Args:
             width: scrollregion width in pixels, matching the note canvas.
         """
         r = self.ruler
         r.delete("all")
-        r.configure(scrollregion=(0, 0, width, RULER_H))
+        r0, r1, r2, r3, r4 = self.rulerRows
+        secondsFont, barFont, tempoFont, chordFont = self.rulerFonts
+        r.configure(scrollregion=(0, 0, width, r4))
         s = self.song
-        r.create_line(0, 14, width, 14, fill="#44444e")
-        r.create_line(0, 29, width, 29, fill="#44444e")
+
+        for y in (r1, r2, r3):
+            r.create_line(0, y, width, y, fill="#44444e")
 
         # -- seconds scale (top row); tempo-aware: x from seconds_to_tick
         # The step is the smallest one whose ticks sit at least 45 px apart
@@ -1109,7 +1129,7 @@ class MidiEditorApp(tk.Tk):
 
         while t <= s.duration + step:
             x = s.secondsToTick(t) * self.ppt
-            r.create_line(x, 9, x, 14, fill="#7a9")
+            r.create_line(x, r1 - 5, x, r1, fill="#7a9")
 
             # Labels switch to m:ss past a minute, keeping tenths only while
             # the step is shorter than a second.
@@ -1119,8 +1139,8 @@ class MidiEditorApp(tk.Tk):
             else:
                 label = f"{t:.4g}s"
 
-            r.create_text(x + 3, 1, text=label, anchor="nw",
-                          fill="#8fb", font=("TkDefaultFont", 7))
+            r.create_text(x + 3, r0 + 1, text=label, anchor="nw",
+                          fill="#8fb", font=secondsFont)
             t += step
 
         # -- bar numbers (middle row)
@@ -1131,9 +1151,9 @@ class MidiEditorApp(tk.Tk):
 
         while t <= s.maxTick + bar:
             x = t * self.ppt
-            r.create_line(x, 22, x, 29, fill="#888")
-            r.create_text(x + 3, 15, text=str(n), anchor="nw",
-                          fill="#bbb", font=("TkDefaultFont", 8))
+            r.create_line(x, r2 - 7, x, r2, fill="#888")
+            r.create_text(x + 3, r1 + 1, text=str(n), anchor="nw",
+                          fill="#bbb", font=barFont)
             t += bar
             n += 1
 
@@ -1141,6 +1161,7 @@ class MidiEditorApp(tk.Tk):
         # Consecutive tempo events at the same bpm (to 0.1) collapse into one
         # label, which keeps files with hundreds of tempo events readable.
         last_bpm = None
+        tempoLabels: list[tuple[float, float]] = []      # x extents of the labels
 
         for tick, uspb, _sec in s.tempoMap:
             bpm = round(60e6 / uspb, 1)
@@ -1150,14 +1171,35 @@ class MidiEditorApp(tk.Tk):
 
             last_bpm = bpm
             x = tick * self.ppt
-            r.create_line(x, 30, x, RULER_H, fill="#d66")
-            r.create_text(x + 3, 31, text=f"{TEMPO_GLYPH}={bpm:g}", anchor="nw",
-                          fill="#f99", font=("TkDefaultFont", 7))
+            label = f"{TEMPO_GLYPH}={bpm:g}"
+            r.create_line(x, r2 + 1, x, r3, fill="#d66")
+            r.create_text(x + 3, r2 + 1, text=label, anchor="nw", fill="#f99", font=tempoFont)
+            tempoLabels.append((x, x + 3 + tempoFont.measure(label)))
 
+        # A marker sharing its tick with a tempo flag moves right of the
+        # flag's label instead of drawing over it.
         for tick, text in s.markers:
             x = tick * self.ppt
-            r.create_text(x + 2, RULER_H - 1, text=text, anchor="sw",
-                          fill="#e8d44d", font=("TkDefaultFont", 7))
+
+            for left, right in tempoLabels:
+                if left <= x < right:
+                    x = right + 6
+
+            r.create_text(x + 2, r3 - 1, text=text, anchor="sw",
+                          fill="#e8d44d", font=tempoFont)
+
+        # -- chords (bottom row): one label per run, skipped when the run is
+        # narrower than its text so a busy passage does not become a smear.
+        for start, end, name in self._ensureChords():
+            if name == analysis.NO_CHORD:
+                continue
+
+            x1, x2 = start * self.ppt, end * self.ppt
+            r.create_line(x1, r3 + 1, x1, r4, fill="#5a7a9a")
+
+            if x2 - x1 >= chordFont.measure(name) + 6:
+                r.create_text(x1 + 3, r3 + 1, text=name, anchor="nw",
+                              fill="#9cf", font=chordFont)
 
     def _drawKeys(self, height: int):
         """Redraw the keyboard gutter to the left of the roll.
@@ -1241,9 +1283,36 @@ class MidiEditorApp(tk.Tk):
         return self.demand
 
     def _invalidateDemand(self):
-        """Forget the sweep after an edit and queue a redraw of the strip."""
+        """Forget the sweep and the chords after an edit and queue a redraw."""
         self.demand = None
+        self.chords = None
         self._scheduleDemand()
+
+    def _ensureChords(self) -> list[tuple[int, int, str]]:
+        """Return the chord runs, one per beat merged, rebuilding if needed.
+
+        Returns:
+            list[tuple[int, int, str]]: (start tick, end tick, name) runs.
+        """
+        if self.chords is None:
+            beat = self.song.mf.division * 4 // self.song.timeSigs[0][2]
+            self.chords = analysis.chordTrack(self.song, beat)
+
+        return self.chords
+
+    def _chordAt(self, tick: float) -> str:
+        """Name the chord sounding at a tick.
+
+        Args:
+            tick: absolute tick.
+
+        Returns:
+            str: the chord name, or `analysis.NO_CHORD` past the end.
+        """
+        runs = self._ensureChords()
+        i = bisect_right([start for start, _, _ in runs], tick) - 1
+        name = runs[i][2] if 0 <= i < len(runs) and tick < runs[i][1] else analysis.NO_CHORD
+        return name
 
     def _onSashPress(self, event):
         """Remember where a drag of the strip sash started.
@@ -1630,12 +1699,15 @@ class MidiEditorApp(tk.Tk):
 
         # Over a note the status shows that note; elsewhere it shows the row's
         # pitch, as a drum name when the active channel is the drum channel.
+        chord = self._chordAt(tick)
+        where = f"bar {bar}:{beat}  {secs:6.2f}s  {chord:<5} "
+
         if note:
-            self._describeNote(note, prefix=f"bar {bar}:{beat}  {secs:6.2f}s   ")
+            self._describeNote(note, prefix=where)
         else:
             name = (gm.drumName(pitch) if self.activeChannel == model.DRUM_CHANNEL
                     else gm.noteName(pitch))
-            self._setStatus(f"bar {bar}:{beat}  {secs:6.2f}s   {name}")
+            self._setStatus(f"{where}  {name}")
 
     def _describeNote(self, note: model.Note, prefix: str = ""):
         """Show a note's pitch, velocity, channel, ticks and track in the

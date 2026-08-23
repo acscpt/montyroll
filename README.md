@@ -51,16 +51,19 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
   - piano-key gutter
   - bar/beat grid
 
-- Three-row header ruler:
+- Four-row header ruler:
   - seconds (tempo-aware)
   - bar numbers
   - tempo changes and markers from the file
+  - the chord named in each beat, merged into runs
 
 - A file can contain any number of tempo changes. Each one is shown in the header ruler, and the seconds row stretches and compresses against the bar grid to match.
 
 - Event list with every message decoded, with tick, seconds and bar:beat for each
 
-- Status bar tracking the pointer in musical time, naming the note (or drum sound) under the cursor
+- Status bar tracking the pointer in musical time, naming the chord and the note (or drum sound) under the cursor
+
+- Key estimation for the whole file, shown in the toolbar summary
 
 - Voice-demand strip under the roll: how many notes sound at once, stacked per channel in the roll's colours, with the count of distinct pitches (unisons merged) and of distinct pitch classes (octaves merged too) drawn over the stack, and a red line at a voice budget of your choosing. Pointing at it reports the counts and the busiest channels; each channel card shows its own peak, mean and share of the piece
 

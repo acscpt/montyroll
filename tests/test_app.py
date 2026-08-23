@@ -537,6 +537,47 @@ class TestDemandStrip:
         assert app.canvas.xview()[0] > before
 
 
+class TestTonal:
+    """The chord row on the ruler, the chord under the pointer and the key."""
+
+    def testKeyInTheSummary(self, app: MidiEditorApp) -> None:
+        """The toolbar summary ends with the estimated key."""
+        assert app.infoLbl.cget("text").endswith("C major")
+
+    def testChordRowOnTheRuler(self, app: MidiEditorApp) -> None:
+        """Chord names are drawn on the ruler's bottom row where the run is wide enough."""
+        app.zoom(4.0)
+        app.update()
+        labels = [app.ruler.itemcget(i, "text") for i in app.ruler.find_all()
+                  if app.ruler.type(i) == "text" and app.ruler.itemcget(i, "fill") == "#9cf"]
+        assert "Am" in labels
+
+    def testNarrowRunsAreNotLabelled(self, app: MidiEditorApp) -> None:
+        """Zoomed right out no chord label fits, so none is drawn, but the ruler survives."""
+        app.zoom(0.001)
+        app.update()
+        labels = [i for i in app.ruler.find_all()
+                  if app.ruler.type(i) == "text" and app.ruler.itemcget(i, "fill") == "#9cf"]
+        assert labels == []
+
+    def testChordUnderThePointer(self, app: MidiEditorApp) -> None:
+        """Moving over the roll puts the chord at that tick in the status bar."""
+        app.onMotion(FakeEvent(10, 10))
+        assert "  Am " in app.status.cget("text")
+        assert app._chordAt(0) == "Am"
+        assert app._chordAt(10 ** 9) == "N.C."
+
+    def testChordsAreCachedAndInvalidated(self, app: MidiEditorApp) -> None:
+        """One chord track serves until the notes change."""
+        first = app._ensureChords()
+        assert app._ensureChords() is first
+        app.selectAll()
+        app.deleteSelection()
+        rebuilt = app._ensureChords()
+        assert rebuilt is not first
+        assert all(name == "N.C." for _, _, name in rebuilt)
+
+
 class TestEventList:
     """The decoded event table."""
 

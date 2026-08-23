@@ -221,3 +221,174 @@ def testSweepIsFast() -> None:
     analysis.sweep(song)
     elapsed = time.perf_counter() - started
     assert elapsed < 2.0
+
+
+def _profile(*classes: int, weights: list[float] | None = None) -> list[float]:
+    """Build a pitch-class profile from the classes present.
+
+    Args:
+        *classes: pitch classes 0-11 to give weight.
+        weights: one weight per class, in order; defaults to 1.0 each.
+
+    Returns:
+        list[float]: twelve weights.
+    """
+    profile = [0.0] * 12
+
+    for i, pc in enumerate(classes):
+        profile[pc] = weights[i] if weights else 1.0
+
+    return profile
+
+
+class TestKey:
+    """Key estimation from pitch-class profiles."""
+
+    def testMajorScaleWithTonicEmphasis(self) -> None:
+        """A C major scale weighted towards C, E and G reads as C major."""
+        profile = _profile(0, 2, 4, 5, 7, 9, 11, weights=[5, 1, 3, 1, 4, 1, 1])
+        key = analysis.estimateKey(profile)
+        assert (key.tonic, key.major) == (0, True)
+        assert key.name == "C major"
+        assert key.correlation > 0.8
+
+    def testRelativeMinorByEmphasis(self) -> None:
+        """The same seven classes weighted towards A, C and E read as A minor."""
+        profile = _profile(9, 0, 4, 2, 5, 7, 11, weights=[5, 3, 4, 1, 1, 1, 1])
+        key = analysis.estimateKey(profile)
+        assert key.name == "A minor"
+
+    def testTransposition(self) -> None:
+        """Rotating a profile rotates the answer."""
+        base = _profile(0, 2, 4, 5, 7, 9, 11, weights=[5, 1, 3, 1, 4, 1, 1])
+        shifted = base[-7:] + base[:-7]      # up a fifth: G major
+        assert analysis.estimateKey(shifted).name == "G major"
+
+    def testMarginIsSmallForAmbiguousInput(self) -> None:
+        """A flat chromatic profile gives no key; a near-flat one a small margin."""
+        assert analysis.estimateKey([1.0] * 12) is None or \
+            analysis.estimateKey([1.0] * 12).margin < 0.05
+        assert analysis.estimateKey([0.0] * 12) is None
+
+    def testSongKey(self, song: model.Song) -> None:
+        """The fixture, mostly C, E, G with a flute on C and A, reads as C major."""
+        key = analysis.songKey(song)
+        assert key is not None
+        assert key.name == "C major"
+
+    def testKeyOverTime(self, song: model.Song) -> None:
+        """A sliding window reports the key from tick 0 and only on change."""
+        changes = analysis.keyOverTime(song, windowTicks=1920, stepTicks=960)
+        assert changes[0][0] == 0
+        ticks = [t for t, _ in changes]
+        assert ticks == sorted(ticks)
+        names = [k.name for _, k in changes]
+        assert all(names[i] != names[i + 1] for i in range(len(names) - 1))
+
+
+class TestChordNaming:
+    """Template matching on pitch-class profiles."""
+
+    @pytest.mark.parametrize("classes, name", [
+        ((0, 4, 7), "C"), ((9, 0, 4), "Am"), ((7, 11, 2, 5), "G7"),
+        ((0, 4, 7, 11), "Cmaj7"), ((2, 5, 9, 0), "Dm7"), ((11, 2, 5), "Bdim"),
+        ((0, 4, 8), "Caug"), ((11, 2, 5, 9), "Bm7b5"), ((0, 5, 7), "Csus4"),
+    ])
+    def testCompleteChords(self, classes: tuple[int, ...], name: str) -> None:
+        """Every template is recognised from its own tones."""
+        assert analysis.nameChord(_profile(*classes)) == name
+
+    def testOneMissingToneIsAllowed(self) -> None:
+        """A fifthless C E is still C; a bare fifth C G is C, not a seventh."""
+        assert analysis.nameChord(_profile(0, 4)) == "C"
+        assert analysis.nameChord(_profile(0, 7)) == "C"
+
+    def testOmissionPriorSettlesDyads(self) -> None:
+        """A dyad is read as the chord missing its fifth, not the one missing its root."""
+        assert analysis.nameChord(_profile(0, 9)) == "Am"
+        assert analysis.nameChord(_profile(4, 7)) == "Em"
+        assert analysis.nameChord(_profile(2, 11)) == "Bm"
+        assert analysis.nameChord(_profile(5, 9)) == "F"
+
+    def testTwoMissingTonesAreNot(self) -> None:
+        """Two notes never name a seventh chord."""
+        assert analysis.nameChord(_profile(5, 7)) != "G7"
+        assert "7" not in analysis.nameChord(_profile(2, 11))
+
+    def testBassSettlesAFullChord(self) -> None:
+        """F, G and B over a G bass is G7; without the bass it is still G7; with D added, G7."""
+        profile = _profile(5, 7, 11)
+        assert analysis.nameChord(profile, bass=7) == "G7"
+        assert analysis.nameChord(_profile(7, 11, 2, 5), bass=7) == "G7"
+
+    def testBassIgnoredForADyad(self) -> None:
+        """Two notes name the same way whatever the bass says."""
+        assert analysis.nameChord(_profile(5, 7), bass=7) == analysis.nameChord(_profile(5, 7))
+
+    def testInversionKeepsItsName(self) -> None:
+        """C E G with E in the bass is still C, not an E chord."""
+        assert analysis.nameChord(_profile(0, 4, 7), bass=4) == "C"
+
+    def testSingleClassIsTheNote(self) -> None:
+        """An octave of one note is named by the note."""
+        assert analysis.nameChord(_profile(0)) == "C"
+        assert analysis.nameChord(_profile(6, weights=[3.0])) == "F#"
+
+    def testNoiseIsNoChord(self) -> None:
+        """A cluster that no template covers well is no chord; silence too."""
+        assert analysis.nameChord([1.0] * 12) == analysis.NO_CHORD
+        assert analysis.nameChord([0.0] * 12) == analysis.NO_CHORD
+
+    def testWeightMatters(self) -> None:
+        """A loud C triad with a faint passing D is still C."""
+        profile = _profile(0, 4, 7, 2, weights=[4, 4, 4, 0.2])
+        assert analysis.nameChord(profile) == "C"
+
+
+class TestChordTrack:
+    """Per-step naming, merging and smoothing over a song."""
+
+    def testFixtureChords(self, song: model.Song) -> None:
+        """The fixture's opening C major sound and its D major bar are named."""
+        runs = analysis.chordTrack(song, 480)
+        assert runs[0][0] == 0
+        assert runs[0][2] == "Am"
+        assert all(end == nxt for (_, end, _), (nxt, _, _) in zip(runs, runs[1:]))
+        byTick = {start: name for start, _, name in runs}
+        assert byTick[1920] == "Csus2"        # C, D and B over a C bass
+
+    def testRunsCoverThePiece(self, song: model.Song) -> None:
+        """Runs abut and reach at least maxTick."""
+        runs = analysis.chordTrack(song, 480)
+        assert runs[0][0] == 0
+        assert runs[-1][1] >= song.maxTick
+
+    def testSmoothingAbsorbsAnIsland(self, song: model.Song) -> None:
+        """A one-step island between equal names takes their name; smooth=0 keeps it."""
+        notes = []
+
+        for step in range(5):
+            pitches = (60, 64, 67) if step != 2 else (62, 65, 69)
+            for p in pitches:
+                notes.append(model.Note(0, 0, p, 100, step * 480, step * 480 + 480))
+
+        song.notes = notes
+        song.maxTick = 5 * 480
+        assert [n for _, _, n in analysis.chordTrack(song, 480)] == ["C"]
+        assert [n for _, _, n in analysis.chordTrack(song, 480, smooth=0)] == ["C", "Dm", "C"]
+
+    def testDemoChords(self) -> None:
+        """The Chopsticks demo alternates G7 and C in two-bar groups with the band."""
+        demo = model.Song.load(str(ROOT / "resources" / "chopsticks.mid"))
+        runs = analysis.chordTrack(demo, 480)
+        names = [n for start, _, n in runs if start >= 16 * 1440]
+        assert names[:8] == ["Fsus2", "G7", "C", "G", "C", "Fsus2", "G7", "C"]
+        assert analysis.songKey(demo).name == "C major"
+
+    def testDanubeIsInDMajor(self) -> None:
+        """JSBD-1, when present, is in D major and names its opening chords."""
+        danube = _localSong("JSBD-1.mid")
+        assert analysis.songKey(danube).name == "D major"
+        runs = analysis.chordTrack(danube, danube.mf.division)
+        assert runs[0][2] == "A"
+        assert any(n == "E7" for _, _, n in runs[:6])
