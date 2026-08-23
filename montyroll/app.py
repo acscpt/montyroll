@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 
-from . import gm, model, player, smf
+from . import analysis, gm, model, player, smf
 
 CHANNEL_COLORS = [
     "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
@@ -32,6 +32,10 @@ CHANNEL_COLORS = [
 
 KEYS_W = 52          # piano keyboard gutter width
 RULER_H = 44         # seconds row + bar row + tempo/marker row
+DEMAND_H = 90        # initial height of the voice-demand strip under the roll
+DEMAND_MIN_H = 40    # the strip's height limits when dragged
+DEMAND_MAX_H = 400
+DEMAND_BUDGET = 8    # default voice budget shown on the strip
 SNAP_CHOICES = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "off"]
 MAX_EVENT_ROWS = 8000
 
@@ -196,6 +200,14 @@ class MidiEditorApp(tk.Tk):
         self.playSpeed = 1.0           # speed factor of the running synth
         self._replayAfter: str | None = None
         self.cursorItem = None
+
+        # Voice demand: the sweep is rebuilt lazily after any change to the
+        # notes, and the strip is redrawn through an idle callback so a burst
+        # of scroll events costs one redraw.
+        self.demand: analysis.Demand | None = None
+        self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
+        self._demandAfter: str | None = None
+        self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
 
         # The status bar is packed before the body on purpose: tkinter starves
         # the last-packed widget when space runs short, and a bottom bar
@@ -419,10 +431,46 @@ class MidiEditorApp(tk.Tk):
         vbar = ttk.Scrollbar(roll, orient="vertical", command=self._yview)
         vbar.grid(row=1, column=2, sticky="ns")
         hbar = ttk.Scrollbar(roll, orient="horizontal", command=self._xview)
-        hbar.grid(row=2, column=1, sticky="ew")
+        hbar.grid(row=4, column=1, sticky="ew")
         self.canvas.configure(
-            xscrollcommand=lambda a, b: (hbar.set(a, b), self.ruler.xview_moveto(a)),
+            xscrollcommand=lambda a, b: (hbar.set(a, b), self.ruler.xview_moveto(a),
+                                         self._scheduleDemand()),
             yscrollcommand=lambda a, b: (vbar.set(a, b), self.keys.yview_moveto(a)))
+
+        # A sash between the roll and the demand strip: dragging it changes
+        # the strip's height, and the roll, which owns the grid's spare
+        # space, gives way.
+        sash = tk.Frame(roll, height=5, bg="#3a3a44", cursor="sb_v_double_arrow")
+        sash.grid(row=2, column=0, columnspan=2, sticky="ew")
+        sash.bind("<ButtonPress-1>", self._onSashPress)
+        sash.bind("<B1-Motion>", self._onSashDrag)
+        Tooltip(sash, "Drag to resize the voice-demand strip")
+
+        # Voice-demand strip under the roll: a viewport canvas that draws
+        # only the visible columns from the current scroll position, so its
+        # cost is the window width and not the length of the piece. The
+        # gutter beside it holds the voice budget.
+        gutter = ttk.Frame(roll, width=KEYS_W)
+        gutter.grid(row=3, column=0, sticky="nsew")
+        gutter.grid_propagate(False)
+        ttk.Label(gutter, text="Voices", font=("TkDefaultFont", 7)).pack(pady=(4, 0))
+        self.budgetSpin = ttk.Spinbox(gutter, from_=1, to=64, width=3,
+                                      textvariable=self.budgetVar,
+                                      command=self._scheduleDemand)
+        self.budgetSpin.pack()
+        self.budgetSpin.bind("<KeyRelease>", lambda e: self._scheduleDemand())
+        Tooltip(gutter, "Voice budget: the line on the demand strip.\n"
+                "Where the stack crosses it, notes would have to go.")
+        self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg="#202026",
+                                      highlightthickness=0)
+        self.demandCanvas.grid(row=3, column=1, sticky="ew")
+        self.demandCanvas.bind("<Configure>", lambda e: self._scheduleDemand())
+        self.demandCanvas.bind("<Motion>", self._onDemandMotion)
+        Tooltip(self.demandCanvas,
+                "Voices sounding over time, stacked per channel.\n"
+                "White line: distinct pitches (unisons merged).\n"
+                "Yellow line: distinct pitch classes (octaves merged too).\n"
+                "Red line: the voice budget.")
 
         # Events tab: a Treeview with fixed column widths except for the
         # detail column, which stretches to fill the remaining width. Its
@@ -462,7 +510,7 @@ class MidiEditorApp(tk.Tk):
         self.canvas.bind("<Button-3>", self.onContext)
         self.canvas.bind("<Motion>", self.onMotion)
 
-        for w in (self.canvas, self.keys, self.ruler):
+        for w in (self.canvas, self.keys, self.ruler, self.demandCanvas):
             w.bind("<Button-4>", self.onWheel)
             w.bind("<Button-5>", self.onWheel)
             w.bind("<MouseWheel>", self.onWheel)
@@ -500,6 +548,7 @@ class MidiEditorApp(tk.Tk):
         """
         self.canvas.xview(*args)
         self.ruler.xview(*args)
+        self._scheduleDemand()
 
     def _yview(self, *args):
         """Scroll the note canvas and the keyboard gutter together vertically.
@@ -599,9 +648,11 @@ class MidiEditorApp(tk.Tk):
         to the old song, rebuilds the channel strip, redraws the roll, refills
         the event list and updates the title and the toolbar file summary.
         """
-        # Playback and the Play button belong to the old song.
+        # Playback, the Play button and the demand sweep belong to the old
+        # song.
         self.player.stop()
         self.playStart = None
+        self.demand = None
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
 
         # Selection and mute/solo variables refer to the old song's notes and
@@ -662,6 +713,7 @@ class MidiEditorApp(tk.Tk):
             w.destroy()
 
         self.channelRows.clear()
+        figures = analysis.channelDemand(self._ensureDemand())
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
@@ -747,6 +799,19 @@ class MidiEditorApp(tk.Tk):
                           font=("TkDefaultFont", 8))
             dl.pack(side="left", padx=(8, 0))
             Tooltip(dl, "Note count, pitch range, GM instrument family")
+
+            # Voice demand: the channel's own peak, its mean while sounding
+            # and the share of the piece it sounds at all.
+            figure = figures.get(ch)
+
+            if figure is not None:
+                usage = (f"peak {figure.peak} | mean {figure.mean:.1f} | "
+                         f"plays {figure.fraction:.0%}")
+                ul = tk.Label(row, text=usage, anchor="w", font=("TkDefaultFont", 8),
+                              fg="#555")
+                ul.pack(fill="x", padx=(22, 0))
+                Tooltip(ul, "Voice demand: most notes at once, average while\n"
+                            "sounding, and how much of the piece the channel plays")
 
             # A click on any part of the card makes it the active channel,
             # and the wheel scrolls the strip from the card too: X11 delivers
@@ -1012,6 +1077,7 @@ class MidiEditorApp(tk.Tk):
         self._applySelectionStyle()
         self._drawRuler(width)
         self._drawKeys(height)
+        self._scheduleDemand()
 
     def _drawRuler(self, width: int):
         """Redraw the three-row ruler above the roll.
@@ -1161,6 +1227,182 @@ class MidiEditorApp(tk.Tk):
         """
         self.rowH = min(24, max(4, self.rowH + delta))
         self.redraw()
+
+    # ------------------------------------------------------------- demand
+    def _ensureDemand(self) -> analysis.Demand:
+        """Return the voice-demand sweep, rebuilding it if the notes changed.
+
+        Returns:
+            analysis.Demand: the sweep of the current song.
+        """
+        if self.demand is None:
+            self.demand = analysis.sweep(self.song)
+
+        return self.demand
+
+    def _invalidateDemand(self):
+        """Forget the sweep after an edit and queue a redraw of the strip."""
+        self.demand = None
+        self._scheduleDemand()
+
+    def _onSashPress(self, event):
+        """Remember where a drag of the strip sash started.
+
+        Args:
+            event: `y_root`, the pointer's screen position.
+        """
+        self._sashStart = (event.y_root, self.demandCanvas.winfo_height())
+
+    def _onSashDrag(self, event):
+        """Resize the demand strip as the sash is dragged.
+
+        Args:
+            event: `y_root`, the pointer's screen position; dragging up makes
+                the strip taller, within `DEMAND_MIN_H` to `DEMAND_MAX_H`.
+        """
+        y0, h0 = self._sashStart
+        height = max(DEMAND_MIN_H, min(DEMAND_MAX_H, h0 - (event.y_root - y0)))
+        self.demandCanvas.configure(height=height)
+
+    def _scheduleDemand(self):
+        """Queue one redraw of the demand strip for the next idle moment."""
+        if self._demandAfter is None:
+            self._demandAfter = self.after_idle(self._drawDemand)
+
+    def _demandColumns(self, width: int) -> list[tuple[int, int, int, int, dict[int, int]]]:
+        """Sample the demand at every visible pixel column.
+
+        Args:
+            width: the strip's width in pixels.
+
+        Returns:
+            list[tuple[int, int, int, int, dict[int, int]]]: one run per
+            stretch of identical columns, as (x0, x1, pitches, classes,
+            per-channel count); a run ends where any value changes, so a
+            long held chord is one entry.
+        """
+        demand = self._ensureDemand()
+        x0 = self.canvas.canvasx(0)
+        runs: list[tuple[int, int, int, int, dict[int, int]]] = []
+        previous: tuple[int, int, dict[int, int]] | None = None
+
+        for col in range(width):
+            t0 = (x0 + col) / self.ppt
+            t1 = (x0 + col + 1) / self.ppt
+
+            if t0 > demand.endTick:
+                break
+
+            _, pitches, classes, perChannel = demand.window(t0, t1)
+            current = (pitches, classes, perChannel)
+
+            if runs and current == previous:
+                start, _, a, b, c = runs[-1]
+                runs[-1] = (start, col + 1, a, b, c)
+            else:
+                runs.append((col, col + 1, pitches, classes, perChannel))
+
+            previous = current
+
+        return runs
+
+    def _drawDemand(self):
+        """Draw the voice-demand strip for the visible part of the roll.
+
+        Per column the channels' counts are stacked in the roll's colours,
+        the distinct-pitch and pitch-class counts are drawn as lines over
+        the stack, and the budget is a horizontal line. The vertical scale
+        is whichever is larger of the piece's peak and the budget, so the
+        budget line always fits.
+        """
+        self._demandAfter = None
+        c = self.demandCanvas
+        c.delete("all")
+        width = c.winfo_width()
+        height = c.winfo_height()
+
+        if width < 2 or height < 2 or not self.song.notes:
+            return
+
+        # The budget cannot usefully exceed the piece's peak, so the spinbox
+        # stops there and the scale is always the peak.
+        demand = self._ensureDemand()
+        peak = max(demand.peak, 1)
+        self.budgetSpin.configure(to=peak)
+
+        if self.budgetVar.get() > peak:
+            self.budgetVar.set(peak)
+
+        budget = max(1, self.budgetVar.get())
+        top = peak
+        scale = (height - 6) / top
+        base = height - 2
+        channels = sorted(demand.channels)
+        runs = self._demandColumns(width)
+
+        # Stacked channel fills, bottom-up in channel order so the same
+        # channel always sits at the same level of the stack. Whatever rises
+        # above the budget is washed red: that is what would have to go.
+        yBudget = base - budget * scale
+
+        for xa, xb, _, _, perChannel in runs:
+            y = base
+
+            for ch in channels:
+                count = perChannel.get(ch, 0)
+
+                if count:
+                    h = count * scale
+                    c.create_rectangle(xa, y - h, xb, y, fill=_shade(CHANNEL_COLORS[ch], 0.8),
+                                       outline="")
+                    y -= h
+
+            if y < yBudget:
+                c.create_rectangle(xa, y, xb, yBudget, fill="#ff5050", stipple="gray50",
+                                   outline="")
+
+        # The two merged counts as step lines over the stack.
+        for index, colour in ((2, "#e8e8e8"), (3, "#ffd24d")):
+            points: list[float] = []
+
+            for run in runs:
+                y = base - run[index] * scale
+                points += [run[0], y, run[1], y]
+
+            if len(points) >= 4:
+                c.create_line(*points, fill=colour, width=1)
+
+        # Budget line and scale labels.
+        c.create_line(0, yBudget, width, yBudget, fill="#ff5050", dash=(4, 3))
+        c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
+                      font=("TkDefaultFont", 7))
+        c.create_text(width - 3, yBudget, text=str(budget), anchor="e", fill="#ff5050",
+                      font=("TkDefaultFont", 7))
+
+    def _onDemandMotion(self, event):
+        """Pointer over the demand strip: report the counts at that column.
+
+        Args:
+            event: `x`, the column under the pointer.
+        """
+        if not self.song.notes:
+            return
+
+        demand = self._ensureDemand()
+        tick = (self.canvas.canvasx(0) + event.x) / self.ppt
+
+        if tick > demand.endTick:
+            return
+
+        raw, pitches, classes, perChannel = demand.window(tick, tick + 1 / self.ppt)
+        bar, beat = self.song.barBeat(tick)
+        secs = self.song.tickToSeconds(tick)
+        busiest = ", ".join(f"ch {ch + 1}: {n}" for ch, n in sorted(perChannel.items(),
+                                                                   key=lambda kv: -kv[1])[:4])
+        over = raw - max(1, self.budgetVar.get())
+        excess = f"   over by {over}" if over > 0 else ""
+        self._setStatus(f"bar {bar}:{beat}  {secs:6.2f}s   voices {raw} | pitches {pitches} "
+                        f"| classes {classes}{excess}   {busiest}")
 
     # ---------------------------------------------------------- interaction
     def _eventPos(self, event) -> tuple[float, float]:
@@ -1316,6 +1558,7 @@ class MidiEditorApp(tk.Tk):
         # ruler follow on the next redraw.
         if self.drag and self.drag["moved"]:
             self._markDirty()
+            self._invalidateDemand()
             self.song.maxTick = max(self.song.maxTick,
                                      max((n.end for n in self.selection), default=0))
             n = len(self.selection)
@@ -1345,6 +1588,7 @@ class MidiEditorApp(tk.Tk):
                                   start, start + length)
         self.selection = {note}
         self._markDirty()
+        self._invalidateDemand()
         self.redraw()
         self._describeNote(note)
 
@@ -1456,6 +1700,7 @@ class MidiEditorApp(tk.Tk):
         self.song.deleteNotes(list(self.selection))
         self.selection.clear()
         self._markDirty()
+        self._invalidateDemand()
         self.redraw()
         self._setStatus(f"Deleted {n} note{'s' if n != 1 else ''}")
 

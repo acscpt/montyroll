@@ -62,6 +62,8 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 
 - Status bar tracking the pointer in musical time, naming the note (or drum sound) under the cursor
 
+- Voice-demand strip under the roll: how many notes sound at once, stacked per channel in the roll's colours, with the count of distinct pitches (unisons merged) and of distinct pitch classes (octaves merged too) drawn over the stack, and a red line at a voice budget of your choosing. Pointing at it reports the counts and the busiest channels; each channel card shows its own peak, mean and share of the piece
+
 **Editor**
 
 - Add, move, resize and delete notes with the mouse (see [Controls](#controls)).

@@ -6,6 +6,10 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+### Added
+
+- **Voice-demand strip** under the piano roll, showing how many notes sound at once stacked per channel, the distinct-pitch and pitch-class counts over it, and a voice budget line, with the counts reported in the status bar on hover and each channel card carrying its peak, mean and share of the piece. The figures come from a new `analysis.py`, a sweep over the song's notes that also measures unison and octave doubling and how much of the piece each pair of channels sounds together.
+
 ## [0.1.0] - 2026-08-23
 
 ### Added

@@ -19,7 +19,15 @@ import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
 from montyroll import model, player, smf
-from montyroll.app import MAX_EVENT_ROWS, PLAY_GLYPH, STOP_GLYPH, MidiEditorApp, _shade
+from montyroll.app import (
+    DEMAND_MAX_H,
+    DEMAND_MIN_H,
+    MAX_EVENT_ROWS,
+    PLAY_GLYPH,
+    STOP_GLYPH,
+    MidiEditorApp,
+    _shade,
+)
 
 pytestmark = needsDisplay
 
@@ -381,6 +389,152 @@ class TestViewport:
         app.onMotion(FakeEvent(x, y))
         assert "bar 1:1" in app.status.cget("text")
         assert "C4" in app.status.cget("text")
+
+
+class TestDemandStrip:
+    """The voice-demand strip under the roll and the figures on the cards."""
+
+    def testStripIsDrawn(self, app: MidiEditorApp) -> None:
+        """After layout the strip holds the stack, two lines, the budget and labels."""
+        app._drawDemand()
+        items = app.demandCanvas.find_all()
+        assert len(items) > 5
+        kinds = {app.demandCanvas.type(i) for i in items}
+        assert kinds == {"rectangle", "line", "text"}
+
+    def testSweepIsLazyAndCached(self, app: MidiEditorApp) -> None:
+        """One sweep serves the cards and the strip until the notes change."""
+        first = app._ensureDemand()
+        app._drawDemand()
+        assert app._ensureDemand() is first
+        app._invalidateDemand()
+        assert app.demand is None
+        assert app._ensureDemand() is not first
+
+    def testEditsInvalidateTheSweep(self, app: MidiEditorApp) -> None:
+        """Adding or deleting notes discards the sweep; a redraw rebuilds it."""
+        before = app._ensureDemand().peak
+        app.selectAll()
+        app.deleteSelection()
+        app.update()
+        assert app._ensureDemand().peak == 0
+        app._setActiveChannel(0)
+        app.onDouble(FakeEvent(50 * app.ppt, (127 - 100) * app.rowH + 2))
+        app.update()
+        assert app._ensureDemand().peak == 1
+        assert before > 1
+
+    def testBudgetLineFollowsTheSpinbox(self, app: MidiEditorApp) -> None:
+        """The budget label on the strip shows the chosen number of voices."""
+        app.budgetVar.set(3)
+        app._drawDemand()
+        labels = [app.demandCanvas.itemcget(i, "text") for i in app.demandCanvas.find_all()
+                  if app.demandCanvas.type(i) == "text"]
+        assert "3" in labels
+
+    def testBudgetIsCappedAtThePeak(self, app: MidiEditorApp) -> None:
+        """The scale is the piece's peak and a larger budget is pulled down to it."""
+        peak = app._ensureDemand().peak
+        app.budgetVar.set(1)
+        app._drawDemand()
+        labels = {app.demandCanvas.itemcget(i, "text") for i in app.demandCanvas.find_all()
+                  if app.demandCanvas.type(i) == "text"}
+        assert str(peak) in labels
+        app.budgetVar.set(40)
+        app._drawDemand()
+        assert app.budgetVar.get() == peak
+        assert int(float(app.budgetSpin.cget("to"))) == peak
+
+    def testColumnsMergeIntoRuns(self, app: MidiEditorApp) -> None:
+        """Identical neighbouring columns become one run covering them all."""
+        runs = app._demandColumns(app.demandCanvas.winfo_width())
+        assert runs
+        assert all(x1 > x0 for x0, x1, _, _, _ in runs)
+        assert all(runs[i][1] == runs[i + 1][0] for i in range(len(runs) - 1))
+        assert any(x1 - x0 > 1 for x0, x1, _, _, _ in runs)
+
+    def testHoverReportsCounts(self, app: MidiEditorApp) -> None:
+        """Pointing at the strip names the bar, the counts and the busiest channels."""
+        app._onDemandMotion(FakeEvent(x=int(100 * app.ppt)))
+        text = app.status.cget("text")
+        assert "bar 1:1" in text
+        assert "voices" in text and "pitches" in text and "classes" in text
+        assert "ch 1:" in text or "ch 2:" in text
+
+    def testOverflowIsWashedAndReported(self, app: MidiEditorApp) -> None:
+        """Demand above the budget gets a stippled wash and an 'over by' in the status."""
+        app.budgetVar.set(1)
+        app._drawDemand()
+        washes = [i for i in app.demandCanvas.find_all()
+                  if app.demandCanvas.type(i) == "rectangle"
+                  and app.demandCanvas.itemcget(i, "stipple") == "gray50"]
+        assert washes
+        app._onDemandMotion(FakeEvent(x=int(100 * app.ppt)))
+        assert "over by 3" in app.status.cget("text")
+        app.budgetVar.set(64)
+        app._drawDemand()
+        washes = [i for i in app.demandCanvas.find_all()
+                  if app.demandCanvas.itemcget(i, "stipple") == "gray50"]
+        assert not washes
+        app._onDemandMotion(FakeEvent(x=int(100 * app.ppt)))
+        assert "over by" not in app.status.cget("text")
+
+    def testHoverPastTheEndIsSilent(self, app: MidiEditorApp) -> None:
+        """Beyond the last note the status bar is left alone."""
+        app._setStatus("untouched")
+        app._onDemandMotion(FakeEvent(x=int(app.song.maxTick * app.ppt) + 500))
+        assert app.status.cget("text") == "untouched"
+
+    def testStripEmptyForAnEmptySong(self, app: MidiEditorApp,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """A song with no notes draws nothing and does not fail."""
+        monkeypatch.setattr("montyroll.app.messagebox.askyesno", lambda *a, **k: True)
+        app.newFile()
+        app.update()
+        app._drawDemand()
+        assert app.demandCanvas.find_all() == ()
+
+    def testCardsShowDemandFigures(self, app: MidiEditorApp) -> None:
+        """Each channel card carries its peak, mean and share of the piece."""
+        texts = []
+
+        for row in app.channelRows.values():
+            for w in row.winfo_children():
+                if isinstance(w, tk.Label) and "peak" in w.cget("text"):
+                    texts.append(w.cget("text"))
+
+        withNotes = {n.channel for n in app.song.notes}
+        assert len(texts) == len(withNotes)
+        assert any(t.startswith("peak 2 | mean") for t in texts)
+        assert all("plays" in t and t.endswith("%") for t in texts)
+
+    def testSashResizesTheStrip(self, app: MidiEditorApp) -> None:
+        """Dragging the sash up makes the strip taller, within its limits."""
+        before = app.demandCanvas.winfo_height()
+        press = FakeEvent()
+        press.y_root = 500
+        app._onSashPress(press)
+        drag = FakeEvent()
+        drag.y_root = 440
+        app._onSashDrag(drag)
+        app.update()
+        assert app.demandCanvas.winfo_height() == before + 60
+        drag.y_root = 5000
+        app._onSashDrag(drag)
+        app.update()
+        assert app.demandCanvas.winfo_height() == DEMAND_MIN_H
+        drag.y_root = -5000
+        app._onSashDrag(drag)
+        app.update()
+        assert app.demandCanvas.winfo_height() == DEMAND_MAX_H
+
+    def testWheelOverTheStripScrollsTheRoll(self, app: MidiEditorApp) -> None:
+        """The strip shares the roll's wheel bindings."""
+        app.zoom(4.0)
+        app.update()
+        before = app.canvas.xview()[0]
+        app.onWheel(FakeEvent(100, 10, state=0x1, num=5, widget=app.demandCanvas))
+        assert app.canvas.xview()[0] > before
 
 
 class TestEventList:
