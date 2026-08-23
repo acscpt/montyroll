@@ -25,6 +25,23 @@ from . import gm, smf
 
 DRUM_CHANNEL = 9
 DEFAULT_TEMPO = 500_000  # us per quarter = 120 bpm
+MIN_TEMPO_USPB = 60_000  # 1000 bpm, the fastest a tempo edit will write
+MAX_TEMPO_USPB = 0xFFFFFF  # the three-byte limit, about 3.6 bpm
+
+
+def _tempoBytes(bpm: float) -> bytes:
+    """Encode a tempo as the three-byte microseconds-per-quarter of a meta event.
+
+    Args:
+        bpm: quarter notes per minute.
+
+    Returns:
+        bytes: three bytes, clamped to the representable range.
+    """
+    uspb = round(60_000_000 / max(bpm, 1e-9))
+    clamped = max(MIN_TEMPO_USPB, min(MAX_TEMPO_USPB, uspb))
+    encoded = clamped.to_bytes(3, "big")
+    return encoded
 
 
 @dataclass(eq=False)
@@ -207,7 +224,6 @@ class Song:
         self.trackNames = ["" for _ in self.mf.tracks]
         self.timeSigs = []
         self.markers = []
-        tempos: list[tuple[int, int]] = []
         maxTick = 0
 
         for ti, track in enumerate(self.mf.tracks):
@@ -225,8 +241,6 @@ class Song:
                 if e.status == smf.META:
                     if e.metaType == smf.META_TRACK_NAME and not self.trackNames[ti]:
                         self.trackNames[ti] = e.data.decode("latin-1").strip()
-                    elif e.metaType == smf.META_TEMPO and len(e.data) == 3:
-                        tempos.append((e.tick, int.from_bytes(e.data, "big")))
                     elif e.metaType == smf.META_TIME_SIG and len(e.data) >= 2:
                         self.timeSigs.append((e.tick, e.data[0], 1 << e.data[1]))
                     elif e.metaType == smf.META_MARKER:
@@ -284,26 +298,7 @@ class Song:
                 for note in stack:
                     note.end = max(maxTick, note.start + 1)
 
-        # The tempo map always starts at tick 0 so every lookup has an entry
-        # to fall back on: a file with no tempo event, or whose first tempo
-        # event sits past tick 0, gets the 120 bpm default in front.
-        if not tempos or tempos[0][0] > 0:
-            tempos.insert(0, (0, DEFAULT_TEMPO))
-
-        tempos.sort()
-
-        # Each map entry carries the absolute time at which it takes effect,
-        # accumulated from the previous entry's tempo over the ticks between
-        # them, so a tick/seconds conversion is one bisect and one multiply.
-        self.tempoMap = []
-        sec = 0.0
-
-        for i, (tick, uspb) in enumerate(tempos):
-            if self.tempoMap:
-                ptick, puspb, psec = self.tempoMap[-1]
-                sec = psec + (tick - ptick) * puspb / 1e6 / self.mf.division
-
-            self.tempoMap.append((tick, uspb, sec))
+        self._rebuildTempoMap()
 
         # A file with no time signature is treated as 4/4 throughout.
         if not self.timeSigs:
@@ -567,6 +562,133 @@ class Song:
 
         info.volume = volume
         self.dirty = True
+
+    def _tempoTrack(self) -> int:
+        """Find the track that carries tempo events.
+
+        Returns:
+            int: the index of the first track with a tempo event, else 0.
+        """
+        for ti, track in enumerate(self.mf.tracks):
+            if any(e.status == smf.META and e.metaType == smf.META_TEMPO for e in track):
+                return ti
+
+        return 0
+
+    def setTempo(self, tick: int, bpm: float) -> None:
+        """Set the tempo from a tick onwards.
+
+        A tempo event already at that tick is rewritten; otherwise one is
+        inserted into the track that carries the tempo map. The tempo map is
+        rebuilt, so every tick-to-seconds conversion follows at once.
+
+        Args:
+            tick: absolute tick of the change, clamped to 0 or more.
+            bpm: quarter notes per minute, clamped to what three bytes of
+                microseconds per quarter can hold, about 3.6 to 1000.
+        """
+        tick = max(0, tick)
+        data = bytearray(_tempoBytes(bpm))
+        ti = self._tempoTrack()
+        track = self.mf.tracks[ti]
+
+        # Rewrite an event at the tick if there is one; every tempo event at
+        # that tick, since a file may carry duplicates.
+        found = False
+
+        for e in track:
+            if e.status == smf.META and e.metaType == smf.META_TEMPO and e.tick == tick:
+                e.data[:] = data
+                found = True
+
+        if not found:
+            track.append(smf.Event(tick, smf.META, data, smf.META_TEMPO))
+
+        self._rebuildTempoMap()
+        self.dirty = True
+
+    def removeTempo(self, tick: int) -> bool:
+        """Remove the tempo event at a tick.
+
+        The event at tick 0 stays: a file always has a tempo in force from
+        the start.
+
+        Args:
+            tick: absolute tick.
+
+        Returns:
+            bool: True when an event was removed.
+        """
+        if tick <= 0:
+            return False
+
+        removed = False
+
+        for track in self.mf.tracks:
+            keep = [e for e in track
+                    if not (e.status == smf.META and e.metaType == smf.META_TEMPO
+                            and e.tick == tick)]
+
+            if len(keep) != len(track):
+                track[:] = keep
+                removed = True
+
+        if removed:
+            self._rebuildTempoMap()
+            self.dirty = True
+
+        return removed
+
+    def scaleTempos(self, factor: float) -> None:
+        """Multiply every tempo in the file by a factor.
+
+        A file with one tempo event gets a new base speed; a file with a
+        tempo track keeps its shape. A file with no tempo event at all
+        gains one at tick 0 so the change is recorded.
+
+        Args:
+            factor: the multiplier; each result is clamped as in `setTempo`.
+        """
+        events = [e for track in self.mf.tracks for e in track
+                  if e.status == smf.META and e.metaType == smf.META_TEMPO and len(e.data) == 3]
+
+        if not events:
+            self.setTempo(0, 60_000_000 / DEFAULT_TEMPO * factor)
+            return
+
+        for e in events:
+            bpm = 60_000_000 / int.from_bytes(e.data, "big") * factor
+            e.data[:] = _tempoBytes(bpm)
+
+        self._rebuildTempoMap()
+        self.dirty = True
+
+    def _rebuildTempoMap(self) -> None:
+        """Recompute the tempo map from the tempo events after an edit.
+
+        The notes, channel summaries and markers are untouched; only the
+        tick-to-seconds table changes.
+        """
+        tempos: list[tuple[int, int]] = []
+
+        for track in self.mf.tracks:
+            for e in track:
+                if e.status == smf.META and e.metaType == smf.META_TEMPO and len(e.data) == 3:
+                    tempos.append((e.tick, int.from_bytes(e.data, "big")))
+
+        if not tempos or tempos[0][0] > 0:
+            tempos.insert(0, (0, DEFAULT_TEMPO))
+
+        tempos.sort()
+        self.tempoMap = []
+        sec = 0.0
+
+        for tick, uspb in tempos:
+            if self.tempoMap:
+                ptick, puspb, psec = self.tempoMap[-1]
+                sec = psec + (tick - ptick) * puspb / 1e6 / self.mf.division
+
+            self.tempoMap.append((tick, uspb, sec))
 
     # ------------------------------------------------------------- playback
     def buildSlice(self, start_tick: int) -> smf.MidiFile:

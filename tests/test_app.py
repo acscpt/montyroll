@@ -383,6 +383,115 @@ class TestViewport:
         assert "C4" in app.status.cget("text")
 
 
+class TestTempoEditing:
+    """Tempo changes from the Edit menu and the ruler."""
+
+    def testTempoLinesOnTheRoll(self, app: MidiEditorApp) -> None:
+        """Each tempo change after tick 0 is a dashed line down the roll."""
+        lines = app.canvas.find_withtag("tempo")
+        assert len(lines) == 2
+        xs = sorted(app.canvas.coords(i)[0] for i in lines)
+        assert xs == pytest.approx([1920 * app.ppt, 5280 * app.ppt])
+
+    def testSetTempoFromTheMenu(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bar 2 at 90 bpm: the map, the roll, the summary and the event list follow."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 2)
+        asked = {}
+
+        def askfloat(title, prompt, **k):
+            asked.update(k)
+            return 90.0
+
+        monkeypatch.setattr("montyroll.app.simpledialog.askfloat", askfloat)
+        app.setTempoDialog()
+        assert asked["initialvalue"] == 150.0       # the tempo in force at bar 2
+        assert app.song.tempoAt(1920) == pytest.approx(90.0)
+        assert app.song.dirty
+        assert "Tempo 90 bpm from bar 2" in app.status.cget("text")
+        assert len(app.canvas.find_withtag("tempo")) == 2
+        rows = [app.evTree.item(i)["values"] for i in app.evTree.get_children()]
+        assert any(r[5] == "tempo" and r[6] == "90.0 bpm" for r in rows)
+
+    def testSetTempoCancelled(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cancelling either dialog changes nothing."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: None)
+        app.setTempoDialog()
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 3)
+        monkeypatch.setattr("montyroll.app.simpledialog.askfloat", lambda *a, **k: None)
+        app.setTempoDialog()
+        assert not app.song.dirty
+        assert len(app.song.tempoMap) == 3
+
+    def testScaleTempos(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Scaling by 200% doubles every tempo and updates the summary's bpm."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askfloat", lambda *a, **k: 200.0)
+        app.scaleTemposDialog()
+        assert [round(60e6 / u) for _, u, _ in app.song.tempoMap] == [240, 300, 200]
+        assert "240 bpm" in app.infoLbl.cget("text")
+        assert app.song.dirty
+
+    def testRulerDoubleClickOnTheTempoRow(self, app: MidiEditorApp,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        """A double-click on the bottom row sets the tempo at the nearest bar."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askfloat", lambda *a, **k: 80.0)
+        app.onRulerDouble(FakeEvent(x=int(3900 * app.ppt), y=38))       # near bar 3 (3840)
+        assert app.song.tempoAt(3840) == pytest.approx(80.0)
+        assert app.song.tempoAt(3839) == pytest.approx(150.0)
+
+    def testRulerDoubleClickElsewhereIsIgnored(self, app: MidiEditorApp,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+        """The seconds and bar rows do nothing on double-click."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askfloat",
+                            lambda *a, **k: pytest.fail("should not ask"))
+        app.onRulerDouble(FakeEvent(x=100, y=5))
+        app.onRulerDouble(FakeEvent(x=100, y=20))
+        assert not app.song.dirty
+
+    def testRulerContextMenu(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The context menu offers set, remove (only where a change exists) and scale."""
+        menus = []
+
+        class FakeMenu:
+            def __init__(self, *a, **k):
+                self.items = []
+                menus.append(self)
+
+            def add_command(self, label, command=None, state="normal"):
+                self.items.append((label, state, command))
+
+            def add_separator(self):
+                pass
+
+            def tk_popup(self, x, y):
+                pass
+
+        monkeypatch.setattr("montyroll.app.tk.Menu", FakeMenu)
+        app.onRulerContext(FakeEvent(x=int(1920 * app.ppt), y=40))
+        labels = [(label, state) for label, state, _ in menus[-1].items]
+        assert ("Set tempo from bar 2...", "normal") in labels
+        assert ("Remove tempo change at bar 2", "normal") in labels
+        app.onRulerContext(FakeEvent(x=int(960 * app.ppt), y=40))
+        labels = [(label, state) for label, state, _ in menus[-1].items]
+        assert ("Remove tempo change at bar 1", "disabled") in labels
+
+    def testRemoveTempoFromTheMenu(self, app: MidiEditorApp) -> None:
+        """Removing the bar 2 change leaves 120 bpm in force until bar 4."""
+        app._removeTempo(1920)
+        assert [t for t, _, _ in app.song.tempoMap] == [0, 5280]
+        assert app.song.tempoAt(3000) == pytest.approx(120.0)
+        assert len(app.canvas.find_withtag("tempo")) == 1
+        assert "removed" in app.status.cget("text")
+
+    def testTempoEditRestartsPlayback(self, app: MidiEditorApp,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        """While playing, a tempo change schedules the debounced restart."""
+        app.playStart = 0.0
+        scheduled = []
+        monkeypatch.setattr(app, "_liveUpdate", lambda *a, **k: scheduled.append(1))
+        app._applyTempo(960, 100)
+        assert scheduled == [1]
+
+
 class TestEventList:
     """The decoded event table."""
 

@@ -6,6 +6,10 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+### Added
+
+- **Tempo editing.** Set the tempo from any bar by double-clicking the ruler's tempo row or from Edit > Set Tempo at Bar, remove a tempo change from the row's right-click menu, and scale every tempo in the file by a percentage. Edits write real tempo meta events, so they save, and playback restarts through the live-update path when the tempo changes mid-play. Tempo changes are drawn as dashed lines down the piano roll.
+
 ## [0.1.0] - 2026-08-23
 
 ### Added

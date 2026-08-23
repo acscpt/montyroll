@@ -354,3 +354,86 @@ class TestBuildSlice:
 def testTempoEventsMatchFixture(song: model.Song) -> None:
     """Sanity check that the fixture's tempo constants are what the song carries."""
     assert [(t, u) for t, u, _ in song.tempoMap] == TEMPO_EVENTS
+
+
+class TestTempoEdits:
+    """Setting, removing and scaling tempo events."""
+
+    def testSetTempoRewritesAnExistingEvent(self, song: model.Song) -> None:
+        """A tempo at a tick that already has one replaces it and rebuilds the map."""
+        song.setTempo(1920, 100)
+        assert [(t, round(60e6 / u)) for t, u, _ in song.tempoMap] == \
+            [(0, 120), (1920, 100), (5280, 100)]
+        assert song.tickToSeconds(5280) == pytest.approx(2.0 + 3360 * 0.6 / 480)
+        assert song.dirty
+        events = [e for t in song.mf.tracks for e in t
+                  if e.status == smf.META and e.metaType == smf.META_TEMPO and e.tick == 1920]
+        assert len(events) == 1
+
+    def testSetTempoInsertsANewEvent(self, song: model.Song) -> None:
+        """A tempo at a new tick is inserted in the conductor track."""
+        song.setTempo(960, 60)
+        assert [t for t, _, _ in song.tempoMap] == [0, 960, 1920, 5280]
+        assert song.tempoAt(1000) == pytest.approx(60.0)
+        assert song.tempoAt(1920) == pytest.approx(150.0)
+        tempoTrack = [e for e in song.mf.tracks[0]
+                      if e.status == smf.META and e.metaType == smf.META_TEMPO]
+        assert any(e.tick == 960 for e in tempoTrack)
+
+    def testSetTempoOnAFileWithNone(self) -> None:
+        """A file with no tempo events gets one in track 0."""
+        track = [smf.Event(0, 0x90, bytearray([60, 100])),
+                 smf.Event(480, 0x80, bytearray([60, 64]))]
+        quiet = model.Song(smf.MidiFile(0, 480, [track]))
+        quiet.setTempo(0, 90)
+        assert [(t, round(60e6 / u)) for t, u, _ in quiet.tempoMap] == [(0, 90)]
+        assert quiet.tickToSeconds(480) == pytest.approx(60 / 90)
+
+    def testSetTempoClamps(self, song: model.Song) -> None:
+        """Out-of-range requests are clamped rather than written as garbage."""
+        song.setTempo(-10, 5000)
+        assert song.tempoMap[0][0] == 0
+        assert song.initialBpm() == pytest.approx(1000.0)
+        song.setTempo(0, 0)
+        assert song.initialBpm() == pytest.approx(60e6 / model.MAX_TEMPO_USPB)
+
+    def testSaveRoundTripsTheEdit(self, song: model.Song, tmp_path: Path) -> None:
+        """An edited tempo comes back from disk."""
+        song.setTempo(960, 72)
+        out = tmp_path / "tempo.mid"
+        song.save(str(out))
+        again = model.Song.load(str(out))
+        assert [(t, round(60e6 / u)) for t, u, _ in again.tempoMap] == \
+            [(0, 120), (960, 72), (1920, 150), (5280, 100)]
+
+    def testRemoveTempo(self, song: model.Song) -> None:
+        """Removing an event leaves the previous tempo in force; tick 0 is kept."""
+        assert song.removeTempo(1920)
+        assert [t for t, _, _ in song.tempoMap] == [0, 5280]
+        assert song.tempoAt(2000) == pytest.approx(120.0)
+        assert not song.removeTempo(1920)
+        assert not song.removeTempo(0)
+        assert song.tempoMap[0][0] == 0
+
+    def testScaleTempos(self, song: model.Song) -> None:
+        """Every tempo is multiplied; the map keeps its shape."""
+        before = song.duration
+        song.scaleTempos(2.0)
+        assert [round(60e6 / u) for _, u, _ in song.tempoMap] == [240, 300, 200]
+        assert song.duration == pytest.approx(before / 2)
+
+    def testScaleTemposOnAFileWithNone(self) -> None:
+        """A file with no tempo events gains one at the scaled default."""
+        track = [smf.Event(0, 0x90, bytearray([60, 100])),
+                 smf.Event(480, 0x80, bytearray([60, 64]))]
+        quiet = model.Song(smf.MidiFile(0, 480, [track]))
+        quiet.scaleTempos(0.5)
+        assert quiet.initialBpm() == pytest.approx(60.0)
+
+    def testNotesAreUntouched(self, song: model.Song) -> None:
+        """Tempo edits change timing, never the notes."""
+        before = [(n.pitch, n.start, n.end) for n in song.notes]
+        song.setTempo(480, 200)
+        song.scaleTempos(1.5)
+        song.removeTempo(480)
+        assert [(n.pitch, n.start, n.end) for n in song.notes] == before

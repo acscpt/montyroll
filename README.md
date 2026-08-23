@@ -72,6 +72,8 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 
 - Change a channel's GM instrument and set the channel volume.
 
+- Set the tempo from any bar (double-click the ruler's tempo row, or Edit > Set Tempo at Bar), remove a tempo change (right-click it), or scale every tempo in the file by a percentage. Tempo changes show as dashed lines down the roll.
+
 - Saving re-serialises the original tracks, so any event the editor does not understand is written back unchanged.
 
 **Listen**
@@ -103,6 +105,8 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 | Scroll horizontally | `Shift` + mouse wheel |
 | Scroll vertically | Mouse wheel |
 | Note context menu | Right-click |
+| Set tempo from a bar | Double-click the ruler's tempo row |
+| Tempo menu (set, remove, scale all) | Right-click the ruler's tempo row |
 
 ## Synths
 
