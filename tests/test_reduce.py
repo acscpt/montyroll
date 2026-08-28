@@ -10,6 +10,8 @@ synthetic fixture and, when present, JSBD-1 cover the whole pipeline.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from conftest import ROOT
@@ -125,6 +127,69 @@ class TestPlan:
         assert plan.releaseOf(0, pool) == 300.0
         assert plan.releaseOf(1, pool) == 20.0
         assert plan.releaseOf(0, reduce.Pool("loose", [0], 1)) == 0.0
+
+
+class TestPlanFile:
+    """The sidecar JSON."""
+
+    def testSidecarPath(self) -> None:
+        """The plan file takes the MIDI file's name with `.plan.json` for the extension."""
+        assert reduce.sidecarPath("/x/JSBD-1.mid") == "/x/JSBD-1.plan.json"
+        assert reduce.sidecarPath("song.midi") == "song.plan.json"
+        assert reduce.sidecarPath("a.b.mid") == "a.b.plan.json"
+
+    def testRoundTrip(self, tmp_path: Path) -> None:
+        """Tiers, pools with every switch, priorities and releases survive a save and load."""
+        plan = reduce.Plan([reduce.Pool("melody", [0, 1], 3, dedupOctave=True, tremoloGap=8,
+                                        legatoGap=120, monoTop=True, maxChord=2, tier="opm"),
+                            reduce.Pool("rest", [9], 1)],
+                           priority={0: 2.0, 1: 1.0},
+                           tiers=[reduce.Tier("opm", 8, reserved=1, release=300.0)],
+                           release={1: 20.0})
+        path = tmp_path / "x.plan.json"
+        reduce.savePlan(plan, str(path))
+        back = reduce.loadPlan(str(path))
+        assert back.tiers == plan.tiers
+        assert back.pools == plan.pools
+        assert back.priority == {0: 2.0}       # a neutral priority is not written
+        assert back.release == {1: 20.0}
+
+    def testChannelsAreOneBasedInTheFile(self) -> None:
+        """The file names channels as the strip does, Ch 1 to Ch 16."""
+        plan = reduce.Plan([reduce.Pool("all", [0, 9], 4)], priority={9: 2.0}, release={0: 5.0})
+        data = reduce.planToDict(plan)
+        assert data["version"] == reduce.PLAN_VERSION
+        assert data["pools"][0]["channels"] == [1, 10]
+        assert data["priority"] == {"10": 2.0}
+        assert data["release"] == {"1": 5.0}
+
+    def testUnknownKeysAreIgnoredAndDefaultsFilled(self) -> None:
+        """A file may carry other sections, and a missing switch takes the pool default."""
+        data = {"pools": [{"name": "a", "channels": [1], "voices": 2, "later": 1}],
+                "export": {"loop": 45}}
+        plan = reduce.planFromDict(data)
+        pool = plan.pools[0]
+        assert (pool.channels, pool.voices, pool.tier) == ([0], 2, "")
+        assert pool.dedupUnison and not pool.dedupOctave and not pool.monoTop
+        assert plan.tiers == [] and plan.priority == {} and plan.release == {}
+
+    def testMalformedIsRefusedWithThePath(self, tmp_path: Path) -> None:
+        """Anything that is not a fitting plan is a ValueError naming the file."""
+        path = tmp_path / "bad.plan.json"
+        cases = [
+            ("[1, 2]", "bad.plan.json"),
+            ("{not json", "not JSON"),
+            ('{"pools": [{"name": "a", "voices": 1}]}', "not a plan"),
+            ('{"pools": [{"name": "a", "channels": [17], "voices": 1}]}', "channel 17"),
+            ('{"pools": [{"name": "a", "channels": [1], "voices": 9, "tier": "opm"}],'
+             ' "tiers": [{"name": "opm", "capacity": 8}]}', "opm"),
+        ]
+
+        for text, match in cases:
+            path.write_text(text)
+
+            with pytest.raises(ValueError, match=match):
+                reduce.loadPlan(str(path))
 
 
 class TestWeights:

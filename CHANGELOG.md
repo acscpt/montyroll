@@ -12,6 +12,10 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Release tails.** A voice now stays busy until its note's release has died away, not just until the note ends; the release is set in milliseconds per tier or per channel and converted to ticks through the tempo map. Stealing a voice during its tail costs a fraction of the note's weight and clipped tails count towards the loss, while the same pitch struck again on a channel whose voice is still releasing retriggers that voice rather than taking another.
 
+- **Pools on the cards.** Each channel card now names the pool its notes are reduced in, with a release override and the priority beside it, and the Reduce panel edits one pool at a time: its voices, its tier and its transforms, with buttons to add, remove and rename pools and a Tiers dialog with a Commander X16 preset. The demand strip stacks channels by tier and pool, draws a budget line per tier, and shows occupancy (notes plus their releases) while the reduction is on; hovering reports each tier's count against its budget.
+
+- **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as JSON beside the MIDI file (`name.plan.json`, channels numbered as the cards show them), and opening a file loads the plan found beside it. Load Plan and Save Plan As take any path.
+
 ### Fixed
 
 - **Drum unison.** A drum hit is no longer dropped as a unison when a pitched note on another channel shares its key number and start tick. The unison transform passes the drum channel through, as the octave transform already did.

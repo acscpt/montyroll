@@ -19,13 +19,15 @@ from typing import Any
 import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
-from montyroll import analysis, model, player, smf
+from montyroll import analysis, model, player, reduce, smf
 from montyroll.app import (
     DEMAND_MAX_H,
     DEMAND_MIN_H,
     MAX_EVENT_ROWS,
+    NO_POOL,
     PLAY_GLYPH,
     STOP_GLYPH,
+    X16_TIERS,
     MidiEditorApp,
     _shade,
 )
@@ -698,6 +700,190 @@ class TestReduction:
         assert len(saved.notes) < len(app.song.notes)
         assert not app.song.dirty
         assert "Saved reduced song" in app.status.cget("text")
+class TestPlanControls:
+    """Pools, tiers and releases on the panel and the cards, and the plan sidecar."""
+
+    def testDefaultPlanIsOnePoolOfEveryChannel(self, app: MidiEditorApp) -> None:
+        """A file with no sidecar starts with one pool, on every card, at the strip's budget."""
+        assert [p.name for p in app.plan.pools] == ["all"]
+        assert app.plan.pools[0].channels == [0, 1, 9]
+        assert app.plan.pools[0].voices == app.budgetVar.get()
+        assert all(v.get() == "all" for v in app.poolVars.values())
+        assert app.poolVar.get() == "all"
+        assert app.editPool is app.plan.pools[0]
+        assert str(app.budgetSpin.cget("state")) == "normal"
+
+    def testBudgetAndPoolVoicesAreOneNumber(self, app: MidiEditorApp) -> None:
+        """With one pool the strip's spinbox and the panel's Voices mirror each other."""
+        app.budgetVar.set(3)
+        assert app.poolVoicesVar.get() == 3
+        app.poolVoicesVar.set(5)
+        assert app.budgetVar.get() == 5
+        app._reductionChanged()
+        assert app.plan.pools[0].voices == 5
+
+    def testAddPoolAndMoveAChannel(self, app: MidiEditorApp) -> None:
+        """A second pool takes a channel from the first; the strip shows the total, read-only."""
+        app.addPool()
+        assert [p.name for p in app.plan.pools] == ["all", "pool 2"]
+        assert app.editPool is app.plan.pools[1]
+        assert NO_POOL in app.poolCombos[0].cget("values")
+        app.poolVars[1].set("pool 2")
+        app._channelPoolChanged(1)
+        assert app.plan.pools[0].channels == [0, 9]
+        assert app.plan.pools[1].channels == [1]
+        app._drawDemand()
+        assert str(app.budgetSpin.cget("state")) == "disabled"
+        assert app.budgetVar.get() == app._totalVoices()
+        app.poolVars[1].set(NO_POOL)
+        app._channelPoolChanged(1)
+        assert all(1 not in p.channels for p in app.plan.pools)
+        app.removePool()
+        assert [p.name for p in app.plan.pools] == ["all"]
+        assert app._currentPlan().pools[0].channels == [0, 9]
+        app.removePool()
+        assert len(app.plan.pools) == 1
+
+    def testPanelEditsTheChosenPool(self, app: MidiEditorApp) -> None:
+        """The switches and Voices go to the edited pool and leave the other alone."""
+        app.addPool()
+        app.poolVar.set("all")
+        app._poolSelected()
+        assert app.editPool is app.plan.pools[0]
+        app.monoTopVar.set(True)
+        app.poolVoicesVar.set(4)
+        app._reductionChanged()
+        assert app.plan.pools[0].monoTop and app.plan.pools[0].voices == 4
+        assert not app.plan.pools[1].monoTop and app.plan.pools[1].voices == 1
+        app.poolVar.set("pool 2")
+        app._poolSelected()
+        assert not app.monoTopVar.get() and app.poolVoicesVar.get() == 1
+
+    def testRenamePool(self, app: MidiEditorApp) -> None:
+        """A name typed into the pool box and Return renames the pool everywhere."""
+        app.poolVar.set("strings")
+        app._renamePool()
+        assert app.plan.pools[0].name == "strings"
+        assert all(v.get() == "strings" for v in app.poolVars.values())
+        assert "strings" in app.poolCombos[0].cget("values")
+        app.addPool()
+        app.poolVar.set("strings")
+        app._renamePool()
+        assert [p.name for p in app.plan.pools] == ["strings", "pool 2"]
+        assert app.poolVar.get() == "pool 2"
+
+    def testTiersDrawALinePerTier(self, app: MidiEditorApp) -> None:
+        """Tiers applied and pools assigned: one labelled budget line per tier."""
+        assert app._applyTiers(list(X16_TIERS)) is None
+        assert app.tierCombo.cget("values") == ("(none)", "opm", "psg")
+        app.addPool()
+        app.poolVars[9].set("pool 2")
+        app._channelPoolChanged(9)
+        app.poolVar.set("all")
+        app._poolSelected()
+        app.poolTierVar.set("opm")
+        app.poolVoicesVar.set(6)
+        app._reductionChanged()
+        app.poolVar.set("pool 2")
+        app._poolSelected()
+        app.poolTierVar.set("psg")
+        app.poolVoicesVar.set(2)
+        app._reductionChanged()
+        app._drawDemand()
+        c = app.demandCanvas
+        labels = [c.itemcget(i, "text") for i in c.find_all() if c.type(i) == "text"]
+        assert "opm 6" in labels and "psg 8" in labels
+        dashed = [i for i in c.find_all() if c.type(i) == "line" and c.itemcget(i, "dash")]
+        assert len(dashed) == 2
+        app._onDemandMotion(FakeEvent(x=int(100 * app.ppt)))
+        assert "opm " in app.status.cget("text") and "/6" in app.status.cget("text")
+        assert app._stackOrder(app._ensureDemand().channels) == [0, 1, 9]
+
+    def testOverfullTiersAreRefused(self, app: MidiEditorApp) -> None:
+        """Tiers the pools no longer fit are refused with a reason and nothing changes."""
+        assert app._applyTiers([reduce.Tier("tiny", 2)]) is None
+        app.poolTierVar.set("tiny")
+        app.poolVoicesVar.set(2)
+        app._reductionChanged()
+        assert app.plan.pools[0].tier == "tiny"
+        problem = app._applyTiers([reduce.Tier("tiny", 1)])
+        assert problem and "tiny" in problem
+        assert app.plan.tiers == [reduce.Tier("tiny", 2)]
+        assert app._applyTiers([]) is None
+        assert app.plan.pools[0].tier == ""
+
+    def testRefusedPlanIsReported(self, app: MidiEditorApp) -> None:
+        """A pool pushed past its tier shows up on the label, not as a crash."""
+        app._applyTiers([reduce.Tier("tiny", 2)])
+        app.poolTierVar.set("tiny")
+        app.poolVoicesVar.set(3)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        assert app.lossLbl.cget("text").startswith("plan refused")
+        assert app.reduction.placed == []
+
+    def testReleaseOnACard(self, app: MidiEditorApp) -> None:
+        """A release typed on a card reaches the plan and stretches the strip's occupancy."""
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        before = analysis.channelDemand(app._ensureDemand())[0].fraction
+        app.releaseVars[0].set("500")
+        app._channelReleaseChanged(0)
+        assert app.plan.release == {0: 500.0}
+        assert analysis.channelDemand(app._ensureDemand())[0].fraction > before
+        assert "tails clipped" in app.lossLbl.cget("text")
+        app.releaseVars[0].set("")
+        app._channelReleaseChanged(0)
+        assert app.plan.release == {}
+
+    def testSidecarRoundTrip(self, app: MidiEditorApp, songPath: Path) -> None:
+        """Save Plan writes beside the song and opening the song again loads it back."""
+        app._applyTiers(list(X16_TIERS))
+        app.addPool()
+        app.poolVars[9].set("pool 2")
+        app._channelPoolChanged(9)
+        app.poolTierVar.set("psg")
+        app._reductionChanged()
+        app.priorityVars[0].set(2.5)
+        app.releaseVars[1].set("40")
+        app._channelReleaseChanged(1)
+        app.savePlan()
+        sidecar = Path(reduce.sidecarPath(str(songPath)))
+        assert sidecar.exists()
+        assert "Saved plan" in app.status.cget("text")
+        saved = app._currentPlan()
+        app.openFile(str(songPath))
+        assert "Loaded plan" in app.status.cget("text")
+        assert app.plan is not saved
+        assert app.plan.tiers == saved.tiers
+        assert app.plan.pools == saved.pools
+        assert app.plan.priority[0] == 2.5 and app.plan.release == {1: 40.0}
+        assert app.poolVars[9].get() == "pool 2"
+        assert app.priorityVars[0].get() == 2.5
+        assert app.releaseVars[1].get() == "40"
+        assert app.budgetVar.get() == app._totalVoices()
+
+    def testBadSidecarIsReported(self, app: MidiEditorApp, songPath: Path,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """A broken plan file beside the song is reported and the default plan stands."""
+        Path(reduce.sidecarPath(str(songPath))).write_text("{oops")
+        errors: list[tuple[Any, ...]] = []
+        monkeypatch.setattr("montyroll.app.messagebox.showerror",
+                            lambda *a, **k: errors.append(a))
+        app.openFile(str(songPath))
+        assert errors and errors[0][0] == "Plan not loaded"
+        assert [p.name for p in app.plan.pools] == ["all"]
+
+    def testReducedReportCarriesTheTotals(self, app: MidiEditorApp) -> None:
+        """The reduced report's second line is the kept, cut, clipped and loss line."""
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        text = app._ensureReport("reduced")
+        assert text.splitlines()[1].startswith("kept ")
+        assert "tails clipped" in text.splitlines()[1]
+
+
 class TestTempoEditing:
     """Tempo changes from the Edit menu and the ruler."""
 

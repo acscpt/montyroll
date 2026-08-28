@@ -12,7 +12,9 @@ voice it plays on, every note that was dropped or cut short, and the
 musical cost of those losses. A voice stays busy through its note's
 release, so the budget is honest for a chip whose envelopes outlast the
 key. The song itself is never modified; the reduction is a view over it,
-and `toMidiFile` builds a playable copy for audition or saving.
+and `toMidiFile` builds a playable copy for audition or saving. A plan is
+saved beside its MIDI file as JSON (`savePlan`, `loadPlan`, `sidecarPath`)
+so it can be versioned with the file it belongs to.
 
 Every decision rests on a weight per note (see `weights`), so a note is
 dropped because of a number the user can inspect and steer through the
@@ -21,11 +23,16 @@ per-channel priorities. The module knows nothing about tkinter.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
+from typing import Any
 
 from . import model, smf
 
 RELEASE_WEIGHT = 0.25   # a voice in its release counts this much of its note's weight
+PLAN_VERSION = 1        # written into every plan file
+PLAN_SUFFIX = ".plan.json"
 
 
 @dataclass
@@ -731,6 +738,156 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
             reduction.dropped[id(p.note)] = "no voice"
 
     return sounding
+
+
+# -------------------------------------------------------------- plan file
+def sidecarPath(path: str) -> str:
+    """The plan file that belongs beside a MIDI file.
+
+    Args:
+        path: the MIDI file's path.
+
+    Returns:
+        str: the same path with `.plan.json` in place of the extension.
+    """
+    base, _ = os.path.splitext(path)
+    sidecar = base + PLAN_SUFFIX
+    return sidecar
+
+
+def planToDict(plan: Plan) -> dict[str, Any]:
+    """Serialise a plan.
+
+    Channels are written 1-based, as the channel strip shows them, because
+    the file is meant to be read and tuned by hand. Neutral priorities are
+    left out.
+
+    Args:
+        plan: the plan.
+
+    Returns:
+        dict[str, Any]: JSON-ready data with a version number.
+    """
+    data = {
+        "version": PLAN_VERSION,
+        "tiers": [{"name": t.name, "capacity": t.capacity, "reserved": t.reserved,
+                   "release": t.release} for t in plan.tiers],
+        "pools": [{"name": p.name, "tier": p.tier, "voices": p.voices,
+                   "channels": [ch + 1 for ch in p.channels],
+                   "dedupUnison": p.dedupUnison, "dedupOctave": p.dedupOctave,
+                   "tremoloGap": p.tremoloGap, "legatoGap": p.legatoGap,
+                   "monoTop": p.monoTop, "maxChord": p.maxChord} for p in plan.pools],
+        "priority": {str(ch + 1): v for ch, v in sorted(plan.priority.items()) if v != 1.0},
+        "release": {str(ch + 1): v for ch, v in sorted(plan.release.items())},
+    }
+    return data
+
+
+def _channelIndex(value: Any, source: str) -> int:
+    """Turn a 1-based channel number from a plan file into a 0-based index.
+
+    Args:
+        value: the number as read.
+        source: the file, for the error.
+
+    Returns:
+        int: 0 to 15.
+
+    Raises:
+        ValueError: not a channel number.
+    """
+    if not isinstance(value, int) or not 1 <= value <= 16:
+        raise ValueError(f"{source}: channel {value!r} is not 1 to 16")
+
+    index = value - 1
+    return index
+
+
+def planFromDict(data: dict[str, Any], source: str = "plan") -> Plan:
+    """Rebuild a plan from its serialised form.
+
+    Keys the plan does not know are ignored, so a file may carry other
+    sections; a missing switch takes the `Pool` default. The plan is
+    validated before it is returned.
+
+    Args:
+        data: as `planToDict` wrote it.
+        source: the file, named in any error.
+
+    Returns:
+        Plan: the plan, channels 0-based again.
+
+    Raises:
+        ValueError: the data is not a plan, or its pools do not fit its
+            tiers.
+    """
+    try:
+        tiers = [Tier(str(t["name"]), int(t["capacity"]), int(t.get("reserved", 0)),
+                      float(t.get("release", 0.0))) for t in data.get("tiers", [])]
+        pools = [Pool(str(p["name"]),
+                      [_channelIndex(ch, source) for ch in p["channels"]],
+                      int(p["voices"]),
+                      dedupUnison=bool(p.get("dedupUnison", True)),
+                      dedupOctave=bool(p.get("dedupOctave", False)),
+                      tremoloGap=int(p.get("tremoloGap", 0)),
+                      legatoGap=int(p.get("legatoGap", 0)),
+                      monoTop=bool(p.get("monoTop", False)),
+                      maxChord=int(p.get("maxChord", 0)),
+                      tier=str(p.get("tier", ""))) for p in data.get("pools", [])]
+        priority = {_channelIndex(int(ch), source): float(v)
+                    for ch, v in data.get("priority", {}).items()}
+        release = {_channelIndex(int(ch), source): float(v)
+                   for ch, v in data.get("release", {}).items()}
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{source}: not a plan ({exc!r})") from exc
+
+    plan = Plan(pools, priority, tiers, release)
+
+    try:
+        plan.validate()
+    except ValueError as exc:
+        raise ValueError(f"{source}: {exc}") from exc
+
+    return plan
+
+
+def savePlan(plan: Plan, path: str) -> None:
+    """Write a plan as JSON.
+
+    Args:
+        plan: the plan.
+        path: where to write it, normally `sidecarPath` of the MIDI file.
+    """
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(planToDict(plan), f, indent=2)
+        f.write("\n")
+
+
+def loadPlan(path: str) -> Plan:
+    """Read a plan written by `savePlan`.
+
+    Args:
+        path: the plan file.
+
+    Returns:
+        Plan: the plan.
+
+    Raises:
+        ValueError: the file is not JSON, not a plan, or its pools do not
+            fit its tiers; the message carries the path.
+        OSError: the file cannot be read.
+    """
+    with open(path, encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path}: not JSON ({exc})") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: not a plan")
+
+    plan = planFromDict(data, path)
+    return plan
 
 
 # ------------------------------------------------------------------ drive
