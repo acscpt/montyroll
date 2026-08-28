@@ -4,12 +4,15 @@
 """Reduce a song to a fixed voice budget.
 
 A `Plan` divides the song's channels into `Pool`s, each with a number of
-voices and a set of transforms; `reduce` applies the transforms to each
-pool's notes, allocates what remains to the pool's voices, and returns a
-`Reduction`: every note that sounds with the voice it plays on, every note
-that was dropped or cut short, and the musical cost of those losses. The
-song itself is never modified; the reduction is a view over it, and
-`toMidiFile` builds a playable copy for audition or saving.
+voices and a set of transforms, and the pools into `Tier`s, one per chip,
+each with a capacity, a reserve and the release its patches need; `reduce`
+applies the transforms to each pool's notes, allocates what remains to the
+pool's voices, and returns a `Reduction`: every note that sounds with the
+voice it plays on, every note that was dropped or cut short, and the
+musical cost of those losses. A voice stays busy through its note's
+release, so the budget is honest for a chip whose envelopes outlast the
+key. The song itself is never modified; the reduction is a view over it,
+and `toMidiFile` builds a playable copy for audition or saving.
 
 Every decision rests on a weight per note (see `weights`), so a note is
 dropped because of a number the user can inspect and steer through the
@@ -21,6 +24,31 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import model, smf
+
+RELEASE_WEIGHT = 0.25   # a voice in its release counts this much of its note's weight
+
+
+@dataclass
+class Tier:
+    """A chip: the hardware facts its pools share.
+
+    `capacity` is the chip's channel count and `reserved` how many of those
+    are kept for something other than music, taken off the top of the
+    range; the pools naming the tier may not add up to more than the rest.
+    `release` is the default time in milliseconds a voice stays busy after
+    its note ends, which is the release of the patches the tier carries.
+    """
+
+    name: str
+    capacity: int
+    reserved: int = 0
+    release: float = 0.0
+
+    @property
+    def voices(self) -> int:
+        """Channels available to music: the capacity less the reserve."""
+        available = self.capacity - self.reserved
+        return available
 
 
 @dataclass
@@ -39,18 +67,23 @@ class Pool:
     legatoGap: int = 0            # ticks: extend a note to the next onset within this gap
     monoTop: bool = False         # keep only the highest sounding note per channel
     maxChord: int = 0             # per channel, notes starting together are thinned to this
+    tier: str = ""                # the Tier the voices come from; none for a plain pool
 
 
 @dataclass
 class Plan:
-    """The whole reduction: pools, and a priority per channel.
+    """The whole reduction: tiers, pools, and the per-channel steering.
 
     A priority scales every weight on that channel; 1.0 is neutral, 2.0
-    makes the channel twice as hard to steal from, 0.5 half as hard.
+    makes the channel twice as hard to steal from, 0.5 half as hard. A
+    release, in milliseconds, overrides the tier's default for a channel
+    whose patch differs from the tier's.
     """
 
     pools: list[Pool] = field(default_factory=list)
     priority: dict[int, float] = field(default_factory=dict)
+    tiers: list[Tier] = field(default_factory=list)
+    release: dict[int, float] = field(default_factory=dict)
 
     def priorityOf(self, channel: int) -> float:
         """The priority for a channel, 1.0 when none is set.
@@ -63,6 +96,64 @@ class Plan:
         """
         value = self.priority.get(channel, 1.0)
         return value
+
+    def tierOf(self, name: str) -> Tier | None:
+        """Find a tier by name.
+
+        Args:
+            name: the tier's name.
+
+        Returns:
+            Tier | None: the tier, or None when no tier has that name.
+        """
+        found = next((t for t in self.tiers if t.name == name), None)
+        return found
+
+    def releaseOf(self, channel: int, pool: Pool) -> float:
+        """The release for a channel's notes in a pool, in milliseconds.
+
+        The channel's own setting wins; otherwise the pool's tier's default;
+        otherwise none.
+
+        Args:
+            channel: 0-based channel.
+            pool: the pool the channel is placed through.
+
+        Returns:
+            float: milliseconds a voice stays busy after a note ends.
+        """
+        tier = self.tierOf(pool.tier)
+        fallback = tier.release if tier is not None else 0.0
+        ms = self.release.get(channel, fallback)
+        return ms
+
+    def validate(self) -> None:
+        """Check that the pools fit their tiers.
+
+        Raises:
+            ValueError: two tiers share a name, a tier reserves more than
+                it has, a pool names a tier the plan does not have, or a
+                tier's pools want more voices than it has after the reserve.
+        """
+        names = [t.name for t in self.tiers]
+
+        if len(set(names)) != len(names):
+            raise ValueError("tier names must be unique")
+
+        for tier in self.tiers:
+            if tier.reserved > tier.capacity:
+                raise ValueError(f"tier {tier.name}: reserves {tier.reserved} of "
+                                 f"{tier.capacity} channels")
+
+            wanted = sum(p.voices for p in self.pools if p.tier == tier.name)
+
+            if wanted > tier.voices:
+                raise ValueError(f"tier {tier.name}: pools want {wanted} voices, "
+                                 f"{tier.voices} available")
+
+        for pool in self.pools:
+            if pool.tier and pool.tier not in names:
+                raise ValueError(f"pool {pool.name}: no tier named {pool.tier}")
 
     @classmethod
     def single(cls, song: model.Song, voices: int, **transforms: object) -> Plan:
@@ -87,8 +178,10 @@ class Placed:
     """A note as it sounds in the reduction.
 
     `note` is the original it came from; `start` and `end` may differ from
-    the original's after legato, a top-line re-strike or a cut. Identity
-    hashing, as for `Note`, because these go into sets.
+    the original's after legato, a top-line re-strike or a cut. `release`
+    is how long the voice stays busy after `end`, in ticks, so `free` is
+    when it can take another note. Identity hashing, as for `Note`, because
+    these go into sets.
     """
 
     note: model.Note
@@ -99,12 +192,19 @@ class Placed:
     channel: int
     weight: float
     voice: int = -1
+    release: int = 0
 
     @property
     def length(self) -> int:
         """Duration in ticks."""
         ticks = self.end - self.start
         return ticks
+
+    @property
+    def free(self) -> int:
+        """The tick the voice is free again: the end plus the release."""
+        tick = self.end + self.release
+        return tick
 
 
 @dataclass
@@ -114,14 +214,20 @@ class Reduction:
     `placed` are the notes that sound, each with its voice. `dropped` are
     original notes that never sound at all, with the reason. `cut` maps an
     original note to the tick it was silenced at, when stealing ended it
-    early. `loss` is the sum over dropped and cut material of weight times
-    ticks lost, per channel and overall, so two plans can be compared.
+    early. `clipped` maps an original note to the release ticks a steal took
+    from its tail, priced at `RELEASE_WEIGHT`. `loss` is the sum over
+    dropped, cut and clipped material of weight times ticks lost, per
+    channel and overall, so two plans can be compared. `tierBase` is the
+    first voice number of each tier, whose pools are numbered as one
+    contiguous range.
     """
 
     placed: list[Placed] = field(default_factory=list)
     dropped: dict[int, str] = field(default_factory=dict)        # id(note) -> reason
     cut: dict[int, int] = field(default_factory=dict)            # id(note) -> new end
+    clipped: dict[int, int] = field(default_factory=dict)        # id(note) -> tail ticks lost
     lossByChannel: dict[int, float] = field(default_factory=dict)
+    tierBase: dict[str, int] = field(default_factory=dict)       # tier name -> first voice
     voicesUsed: int = 0
 
     @property
@@ -240,7 +346,7 @@ def dedupUnison(placed: list[Placed], reduction: Reduction) -> list[Placed]:
     The one with the higher weight survives, so a melody keeps its note and
     the doubling part loses it. Two tracks on one channel doubling each
     other count as well: the synth would play the pitch twice for one
-    sound.
+    sound. Drum-channel notes pass through untouched.
 
     Args:
         placed: the pool's notes.
@@ -253,6 +359,12 @@ def dedupUnison(placed: list[Placed], reduction: Reduction) -> list[Placed]:
     survivors: list[Placed] = []
 
     for p in placed:
+        # A drum key is a sound, not a pitch: two parts on one key are two
+        # sounds, and a drum never doubles a pitched note.
+        if p.channel == model.DRUM_CHANNEL:
+            survivors.append(p)
+            continue
+
         key = (p.start, p.pitch)
         other = byKey.get(key)
 
@@ -415,7 +527,7 @@ def monoTop(placed: list[Placed], reduction: Reduction) -> list[Placed]:
 
                     current = p
                     segment = Placed(p.note, tick, p.end, p.pitch, p.velocity, p.channel,
-                                     p.weight)
+                                     p.weight, release=p.release)
                     out.append(segment)
                 else:
                     reduction.dropped[id(p.note)] = "under the top line"
@@ -432,7 +544,7 @@ def monoTop(placed: list[Placed], reduction: Reduction) -> list[Placed]:
                         top = max(active, key=lambda a: a.pitch)
                         current = top
                         segment = Placed(top.note, tick, top.end, top.pitch, top.velocity,
-                                         top.channel, top.weight)
+                                         top.channel, top.weight, release=top.release)
                         out.append(segment)
                         reduction.dropped.pop(id(top.note), None)
 
@@ -485,20 +597,62 @@ def thinChords(placed: list[Placed], maxChord: int, reduction: Reduction) -> lis
 
 
 # -------------------------------------------------------------- allocator
-def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction) -> list[Placed]:
-    """Give each note a voice, stealing the weakest when the pool is full.
+def releaseTicks(song: model.Song, tick: int, ms: float) -> int:
+    """Convert a release time to ticks at a point in the song.
 
-    At an onset with no free voice the candidate to silence is the active
-    note with the lowest weight times remaining ticks. If the new note is
-    itself weaker than every active one it is not started at all, which is
-    the lookahead that keeps a note from starting only to be stolen a
-    moment later. A stolen note is cut at the onset.
+    A release belongs to a patch and so is a length of time; how many
+    ticks that is depends on the tempo in force, which is why it is
+    converted per note rather than once.
+
+    Args:
+        song: for the tempo map.
+        tick: the note's end, where the release starts.
+        ms: the release in milliseconds.
+
+    Returns:
+        int: the release in ticks, at least 0.
+    """
+    seconds = song.tickToSeconds(tick) + ms / 1000
+    ticks = max(0, round(song.secondsToTick(seconds) - tick))
+    return ticks
+
+
+def _cost(p: Placed, tick: int) -> float:
+    """What silencing a placed note at a tick loses.
+
+    Args:
+        p: the note, sounding or in its release.
+        tick: the tick of the steal.
+
+    Returns:
+        float: the weight times the sound remaining, plus the release
+        remaining at `RELEASE_WEIGHT`.
+    """
+    sounding = max(p.end - tick, 0)
+    tail = p.free - max(tick, p.end)
+    cost = p.weight * (sounding + RELEASE_WEIGHT * tail)
+    return cost
+
+
+def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction) -> list[Placed]:
+    """Give each note a voice, stealing the cheapest when the pool is full.
+
+    A voice is busy from its note's onset to `free`, the end plus the
+    release. At an onset with no free voice the candidate to silence is
+    the active note with the lowest cost: its weight times the sound
+    remaining, plus the release remaining at `RELEASE_WEIGHT`. If the new
+    note is itself worth less than every active one it is not started at
+    all, which is the lookahead that keeps a note from starting only to be
+    stolen a moment later. A stolen note is cut at the onset and whatever
+    remained of its release is recorded as clipped. The same pitch struck
+    again on a channel whose voice is still releasing takes that voice
+    back: a retrigger, not a steal, at no cost.
 
     Args:
         placed: the pool's notes after its transforms.
         voices: the pool's voice count.
         base: the first voice number of the pool.
-        reduction: records drops and cuts.
+        reduction: records drops, cuts and clipped releases.
 
     Returns:
         list[Placed]: the notes that sound, with `voice` set.
@@ -507,7 +661,7 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
 
     for p in placed:
         events.append((p.start, 1, p))
-        events.append((p.end, 0, p))
+        events.append((p.free, 0, p))
 
     events.sort(key=lambda e: (e[0], e[1], -e[2].weight))
     free = list(range(base, base + voices))
@@ -523,23 +677,43 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
 
             continue
 
+        # The channel's own pitch, still releasing: keep its voice.
+        again = next((v for v, a in active.items()
+                      if a.channel == p.channel and a.pitch == p.pitch and a.end <= tick),
+                     None)
+
+        if again is not None:
+            p.voice = again
+            active[again] = p
+            out.append(p)
+            continue
+
         if free:
             p.voice = free.pop(0)
             active[p.voice] = p
             out.append(p)
             continue
 
-        # Full: weigh the newcomer against the weakest of what is playing.
-        victimVoice = min(active, key=lambda v: active[v].weight * (active[v].end - tick))
+        # Full: weigh the newcomer against the cheapest of what is playing.
+        victimVoice = min(active, key=lambda v: _cost(active[v], tick))
         victim = active[victimVoice]
         newcomer = p.weight * (p.end - p.start)
 
-        if newcomer <= victim.weight * (victim.end - tick):
+        if newcomer <= _cost(victim, tick):
             reduction.dropped[id(p.note)] = "no voice"
             continue
 
-        victim.end = tick
-        reduction.cut[id(victim.note)] = tick
+        # A steal takes what remains: the sound, if the victim is still
+        # playing, and the rest of its release either way.
+        tail = victim.free - max(tick, victim.end)
+
+        if tail > 0:
+            reduction.clipped[id(victim.note)] = tail
+
+        if tick < victim.end:
+            victim.end = tick
+            reduction.cut[id(victim.note)] = tick
+
         p.voice = victimVoice
         active[victimVoice] = p
         out.append(p)
@@ -553,6 +727,7 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
             sounding.append(p)
         else:
             reduction.cut.pop(id(p.note), None)
+            reduction.clipped.pop(id(p.note), None)
             reduction.dropped[id(p.note)] = "no voice"
 
     return sounding
@@ -564,19 +739,44 @@ def reduce(song: model.Song, plan: Plan) -> Reduction:
 
     Args:
         song: the song; never modified.
-        plan: the pools and priorities.
+        plan: the tiers, pools and priorities.
 
     Returns:
-        Reduction: the result, with voices numbered across pools in plan
-        order.
+        Reduction: the result, with voices numbered as one contiguous range
+        per tier in tier order, plan order within a tier, and the pools
+        with no tier last.
+
+    Raises:
+        ValueError: the plan's pools do not fit its tiers.
     """
+    plan.validate()
     weight = weights(song, plan)
     reduction = Reduction()
     base = 0
 
-    for pool in plan.pools:
+    # Pools in tier order, so each tier's voices are one range starting at
+    # its base; pools with no tier follow.
+    ordered: list[Pool] = []
+    offset = 0
+
+    for tier in plan.tiers:
+        reduction.tierBase[tier.name] = offset
+        mine = [p for p in plan.pools if p.tier == tier.name]
+        ordered.extend(mine)
+        offset += sum(p.voices for p in mine)
+
+    ordered.extend(p for p in plan.pools if not p.tier)
+
+    for pool in ordered:
         members = set(pool.channels)
         placed = _place([n for n in song.notes if n.channel in members], weight)
+
+        # A release is a time; it becomes ticks where each note ends.
+        for p in placed:
+            ms = plan.releaseOf(p.channel, pool)
+
+            if ms > 0:
+                p.release = releaseTicks(song, p.end, ms)
 
         if pool.dedupUnison:
             placed = dedupUnison(placed, reduction)
@@ -601,14 +801,17 @@ def reduce(song: model.Song, plan: Plan) -> Reduction:
 
     reduction.voicesUsed = base
 
-    # Loss: weight times ticks for every dropped note and every cut tail.
+    # Loss: weight times ticks for every dropped note and every cut tail,
+    # and at RELEASE_WEIGHT for every clipped release.
     for n in song.notes:
-        lost = 0
+        lost = 0.0
 
         if id(n) in reduction.dropped:
             lost = n.length
         elif id(n) in reduction.cut:
             lost = n.end - reduction.cut[id(n)]
+
+        lost += RELEASE_WEIGHT * reduction.clipped.get(id(n), 0)
 
         if lost > 0:
             total = reduction.lossByChannel.get(n.channel, 0.0)

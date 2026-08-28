@@ -6,6 +6,16 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+### Added
+
+- **Tiers.** Pools now belong to tiers, one per chip, each with a capacity, a number of channels reserved for other uses, and a default release. Each tier's voices are numbered as one contiguous block, and a plan whose pools want more voices than their tier has is refused.
+
+- **Release tails.** A voice now stays busy until its note's release has died away, not just until the note ends; the release is set in milliseconds per tier or per channel and converted to ticks through the tempo map. Stealing a voice during its tail costs a fraction of the note's weight and clipped tails count towards the loss, while the same pitch struck again on a channel whose voice is still releasing retriggers that voice rather than taking another.
+
+### Fixed
+
+- **Drum unison.** A drum hit is no longer dropped as a unison when a pitched note on another channel shares its key number and start tick. The unison transform passes the drum channel through, as the octave transform already did.
+
 ## [0.2.0] - 2026-08-23
 
 ### Added

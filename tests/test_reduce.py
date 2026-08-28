@@ -86,6 +86,46 @@ class TestPlan:
         assert plan.priorityOf(3) == 2.0
         assert plan.priorityOf(0) == 1.0
 
+    def testTierVoicesAreCapacityLessReserve(self) -> None:
+        """A tier offers its channels less those reserved for something else."""
+        tier = reduce.Tier("psg", 16, reserved=4)
+        assert tier.voices == 12
+        assert reduce.Tier("opm", 8).voices == 8
+
+    def testValidateRejectsAnOverfullTier(self) -> None:
+        """Pools wanting more voices than their tier has after the reserve are refused."""
+        plan = reduce.Plan([reduce.Pool("a", [0], 5, tier="opm"),
+                            reduce.Pool("b", [1], 4, tier="opm")],
+                           tiers=[reduce.Tier("opm", 8)])
+
+        with pytest.raises(ValueError, match="opm"):
+            plan.validate()
+
+        plan.pools[1].voices = 3
+        plan.validate()
+
+    def testValidateRejectsAnUnknownTierAndABadReserve(self) -> None:
+        """A pool naming no known tier, or a reserve above the capacity, is refused."""
+        plan = reduce.Plan([reduce.Pool("a", [0], 2, tier="sid")], tiers=[reduce.Tier("opm", 8)])
+
+        with pytest.raises(ValueError, match="sid"):
+            plan.validate()
+
+        with pytest.raises(ValueError, match="reserves"):
+            reduce.Plan(tiers=[reduce.Tier("psg", 16, reserved=20)]).validate()
+
+        with pytest.raises(ValueError, match="unique"):
+            reduce.Plan(tiers=[reduce.Tier("opm", 8), reduce.Tier("opm", 8)]).validate()
+
+    def testReleaseOfPrefersTheChannelSetting(self) -> None:
+        """A channel's own release overrides its tier's default; no tier means none."""
+        pool = reduce.Pool("strings", [0, 1], 4, tier="opm")
+        plan = reduce.Plan([pool], tiers=[reduce.Tier("opm", 8, release=300.0)],
+                           release={1: 20.0})
+        assert plan.releaseOf(0, pool) == 300.0
+        assert plan.releaseOf(1, pool) == 20.0
+        assert plan.releaseOf(0, reduce.Pool("loose", [0], 1)) == 0.0
+
 
 class TestWeights:
     """The per-note score."""
@@ -152,6 +192,13 @@ class TestTransforms:
         s = _song((0, 60, 100, 0, 480), (1, 60, 100, 10, 480))
         assert len(reduce.dedupUnison(_placed(s), reduce.Reduction())) == 2
 
+    def testDedupUnisonLeavesDrums(self) -> None:
+        """A kick on key 36 and a bass C2 struck together are two sounds, both kept."""
+        s = _song((0, 36, 100, 0, 480), (9, 36, 100, 0, 480))
+        r = reduce.Reduction()
+        assert len(reduce.dedupUnison(_placed(s), r)) == 2
+        assert not r.dropped
+
     def testDedupOctaveTieKeepsTheLower(self) -> None:
         """Equal weights: the lower octave survives, as it carries the root."""
         s = _song((0, 48, 100, 0, 480), (1, 60, 100, 0, 480))
@@ -215,6 +262,17 @@ class TestTransforms:
         assert [(p.pitch, p.start, p.end) for p in out] == [(67, 0, 960)]
         assert r.dropped[id(_note(s, 0, 60, 240))] == "under the top line"
 
+    def testMonoTopSegmentsKeepTheRelease(self) -> None:
+        """A re-struck segment carries the release of the note it came from."""
+        s = _song((0, 60, 100, 0, 960), (0, 67, 100, 240, 480))
+        placed = _placed(s)
+
+        for p in placed:
+            p.release = 30
+
+        out = reduce.monoTop(placed, reduce.Reduction())
+        assert [p.release for p in out] == [30, 30, 30]
+
     def testThinChords(self) -> None:
         """Top and bottom are kept first, then the heaviest inner notes."""
         s = _song((0, 60, 100, 0, 480), (0, 64, 50, 0, 480), (0, 67, 120, 0, 480),
@@ -272,6 +330,75 @@ class TestAllocate:
         assert not r.cut
 
 
+    def testReleaseHoldsTheVoice(self) -> None:
+        """A voice stays busy through its release; taking it then clips the tail, not the note."""
+        s = _song((0, 60, 127, 0, 480), (0, 64, 127, 520, 1000))
+        placed = _placed(s)
+        placed[0].release = 100
+        r = reduce.Reduction()
+        out = reduce.allocate(placed, 1, 0, r)
+        assert [p.voice for p in out] == [0, 0]
+        assert r.clipped == {id(_note(s, 0, 60, 0)): 60}
+        assert not r.cut and not r.dropped
+
+    def testVoiceIsFreeAfterTheRelease(self) -> None:
+        """Once the release has run out the voice is simply free: nothing clipped."""
+        s = _song((0, 60, 127, 0, 480), (0, 64, 127, 600, 1000))
+        placed = _placed(s)
+        placed[0].release = 100
+        r = reduce.Reduction()
+        out = reduce.allocate(placed, 1, 0, r)
+        assert [p.voice for p in out] == [0, 0]
+        assert not r.clipped
+
+    def testRestrikeKeepsTheReleasingVoice(self) -> None:
+        """The same pitch struck again on the channel retriggers its voice at no cost."""
+        s = _song((0, 60, 127, 0, 480), (0, 60, 127, 500, 1000), (1, 64, 127, 500, 1000))
+        placed = _placed(s)
+
+        for p in placed:
+            p.release = 200
+
+        r = reduce.Reduction()
+        out = reduce.allocate(placed, 2, 0, r)
+        voices = {(p.channel, p.pitch, p.start): p.voice for p in out}
+        assert voices[(0, 60, 500)] == voices[(0, 60, 0)]
+        assert voices[(1, 64, 500)] != voices[(0, 60, 0)]
+        assert not r.clipped and not r.cut and not r.dropped
+
+    def testCutNoteLosesItsWholeRelease(self) -> None:
+        """A note stolen while sounding is cut and the whole of its tail is clipped."""
+        s = _song((0, 60, 100, 0, 480), (0, 64, 100, 0, 2000), (0, 67, 100, 240, 720))
+        placed = _placed(s)
+
+        for p in placed:
+            p.release = 50
+
+        r = reduce.Reduction()
+        reduce.allocate(placed, 2, 0, r)
+        victim = _note(s, 0, 60, 0)
+        assert r.cut == {id(victim): 240}
+        assert r.clipped == {id(victim): 50}
+
+    def testTailOutweighsATrivialNewcomer(self) -> None:
+        """A note worth less than a loud note's remaining tail is not started."""
+        s = _song((0, 60, 127, 0, 480), (1, 64, 1, 490, 500))
+        placed = _placed(s)
+        placed[0].release = 1000
+        r = reduce.Reduction()
+        out = reduce.allocate(placed, 1, 0, r)
+        assert len(out) == 1
+        assert r.dropped[id(_note(s, 1, 64, 490))] == "no voice"
+        assert not r.clipped
+
+    def testReleaseTicksFollowTheTempo(self, song: model.Song) -> None:
+        """Five hundred milliseconds is 480 ticks at 120 bpm, 600 at 150 and 400 at 100."""
+        assert reduce.releaseTicks(song, 0, 500) == 480
+        assert reduce.releaseTicks(song, 1920, 500) == 600
+        assert reduce.releaseTicks(song, 5280, 500) == 400
+        assert reduce.releaseTicks(song, 0, 0) == 0
+
+
 class TestReduce:
     """The whole pipeline."""
 
@@ -296,6 +423,54 @@ class TestReduce:
         assert byChannel[1] <= {2, 3, 4}
         assert byChannel[9] == {5}
         assert r.voicesUsed == 6
+
+    def testTiersNumberVoicesInTierOrder(self, song: model.Song) -> None:
+        """A tier's pools get one contiguous range in tier order, whatever the pool order."""
+        plan = reduce.Plan([reduce.Pool("wind", [1], 3, tier="psg"),
+                            reduce.Pool("keys", [0], 2, tier="opm"),
+                            reduce.Pool("drums", [9], 1)],
+                           tiers=[reduce.Tier("opm", 8), reduce.Tier("psg", 16, reserved=4)])
+        r = reduce.reduce(song, plan)
+        assert r.tierBase == {"opm": 0, "psg": 2}
+        byChannel = {}
+
+        for p in r.placed:
+            byChannel.setdefault(p.channel, set()).add(p.voice)
+
+        assert byChannel[0] <= {0, 1}
+        assert byChannel[1] <= {2, 3, 4}
+        assert byChannel[9] == {5}
+        assert r.voicesUsed == 6
+
+    def testOverfullTierIsRefused(self, song: model.Song) -> None:
+        """A plan whose pools exceed a tier is refused before anything is placed."""
+        plan = reduce.Plan([reduce.Pool("all", [0, 1, 9], 9, tier="opm")],
+                           tiers=[reduce.Tier("opm", 8)])
+
+        with pytest.raises(ValueError):
+            reduce.reduce(song, plan)
+
+    def testReleaseComesFromTheTierUnlessTheChannelSaysOtherwise(self) -> None:
+        """Notes carry their tier's release in ticks; a channel override replaces it."""
+        s = _song((0, 60, 100, 0, 480), (1, 64, 100, 0, 480))
+        plan = reduce.Plan([reduce.Pool("all", [0, 1], 4, tier="opm")],
+                           tiers=[reduce.Tier("opm", 8, release=500.0)], release={1: 0.0})
+        r = reduce.reduce(s, plan)
+        assert {p.channel: p.release for p in r.placed} == {0: 480, 1: 0}
+        assert {p.channel: p.free for p in r.placed} == {0: 960, 1: 480}
+
+    def testClippedTailsCountTowardsTheLoss(self) -> None:
+        """A clipped release costs its ticks at RELEASE_WEIGHT."""
+        s = _song((0, 60, 127, 0, 480), (0, 64, 127, 520, 1000))
+        plan = reduce.Plan([reduce.Pool("one", [0], 1, tier="opm")],
+                           tiers=[reduce.Tier("opm", 8, release=500.0)])
+        r = reduce.reduce(s, plan)
+
+        # 500 ms is 480 ticks at 120 bpm, and 40 of them had run when the
+        # second note took the voice.
+        assert r.clipped == {id(_note(s, 0, 60, 0)): 440}
+        assert r.loss == pytest.approx(reduce.RELEASE_WEIGHT * 1.5 * 440)
+        assert not r.cut and not r.dropped
 
     def testChannelOutsideEveryPoolIsSilent(self, song: model.Song) -> None:
         """A channel in no pool is not placed and not counted as dropped."""
