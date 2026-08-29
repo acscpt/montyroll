@@ -24,6 +24,7 @@ from bisect import bisect_right
 from dataclasses import replace
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
+from typing import Any
 
 from . import analysis, export, gm, model, player, reduce, smf
 
@@ -41,6 +42,7 @@ DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
 NO_TIER = "(none)"   # a pool with no tier: plain voices, no chip
+BY_INSTRUMENT = "(by instrument)"   # a pool's sound left to each part's GM program
 X16_TIERS = export.presetTiers(export.TARGETS["zsm"])   # the Commander X16's two chips
 SNAP_CHOICES = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "off"]
 MAX_EVENT_ROWS = 8000
@@ -233,6 +235,8 @@ class MidiEditorApp(tk.Tk):
         self.poolVar = tk.StringVar()
         self.poolVoicesVar = tk.IntVar(value=DEMAND_BUDGET)
         self.poolTierVar = tk.StringVar(value=NO_TIER)
+        self.poolSoundVar = tk.StringVar(value=BY_INSTRUMENT)
+        self.planTargets: dict[str, Any] = {}           # each export target's plan section
         self.poolVars: dict[int, tk.StringVar] = {}      # per channel: the name of its pool
         self.releaseVars: dict[int, tk.StringVar] = {}   # per channel: ms, "" for the tier's
         self.poolCombos: list[ttk.Combobox] = []         # every card's pool picker
@@ -792,6 +796,7 @@ class MidiEditorApp(tk.Tk):
         # there is one, replaces it once the cards exist.
         self.plan = self._defaultPlan()
         self.editPool = self.plan.pools[0]
+        self.planTargets = {}
 
         # Selection and mute/solo variables refer to the old song's notes and
         # channels; _buildChannelRows recreates the variables.
@@ -1948,6 +1953,14 @@ class MidiEditorApp(tk.Tk):
         self.tierCombo.pack(side="left", padx=(2, 0))
         self.tierCombo.bind("<<ComboboxSelected>>", lambda e: self._reductionChanged())
         Tooltip(self.tierCombo, "The chip this pool's voices come from")
+        ttk.Label(budget, text="Sound", font=("TkDefaultFont", 8)).pack(side="left", padx=(8, 0))
+        self.soundCombo = ttk.Combobox(budget, textvariable=self.poolSoundVar, state="readonly",
+                                       width=11)
+        self.soundCombo.pack(side="left", padx=(2, 0))
+        self.soundCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSoundChanged())
+        Tooltip(self.soundCombo, "The sound this pool's voices play on export: a patch\n"
+                                 "or waveform from the target's library, or one chosen\n"
+                                 "for each part from its GM instrument")
 
         # How much the edited pool's channels play at the same time: low is
         # what makes sharing its voices work.
@@ -2146,7 +2159,8 @@ class MidiEditorApp(tk.Tk):
         try:
             plan.validate()
             reduction = self._ensureReduction()
-            data = target.export(self.song, reduction, plan, master=master)
+            data = target.export(self.song, reduction, plan, master=master,
+                                 settings=self.planTargets.get(key, {}))
         except ValueError as exc:
             messagebox.showerror(f"Export {target.NAME}",
                                  f"{exc}\n\nGive every pool a tier with a chip of this target "
@@ -2338,6 +2352,7 @@ class MidiEditorApp(tk.Tk):
         self.poolVar.set(pool.name)
         self.poolVoicesVar.set(pool.voices)
         self.poolTierVar.set(pool.tier or NO_TIER)
+        self._loadSoundBox(pool)
         self.dedupUnisonVar.set(pool.dedupUnison)
         self.dedupOctaveVar.set(pool.dedupOctave)
         self.monoTopVar.set(pool.monoTop)
@@ -2390,6 +2405,55 @@ class MidiEditorApp(tk.Tk):
 
         self.overlapLbl.config(text=text)
 
+    def _targetFor(self, pool: reduce.Pool) -> str | None:
+        """The export target whose chip a pool's tier names.
+
+        Args:
+            pool: the pool.
+
+        Returns:
+            str | None: the target's key, or None when the pool has no chip.
+        """
+        tier = self.plan.tierOf(pool.tier)
+        chip = tier.chip if tier is not None else ""
+        key = next((k for k, t in export.TARGETS.items()
+                    if any(c.name == chip for c in t.CHIPS)), None) if chip else None
+        return key
+
+    def _loadSoundBox(self, pool: reduce.Pool):
+        """Fill the Sound box with a pool's target's sounds and show its choice.
+
+        Args:
+            pool: the edited pool.
+        """
+        key = self._targetFor(pool)
+
+        if key is None:
+            self.soundCombo.configure(values=[BY_INSTRUMENT], state="disabled")
+            self.poolSoundVar.set(BY_INSTRUMENT)
+            return
+
+        names = [BY_INSTRUMENT] + list(export.TARGETS[key].SOUNDS)
+        chosen = self.planTargets.get(key, {}).get("sounds", {}).get(pool.name, BY_INSTRUMENT)
+        self.soundCombo.configure(values=names, state="readonly")
+        self.poolSoundVar.set(chosen if chosen in names else BY_INSTRUMENT)
+
+    def _poolSoundChanged(self):
+        """The Sound box chose: record it for the pool in its target's section."""
+        pool = self.editPool
+        key = self._targetFor(pool) if pool is not None else None
+
+        if key is None:
+            return
+
+        sounds = self.planTargets.setdefault(key, {}).setdefault("sounds", {})
+        name = self.poolSoundVar.get()
+
+        if name == BY_INSTRUMENT:
+            sounds.pop(pool.name, None)
+        else:
+            sounds[pool.name] = name
+
     def _storePoolControls(self):
         """Write the panel's controls into the edited pool.
 
@@ -2402,7 +2466,11 @@ class MidiEditorApp(tk.Tk):
             return
 
         tier = self.poolTierVar.get()
-        pool.tier = "" if tier == NO_TIER else tier
+
+        if pool.tier != ("" if tier == NO_TIER else tier):
+            pool.tier = "" if tier == NO_TIER else tier
+            self._loadSoundBox(pool)
+
         pool.dedupUnison = self.dedupUnisonVar.get()
         pool.dedupOctave = self.dedupOctaveVar.get()
         pool.monoTop = self.monoTopVar.get()
@@ -2434,6 +2502,12 @@ class MidiEditorApp(tk.Tk):
         if pool is None or not name or taken:
             self._loadPoolControls()
             return
+
+        for section in self.planTargets.values():
+            sounds = section.get("sounds", {})
+
+            if pool.name in sounds:
+                sounds[name] = sounds.pop(pool.name)
 
         pool.name = name
         self._syncCardsToPlan()
@@ -2625,17 +2699,19 @@ class MidiEditorApp(tk.Tk):
         ttk.Button(buttons, text="OK", command=ok).pack(side="right", padx=(0, 4))
         dlg.grab_set()
 
-    def _applyPlan(self, plan: reduce.Plan):
+    def _applyPlan(self, plan: reduce.Plan, targets: dict[str, Any] | None = None):
         """Make a plan the one the controls edit and the reduction uses.
 
         Args:
             plan: the plan; given a pool of every channel if it has none.
+            targets: the export targets' sections that came with it.
         """
         if not plan.pools:
             channels = sorted({n.channel for n in self.song.notes})
             plan.pools.append(reduce.Pool("all", channels, max(1, self.budgetVar.get())))
 
         self.plan = plan
+        self.planTargets = targets or {}
         self.editPool = plan.pools[0]
         self._syncCardsToPlan()
         self._loadPoolControls()
@@ -2687,7 +2763,7 @@ class MidiEditorApp(tk.Tk):
                 self.openFile(named)
                 opened = f"opened {named} and "
 
-        self._applyPlan(read.plan)
+        self._applyPlan(read.plan, read.targets)
         self._setStatus(f"Loaded plan {path}" if not opened else f"Loaded plan {path}: {opened}"
                         "applied it")
 
@@ -2754,7 +2830,7 @@ class MidiEditorApp(tk.Tk):
             midiData: the song's bytes to embed, None to embed none.
         """
         try:
-            reduce.savePlan(self._currentPlan(), path, midiFile, midiData)
+            reduce.savePlan(self._currentPlan(), path, midiFile, midiData, self.planTargets)
         except OSError as exc:
             messagebox.showerror("Save failed", f"{path}\n\n{exc}")
             return

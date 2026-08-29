@@ -4,9 +4,12 @@
 """Export targets: a reduction turned into what a particular chip set plays.
 
 A target is a module that provides what `Target` lists: a name, a file
-suffix, its frame rate, the chips a `Tier` may name, an `export` from a
-song, a reduction and a plan to bytes, a `verify` of written bytes and a
-`describe` of them. `TARGETS` maps a key to each target, and the
+suffix, its frame rate, the chips a `Tier` may name, the sounds a pool
+may be given by name, an `export` from a song, a reduction and a plan to
+bytes, a `verify` of written bytes and a `describe` of them. A target's
+own settings, such as the sound chosen for each pool, travel in the plan
+file under `targets` by the target's key and reach `export` as
+`settings`. `TARGETS` maps a key to each target, and the
 application offers every entry as an export and every chip in the tiers
 dialog. `zsm` is the Commander X16's YM2151 and VERA PSG through the ZSM
 file format.
@@ -29,10 +32,11 @@ class Target(Protocol):
     SUFFIX: str             # the file extension, ".zsm"
     FRAME_RATE: int         # frames per second the target's player runs at
     CHIPS: tuple[Chip, ...]
+    SOUNDS: tuple[str, ...]  # names a pool may be given under settings["sounds"]
 
     def export(self, song: model.Song, reduction: reduce.Reduction, plan: reduce.Plan, *,
                start: int = 0, end: int | None = None, loop: int | None = None,
-               master: float = 1.0) -> bytes:
+               master: float = 1.0, settings: dict | None = None) -> bytes:
         """The file for a reduction; raises ValueError when a pool has no chip of this target."""
 
     def verify(self, data: bytes, plan: reduce.Plan) -> list[str]:

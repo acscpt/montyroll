@@ -658,7 +658,9 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
     stolen a moment later. A stolen note is cut at the onset and whatever
     remained of its release is recorded as clipped. The same pitch struck
     again on a channel whose voice is still releasing takes that voice
-    back: a retrigger, not a steal, at no cost.
+    back: a retrigger, not a steal, at no cost. Among free voices, one that
+    last played the note's channel is preferred, so a part keeps its voices
+    where it can.
 
     Args:
         placed: the pool's notes after its transforms.
@@ -678,6 +680,7 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
     events.sort(key=lambda e: (e[0], e[1], -e[2].weight))
     free = list(range(base, base + voices))
     active: dict[int, Placed] = {}
+    lastChannel: dict[int, int] = {}
     out: list[Placed] = []
 
     for tick, on, p in events:
@@ -701,8 +704,11 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
             continue
 
         if free:
-            p.voice = free.pop(0)
+            same = [v for v in free if lastChannel.get(v) == p.channel]
+            p.voice = same[0] if same else free[0]
+            free.remove(p.voice)
             active[p.voice] = p
+            lastChannel[p.voice] = p.channel
             out.append(p)
             continue
 
@@ -728,6 +734,7 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
 
         p.voice = victimVoice
         active[victimVoice] = p
+        lastChannel[victimVoice] = p.channel
         out.append(p)
 
     # A note stolen at its own onset never sounded: that is a drop, not a
@@ -753,12 +760,14 @@ class PlanFile:
     `midiFile` is the path the file names, made absolute against the
     file's own directory when it is relative, whether or not it exists;
     `midiData` is the MIDI embedded in the file, its checksum verified.
-    Either or both may be None.
+    Either or both may be None. `targets` is each export target's own
+    section, keyed by the target's name, kept as it was read.
     """
 
     plan: Plan
     midiFile: str | None = None
     midiData: bytes | None = None
+    targets: dict[str, Any] = field(default_factory=dict)
 
 
 def sidecarPath(path: str) -> str:
@@ -775,8 +784,8 @@ def sidecarPath(path: str) -> str:
     return sidecar
 
 
-def planToDict(plan: Plan, midiFile: str = "",
-               midiData: bytes | None = None) -> dict[str, Any]:
+def planToDict(plan: Plan, midiFile: str = "", midiData: bytes | None = None,
+               targets: dict[str, Any] | None = None) -> dict[str, Any]:
     """Serialise a plan.
 
     Channels are written 1-based, as the channel strip shows them, because
@@ -784,11 +793,13 @@ def planToDict(plan: Plan, midiFile: str = "",
     left out. The MIDI file is named under `midiFile`, a path taken as
     relative to the plan file's directory unless absolute, and embedded
     under `midiBlob` as base64 with its SHA-256 when its bytes are given.
+    Each export target's own section goes under `targets` by its name.
 
     Args:
         plan: the plan.
         midiFile: the MIDI file's path or name, empty to name none.
         midiData: the MIDI file's bytes to embed, None to embed none.
+        targets: per-target sections, such as a ZSM target's patches.
 
     Returns:
         dict[str, Any]: JSON-ready data with a version number.
@@ -812,6 +823,9 @@ def planToDict(plan: Plan, midiFile: str = "",
     if midiData is not None:
         data["midiBlob"] = {"sha256": hashlib.sha256(midiData).hexdigest(),
                             "base64": base64.b64encode(midiData).decode("ascii")}
+
+    if targets:
+        data["targets"] = targets
 
     return data
 
@@ -885,7 +899,8 @@ def planFromDict(data: dict[str, Any], source: str = "plan") -> Plan:
     return plan
 
 
-def savePlan(plan: Plan, path: str, midiFile: str = "", midiData: bytes | None = None) -> None:
+def savePlan(plan: Plan, path: str, midiFile: str = "", midiData: bytes | None = None,
+             targets: dict[str, Any] | None = None) -> None:
     """Write a plan as a `.monty` file.
 
     Args:
@@ -893,9 +908,10 @@ def savePlan(plan: Plan, path: str, midiFile: str = "", midiData: bytes | None =
         path: where to write it, normally `sidecarPath` of the MIDI file.
         midiFile: the MIDI file's path or name to record, empty for none.
         midiData: the MIDI file's bytes to embed, None to embed none.
+        targets: per-target sections to carry.
     """
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(planToDict(plan, midiFile, midiData), f, indent=2)
+        json.dump(planToDict(plan, midiFile, midiData, targets), f, indent=2)
         f.write("\n")
 
 
@@ -945,6 +961,12 @@ def readPlanFile(path: str) -> PlanFile:
 
         result.midiData = raw
 
+    targets = data.get("targets", {})
+
+    if not isinstance(targets, dict):
+        raise ValueError(f"{path}: targets is not a table")
+
+    result.targets = targets
     return result
 
 

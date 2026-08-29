@@ -434,6 +434,15 @@ class TestAllocate:
         assert not r.cut
 
 
+    def testAPartKeepsItsVoice(self) -> None:
+        """A free voice that last played the note's channel is taken before a lower one."""
+        s = _song((0, 60, 100, 0, 480), (1, 64, 100, 0, 480),
+                  (1, 65, 100, 960, 1440), (0, 62, 100, 960, 1440))
+        out = reduce.allocate(_placed(s), 2, 0, reduce.Reduction())
+        voices = {(p.channel, p.start): p.voice for p in out}
+        assert voices[(0, 0)] == 0 and voices[(1, 0)] == 1
+        assert voices[(1, 960)] == 1 and voices[(0, 960)] == 0
+
     def testReleaseHoldsTheVoice(self) -> None:
         """A voice stays busy through its release; taking it then clips the tail, not the note."""
         s = _song((0, 60, 127, 0, 480), (0, 64, 127, 520, 1000))

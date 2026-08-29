@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Any
 
 from .. import model, reduce
 from . import zsmcheck, zsmdecode, zsmsim
@@ -235,6 +236,81 @@ DEFAULT_PATCH = Patch(operators=[Operator(tl=24, ar=31, d1r=6, d1l=2, rr=10),
 KEY_ON_ALL = 0x78         # all four operators in a key-on write
 
 
+def _op(mul: int, tl: int, ar: int, d1r: int, d1l: int, d2r: int, rr: int,
+        dt1: int = 0, ks: int = 0) -> Operator:
+    """An operator from the values a patch sheet lists.
+
+    Args:
+        mul: frequency multiple.
+        tl: total level.
+        ar: attack rate.
+        d1r: first decay rate.
+        d1l: first decay level.
+        d2r: second decay rate.
+        rr: release rate.
+        dt1: detune.
+        ks: key scaling.
+
+    Returns:
+        Operator: the operator.
+    """
+    operator = Operator(dt1=dt1, mul=mul, tl=tl, ks=ks, ar=ar, d1r=d1r, d2r=d2r, d1l=d1l, rr=rr)
+    return operator
+
+
+# The patch library: operators in the register order M1, M2, C1, C2, so
+# algorithm 4 pairs M1 with C1 and M2 with C2, detuned against each other
+# where a part wants width.
+PATCHES: dict[str, Patch] = {
+    "default": DEFAULT_PATCH,
+    "strings": Patch(feedback=6, algorithm=4, operators=[
+        _op(1, 40, 18, 6, 2, 2, 7), _op(2, 48, 17, 6, 2, 2, 7, dt1=3),
+        _op(1, 24, 14, 4, 1, 1, 7), _op(1, 24, 13, 4, 1, 1, 7, dt1=5)]),
+    "flute": Patch(feedback=0, algorithm=4, operators=[
+        _op(2, 55, 26, 10, 3, 0, 8), _op(1, 127, 31, 0, 0, 0, 15),
+        _op(1, 20, 24, 6, 1, 1, 8), _op(1, 36, 24, 6, 1, 1, 8, dt1=4)]),
+    "reed": Patch(feedback=5, algorithm=4, operators=[
+        _op(3, 46, 31, 8, 2, 1, 8), _op(1, 60, 31, 5, 2, 1, 8),
+        _op(1, 22, 28, 6, 1, 1, 8), _op(2, 40, 28, 6, 1, 1, 8)]),
+    "brass": Patch(feedback=6, algorithm=4, operators=[
+        _op(1, 32, 24, 10, 2, 3, 8), _op(1, 38, 24, 10, 2, 3, 8, dt1=2),
+        _op(1, 20, 20, 8, 1, 2, 8), _op(1, 22, 20, 8, 1, 2, 8, dt1=6)]),
+    "bass": Patch(feedback=5, algorithm=4, operators=[
+        _op(1, 30, 31, 12, 3, 5, 10), _op(1, 127, 31, 0, 0, 0, 15),
+        _op(1, 18, 31, 10, 2, 6, 10), _op(1, 127, 31, 0, 0, 0, 15)]),
+    "piano": Patch(feedback=3, algorithm=4, operators=[
+        _op(3, 42, 31, 14, 4, 6, 9), _op(1, 52, 31, 12, 4, 6, 9),
+        _op(1, 18, 31, 10, 2, 7, 9), _op(2, 30, 31, 10, 2, 7, 9, dt1=2)]),
+}
+
+
+def patchFor(program: int) -> str:
+    """The library patch for a General MIDI program, by family.
+
+    Args:
+        program: GM program number, 0 to 127.
+
+    Returns:
+        str: a key of `PATCHES`.
+    """
+    if program < 32 or program in (45, 46):           # keyboards, guitars, pizzicato, harp
+        name = "piano"
+    elif program < 40 or program == 47:               # basses, timpani
+        name = "bass"
+    elif program < 56 or 80 <= program < 96:          # strings, ensembles, synth leads and pads
+        name = "strings"
+    elif program < 64:                                # brass
+        name = "brass"
+    elif program < 72:                                # reeds
+        name = "reed"
+    elif program < 80:                                # pipes
+        name = "flute"
+    else:
+        name = "default"
+
+    return name
+
+
 def patchWrites(channel: int, patch: Patch, left: bool = True,
                 right: bool = True) -> list[tuple[int, int]]:
     """The YM2151 register writes that load a patch onto a channel.
@@ -386,6 +462,17 @@ def psgSoundFor(program: int) -> PsgSound:
         sound = PsgSound()
 
     return sound
+
+
+# Sounds a pool can be given by name: a patch for an OPM pool, a waveform
+# for a PSG pool.
+PSG_SOUNDS: dict[str, PsgSound] = {
+    "square": PsgSound(PSG_PULSE, 32),
+    "pulse": PsgSound(PSG_PULSE, 16),
+    "saw": PsgSound(PSG_SAW, 32),
+    "triangle": PsgSound(PSG_TRIANGLE, 32),
+}
+SOUNDS = tuple(name for name in PATCHES if name != "default") + tuple(PSG_SOUNDS)
 
 
 def psgVoice(channel: int, wave: int = PSG_PULSE, width: int = 32) -> list[tuple[int, int]]:
@@ -714,42 +801,50 @@ def _voiceMap(reduction: reduce.Reduction, plan: reduce.Plan) -> dict[int, tuple
 
 
 def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Plan,
-                 patches: dict[str, Patch] | None = None,
+                 patches: dict[int, Patch] | None = None,
                  psgSounds: dict[int, PsgSound] | None = None,
-                 start: int = 0, end: int | None = None, master: float = 1.0) -> Writes:
+                 start: int = 0, end: int | None = None, master: float = 1.0,
+                 settings: dict[str, Any] | None = None) -> Writes:
     """Turn a reduction into register writes per frame.
 
-    Every voice used gets its setup at frame 0: an OPM voice its pool's
-    patch (`DEFAULT_PATCH` when the pool has none), a PSG voice a square
-    wave. Each placed note becomes a note-on at its start frame and a
-    note-off at its end frame, at least one frame later; within a frame
-    note-offs come before note-ons, so a voice handed from one note to the
-    next is released first. A note-off and a note-on on the same voice in
-    the same frame at different pitches become a single pitch change, with
-    no key cycle; at the same pitch they stay a release and a fresh attack.
+    Every voice used gets its setup at frame 0: an OPM voice the patch and
+    pan of its first note, a PSG voice a square wave. Each placed note
+    becomes a note-on at its start frame and a note-off at its end frame,
+    at least one frame later; within a frame note-offs come before
+    note-ons, so a voice handed from one note to the next is released
+    first. A note-off and a note-on on the same voice in the same frame at
+    different pitches become a single pitch change, with no key cycle; at
+    the same pitch they stay a release and a fresh attack.
+
+    An OPM note plays its channel's patch: the one its pool is given by
+    name in `settings["sounds"]`, else the one given for the channel, else
+    the library patch for the channel's GM program. A voice holds the
+    registers it was last written, and a note writes only those that
+    differ, so a voice that keeps playing one part writes nothing but its
+    notes.
 
     A note's loudness is its velocity times its channel's CC7: on the OPM
     it sets the carriers' TL before the key-on, up to `LEVEL_RANGE` steps
-    below the patch, written only where a carrier's level differs from the
-    voice's last note; on the PSG it is the volume, 1 to 63. A master level
+    below the patch; on the PSG it is the volume, 1 to 63. A master level
     below 1.0 takes both chips down together, as TL steps on every carrier
-    and a factor on PSG volume. The channel's pan
-    (CC10) places the note left, right or both, rewritten on a voice when
-    it changes. A PSG note takes its channel's `PsgSound`, by GM program
-    when none is given: the waveform is rewritten on the voice when it
-    changes, and a decay fades the volume in steps to silence. Notes are
-    taken from `start` to `end` in ticks, clipped to that range, and
-    `start` is frame 0.
+    and a factor on PSG volume. The channel's pan (CC10) places the note
+    left, right or both. A PSG note takes the sound its pool is given by
+    name, else its channel's `PsgSound`, else one by GM program: the
+    waveform is rewritten on the voice when it changes, and a decay fades
+    the volume in steps to silence. Notes are taken from `start` to `end`
+    in ticks, clipped to that range, and `start` is frame 0.
 
     Args:
         song: for the tempo map, pans, volumes and programs.
         reduction: the placed notes and the tiers' first voices.
         plan: the pools and tiers, for the chip each voice belongs to.
-        patches: OPM patches by pool name.
+        patches: OPM patches by MIDI channel.
         psgSounds: sounds by MIDI channel.
         start: first tick to export.
         end: tick to stop at; the end of the song when None.
         master: an amplitude factor for the whole export, 1.0 for full.
+        settings: the target's section of the plan file; `sounds` names a
+            sound per pool.
 
     Returns:
         Writes: per frame, the writes in order.
@@ -758,31 +853,53 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
         ValueError: a placed note's voice has no chip to go to.
     """
     voices = _voiceMap(reduction, plan)
-    patches = patches or {}
     steps = masterSteps(master)
     scale = min(master, 1.0)
     pans = channelPans(song)
     volumes = channelVolumes(song)
-    sounds = {ch: (psgSounds or {}).get(ch) or psgSoundFor(info.program)
-              for ch, info in song.channels.items()}
+    poolSounds = (settings or {}).get("sounds", {})
+    placed = sorted(reduction.placed, key=lambda p: (p.start, p.voice))
+
+    # The sound of each note: its pool's named sound, else the channel's,
+    # else the library's choice for the channel's program.
+    def patchOf(p: reduce.Placed) -> Patch:
+        """The OPM patch a placed note plays."""
+        named = poolSounds.get(voices[p.voice][2])
+        program = song.channels[p.channel].program
+        patch = (PATCHES[named] if named in PATCHES
+                 else (patches or {}).get(p.channel) or PATCHES[patchFor(program)])
+        return patch
+
+    def soundOf(p: reduce.Placed) -> PsgSound:
+        """The PSG sound a placed note plays."""
+        named = poolSounds.get(voices[p.voice][2])
+        program = song.channels[p.channel].program
+        sound = (PSG_SOUNDS[named] if named in PSG_SOUNDS
+                 else (psgSounds or {}).get(p.channel) or psgSoundFor(program))
+        return sound
+
     origin = frameOf(song, start)
     last = end if end is not None else song.maxTick
     writes: Writes = {}
 
-    # Setup for every voice in use, at frame 0, and the state each voice
-    # is left in so a note rewrites only what differs.
-    voicePan: dict[int, tuple[bool, bool]] = {}
-    voiceLevel: dict[int, dict[int, int]] = {}
+    # Setup for every voice in use, at frame 0, as its first note wants
+    # it, and the registers each voice then holds so a note rewrites only
+    # what differs.
+    voiceRegs: dict[int, dict[int, int]] = {}
     voiceWave: dict[int, tuple[int, int]] = {}
+    first = {}
+
+    for p in placed:
+        first.setdefault(p.voice, p)
 
     for voice in sorted(voices):
         chip, channel, pool = voices[voice]
 
         if chip == "opm":
-            patch = patches.get(pool, DEFAULT_PATCH)
-            setup = patchWrites(channel, patch)
-            voicePan[voice] = (True, True)
-            voiceLevel[voice] = dict(opmLevelWrites(channel, patch, 1.0))
+            note = first[voice]
+            left, right = pans.get(note.channel, (True, True))
+            voiceRegs[voice] = dict(patchWrites(channel, patchOf(note), left, right))
+            setup = list(voiceRegs[voice].items())
         else:
             setup = psgVoice(channel)
             voiceWave[voice] = (PSG_PULSE, 32)
@@ -794,7 +911,7 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
     # straight away, since nothing else touches them.
     events: list[tuple[int, int, int, int, list[tuple[int, int]]]] = []
 
-    for p in sorted(reduction.placed, key=lambda p: (p.start, p.voice)):
+    for p in placed:
         if p.end <= start or p.start >= last:
             continue
 
@@ -805,19 +922,16 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
         left, right = pans.get(p.channel, (True, True))
 
         if chip == "opm":
-            patch = patches.get(pool, DEFAULT_PATCH)
-            regs = [(r, v) for r, v in opmLevelWrites(channel, patch, loudness, steps)
-                    if voiceLevel[p.voice].get(r) != v]
-            voiceLevel[p.voice].update(regs)
-
-            if voicePan[p.voice] != (left, right):
-                regs.append(opmPanWrite(channel, patch, left, right))
-                voicePan[p.voice] = (left, right)
-
+            patch = patchOf(p)
+            wanted = dict(patchWrites(channel, patch, left, right))
+            wanted.update(opmLevelWrites(channel, patch, loudness, steps))
+            held = voiceRegs[p.voice]
+            regs = [(r, v) for r, v in wanted.items() if held.get(r) != v]
+            held.update(regs)
             events.append((on, 1, p.voice, p.pitch, regs + opmNoteOn(channel, p.pitch)))
             events.append((off, 0, p.voice, p.pitch, opmNoteOff(channel)))
         else:
-            sound = sounds[p.channel]
+            sound = soundOf(p)
             volume = max(1, round(loudness * scale * 63))
             regs = []
 
@@ -867,7 +981,8 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
 
 def export(song: model.Song, reduction: reduce.Reduction, plan: reduce.Plan, *,
            start: int = 0, end: int | None = None, loop: int | None = None,
-           master: float = 1.0, patches: dict[str, Patch] | None = None,
+           master: float = 1.0, settings: dict[str, Any] | None = None,
+           patches: dict[int, Patch] | None = None,
            psgSounds: dict[int, PsgSound] | None = None) -> bytes:
     """A ZSM file from a reduction.
 
@@ -879,7 +994,8 @@ def export(song: model.Song, reduction: reduce.Reduction, plan: reduce.Plan, *,
         end: tick to stop at; the end of the song when None.
         loop: tick to loop back to, or None for no loop.
         master: an amplitude factor for the whole export, 1.0 for full.
-        patches: OPM patches by pool name.
+        settings: the target's section of the plan file.
+        patches: OPM patches by MIDI channel.
         psgSounds: sounds by MIDI channel; by GM program when omitted.
 
     Returns:
@@ -888,7 +1004,8 @@ def export(song: model.Song, reduction: reduce.Reduction, plan: reduce.Plan, *,
     Raises:
         ValueError: a placed note's voice has no chip to go to.
     """
-    writes = exportWrites(song, reduction, plan, patches, psgSounds, start, end, master)
+    writes = exportWrites(song, reduction, plan, patches, psgSounds, start, end, master,
+                          settings)
     loopFrame = frameOf(song, loop) - frameOf(song, start) if loop is not None else None
     data = build(writes, loopFrame)
     return data

@@ -32,7 +32,7 @@ from montyroll.app import (
     MidiEditorApp,
     _shade,
 )
-from montyroll.export import zsmcheck, zsmdecode
+from montyroll.export import zsm, zsmcheck, zsmdecode
 
 pytestmark = needsDisplay
 
@@ -989,6 +989,37 @@ class TestPlanControls:
         app.loadPlanDialog()
         assert len(app.song.notes) == notes
         assert "embedded" in app.status.cget("text")
+
+    def testSoundBoxIsSavedAndUsed(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pool's sound goes into the plan's target section, is saved, and reaches the export."""
+        assert str(app.soundCombo.cget("state")) == "disabled"      # no chip, no sounds
+        app._applyTiers(list(X16_TIERS))
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        assert "strings" in app.soundCombo.cget("values")
+        app.poolSoundVar.set("brass")
+        app._poolSoundChanged()
+        assert app.planTargets == {"zsm": {"sounds": {"all": "brass"}}}
+        app.poolVar.set("core")
+        app._renamePool()
+        assert app.planTargets["zsm"]["sounds"] == {"core": "brass"}
+        app.savePlan()
+        assert '"brass"' in Path(reduce.sidecarPath(str(songPath))).read_text()
+        app.openFile(str(songPath))
+        assert app.planTargets["zsm"]["sounds"] == {"core": "brass"}
+        assert app.poolSoundVar.get() == "brass"
+        out = tmp_path / "brass.zsm"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        app.exportTarget("zsm")
+        decoded = zsmdecode.decode(out.read_bytes())
+        setup = {w.register: w.value for w in decoded.frames[0].items
+                 if isinstance(w, zsmdecode.Write) and w.chip == "opm"}
+        # Every operator register but the carriers' levels, which the first
+        # note's velocity sets, matches the brass patch.
+        brass = dict(zsm.patchWrites(0, zsm.PATCHES["brass"]))
+        assert all(setup[r] == v for r, v in brass.items() if 0x40 <= r and not 0x60 <= r < 0x80)
+        assert setup[0x40] == brass[0x40]
 
     def testBadSidecarIsReported(self, app: MidiEditorApp, songPath: Path,
                                  monkeypatch: pytest.MonkeyPatch) -> None:

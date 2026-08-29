@@ -687,6 +687,8 @@ class TestExpression:
                            tiers=[reduce.Tier(chip, 16, chip=chip)])
         return plan
 
+    PLAIN = {ch: zsm.DEFAULT_PATCH for ch in range(16)}   # one carrier on slot M1
+
     def testCarriersByAlgorithm(self) -> None:
         """Algorithm 7 has every slot as a carrier, 4 the two C slots, 0 to 3 only C2."""
         assert zsm.Patch(algorithm=7).carriers == (0, 1, 2, 3)
@@ -698,7 +700,7 @@ class TestExpression:
         song = self._song((0, 60, 127, 100, 200), (0, 62, 64, 300, 400), (1, 64, 127, 500, 600),
                           controls=((1, 7, 64),))
         plan = self._plan("opm", [0, 1])
-        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan)
+        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan, patches=self.PLAIN)
         levels = [v for f in sorted(writes) for chip, r, v in writes[f]
                   if chip == "opm" and r == 0x60 and f > 0]
         base = zsm.DEFAULT_PATCH.operators[0].tl
@@ -713,7 +715,7 @@ class TestExpression:
         song = self._song((0, 60, 100, 100, 200), (0, 62, 100, 300, 400), (0, 64, 50, 500, 600),
                           (0, 65, 50, 700, 800))
         plan = self._plan("opm", [0])
-        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan)
+        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan, patches=self.PLAIN)
         levels = [(f, r) for f in sorted(writes) for chip, r, v in writes[f]
                   if chip == "opm" and 0x60 <= r < 0x80 and f > 0]
         assert levels == [(6, 0x60), (31, 0x60)]
@@ -724,10 +726,12 @@ class TestExpression:
                           controls=((0, 10, 0), (1, 10, 127)))
         assert zsm.channelPans(song) == {0: (True, False), 1: (False, True)}
         plan = self._plan("opm", [0, 1])
-        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan)
+        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan, patches=self.PLAIN)
+        setup = [v >> 6 for chip, r, v in writes[0] if chip == "opm" and r == 0x20]
         panWrites = [(f, v >> 6) for f in sorted(writes) for chip, r, v in writes[f]
                      if chip == "opm" and r == 0x20 and f > 0]
-        assert panWrites == [(6, 0b01), (31, 0b10)]    # left at the first note, right at the third
+        assert setup == [0b01]                          # the first note's pan, in the setup
+        assert panWrites == [(31, 0b10)]                # right at the third note
         psg = self._plan("psg", [0, 1])
         flat = {0: zsm.PsgSound(), 1: zsm.PsgSound()}
         pw = zsm.exportWrites(song, reduce.reduce(song, psg), psg, psgSounds=flat)
@@ -761,8 +765,9 @@ class TestExpression:
         assert zsm.masterSteps(1.5) == 0 and zsm.masterSteps(0.0) == 0
         song = self._song((0, 60, 127, 100, 200))
         opm = self._plan("opm", [0])
-        full = zsm.exportWrites(song, reduce.reduce(song, opm), opm)
-        half = zsm.exportWrites(song, reduce.reduce(song, opm), opm, master=0.5)
+        full = zsm.exportWrites(song, reduce.reduce(song, opm), opm, patches=self.PLAIN)
+        half = zsm.exportWrites(song, reduce.reduce(song, opm), opm, master=0.5,
+                                patches=self.PLAIN)
         assert [r for _, r, _ in full[6]] == [0x28, 0x08]              # no level write at full
         assert [(r, v) for _, r, v in half[6]][0] == (0x60, zsm.DEFAULT_PATCH.operators[0].tl + 8)
         psg = self._plan("psg", [0])
@@ -774,7 +779,7 @@ class TestExpression:
         """An OPM slide carries the new note's level writes but no key cycle."""
         song = self._song((0, 60, 127, 0, 480), (0, 64, 64, 480, 960))
         plan = self._plan("opm", [0])
-        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan)
+        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan, patches=self.PLAIN)
         regs = [r for _, r, _ in writes[30]]
         assert 0x08 not in regs
         assert 0x28 in regs and regs.count(0x60) == 1
@@ -809,3 +814,67 @@ class TestTarget:
         song = sixteenBars()
         assert zsm.frameOf(song, 1920, 50) == 100
         assert zsm.frameOf(song, 1920) == 120
+
+
+class TestPatches:
+    """The patch library and the sounds a pool can be given."""
+
+    def _song(self, *notes: tuple[int, int, int, int, int],
+              programs: dict[int, int] | None = None) -> model.Song:
+        """A song at 120 bpm with a program change per channel at tick 0."""
+        track = [smf.Event(0, smf.META, bytearray((500_000).to_bytes(3, "big")), smf.META_TEMPO)]
+
+        for ch, program in (programs or {}).items():
+            track.append(smf.Event(0, 0xC0 | ch, bytearray([program])))
+
+        for ch, pitch, vel, start, end in notes:
+            track.append(smf.Event(start, 0x90 | ch, bytearray([pitch, vel])))
+            track.append(smf.Event(end, 0x80 | ch, bytearray([pitch, 64])))
+
+        song = model.Song(smf.MidiFile(0, 480, [track]))
+        return song
+
+    def testPatchByProgram(self) -> None:
+        """Programs pick a library patch by family."""
+        assert zsm.patchFor(0) == "piano" and zsm.patchFor(46) == "piano"
+        assert zsm.patchFor(33) == "bass" and zsm.patchFor(47) == "bass"
+        assert zsm.patchFor(48) == "strings" and zsm.patchFor(89) == "strings"
+        assert zsm.patchFor(60) == "brass"
+        assert zsm.patchFor(68) == "reed"
+        assert zsm.patchFor(73) == "flute"
+        assert zsm.patchFor(120) == "default"
+        assert set(zsm.SOUNDS) == {"strings", "flute", "reed", "brass", "bass", "piano",
+                                   "square", "pulse", "saw", "triangle"}
+        assert all(len(p.operators) == 4 for p in zsm.PATCHES.values())
+
+    def testSetupIsTheFirstNotesPatchAndAVoiceRewritesOnlyChanges(self) -> None:
+        """A voice is set up as its first note wants; another patch on it writes the difference."""
+        song = self._song((0, 60, 127, 100, 200), (1, 62, 127, 300, 400), (1, 64, 127, 500, 600),
+                          programs={0: 73, 1: 48})
+        plan = reduce.Plan([reduce.Pool("one", [0, 1], 1, tier="opm")],
+                           tiers=[reduce.Tier("opm", 8, chip="opm")])
+        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan)
+        setup = dict((r, v) for chip, r, v in writes[0] if chip == "opm")
+        flute = dict(zsm.patchWrites(0, zsm.PATCHES["flute"]))
+        strings = dict(zsm.patchWrites(0, zsm.PATCHES["strings"]))
+        assert setup == flute
+        changed = [(r, v) for chip, r, v in writes[19] if chip == "opm" and r != 0x28 and r != 0x08]
+        assert changed and all(strings[r] == v for r, v in changed if r in strings)
+        assert all(flute[r] != v for r, v in changed if r in strings)
+        assert [r for chip, r, v in writes[31] if chip == "opm"] == [0x28, 0x08]
+
+    def testPoolSoundOverridesTheProgram(self) -> None:
+        """A sound named for the pool applies to every part in it, on either chip."""
+        song = self._song((0, 60, 127, 100, 200), programs={0: 73})
+        opm = reduce.Plan([reduce.Pool("one", [0], 1, tier="opm")],
+                          tiers=[reduce.Tier("opm", 8, chip="opm")])
+        writes = zsm.exportWrites(song, reduce.reduce(song, opm), opm,
+                                  settings={"sounds": {"one": "brass"}})
+        setup = dict((r, v) for chip, r, v in writes[0] if chip == "opm")
+        assert setup == dict(zsm.patchWrites(0, zsm.PATCHES["brass"]))
+        psg = reduce.Plan([reduce.Pool("one", [0], 1, tier="psg")],
+                          tiers=[reduce.Tier("psg", 16, chip="psg")])
+        writes = zsm.exportWrites(song, reduce.reduce(song, psg), psg,
+                                  settings={"sounds": {"one": "saw"}})
+        waves = [v >> 6 for chip, r, v in writes[6] if chip == "psg" and r == 3]
+        assert waves == [zsm.PSG_SAW]
