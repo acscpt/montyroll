@@ -155,6 +155,23 @@ class TestPlanFile:
         reduce.savePlan(plan, str(path))
         assert reduce.readPlanFile(str(path)).midiFile is None
 
+    def testTargetsAndRangeRoundTrip(self, tmp_path: Path) -> None:
+        """A target's section and the export's bars survive a round trip; bad bars are refused."""
+        plan = reduce.Plan([reduce.Pool("all", [0], 4)])
+        path = tmp_path / "x.monty"
+        reduce.savePlan(plan, str(path), targets={"zsm": {"sounds": {"all": "brass"}}},
+                        exportRange={"start": 45, "end": 108, "loop": 46})
+        read = reduce.readPlanFile(str(path))
+        assert read.targets == {"zsm": {"sounds": {"all": "brass"}}}
+        assert read.range == {"start": 45, "end": 108, "loop": 46}
+        reduce.savePlan(plan, str(path))
+        read = reduce.readPlanFile(str(path))
+        assert read.targets == {} and read.range == {}
+        path.write_text('{"pools": [], "range": {"start": "forty"}}')
+
+        with pytest.raises(ValueError, match="range"):
+            reduce.readPlanFile(str(path))
+
     def testEmbeddedMidiIsCheckedAndReturned(self, tmp_path: Path) -> None:
         """A bundle carries the MIDI as base64 with its SHA-256, refused when it does not match."""
         plan = reduce.Plan([reduce.Pool("all", [0], 4)])

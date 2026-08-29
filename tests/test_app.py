@@ -1021,6 +1021,33 @@ class TestPlanControls:
         assert all(setup[r] == v for r, v in brass.items() if 0x40 <= r and not 0x60 <= r < 0x80)
         assert setup[0x40] == brass[0x40]
 
+    def testExportRangeIsKeptAndUsed(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """The range dialog's bars are checked, saved with the plan and cut the export."""
+        assert app._applyExportRange({"start": "2", "end": "1", "loop": ""}) is not None
+        assert app._applyExportRange({"start": "x", "end": "", "loop": ""}) is not None
+        assert app._applyExportRange({"start": "2", "end": "3", "loop": "4"}) is not None
+        assert app._applyExportRange({"start": "0", "end": "", "loop": ""}) is not None
+        assert app._applyExportRange({"start": "2", "end": "3", "loop": " 2 "}) is None
+        assert app.exportRange == {"start": 2, "end": 3, "loop": 2}
+        app.savePlan()
+        assert '"range"' in Path(reduce.sidecarPath(str(songPath))).read_text()
+        app.openFile(str(songPath))
+        assert app.exportRange == {"start": 2, "end": 3, "loop": 2}
+
+        app._applyTiers(list(X16_TIERS))
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        out = tmp_path / "cut.zsm"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        app.exportTarget("zsm")
+        decoded = zsmdecode.decode(out.read_bytes())
+        whole = (zsm.frameOf(app.song, app.song.barTick(4))
+                 - zsm.frameOf(app.song, app.song.barTick(2)))
+        assert decoded.length <= whole
+        assert decoded.header.loopOffset == 16     # bar 2 is the start, so the loop is frame 0
+        assert "bars 2 to 3 looping to 2" in app.status.cget("text")
+
     def testBadSidecarIsReported(self, app: MidiEditorApp, songPath: Path,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
         """A broken plan file beside the song is reported and the default plan stands."""

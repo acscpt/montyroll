@@ -761,13 +761,16 @@ class PlanFile:
     file's own directory when it is relative, whether or not it exists;
     `midiData` is the MIDI embedded in the file, its checksum verified.
     Either or both may be None. `targets` is each export target's own
-    section, keyed by the target's name, kept as it was read.
+    section, keyed by the target's name, kept as it was read. `range` is
+    the export's bars: `start`, `end` and `loop`, 1-based as the ruler
+    shows them, each absent when not set.
     """
 
     plan: Plan
     midiFile: str | None = None
     midiData: bytes | None = None
     targets: dict[str, Any] = field(default_factory=dict)
+    range: dict[str, int] = field(default_factory=dict)
 
 
 def sidecarPath(path: str) -> str:
@@ -785,7 +788,8 @@ def sidecarPath(path: str) -> str:
 
 
 def planToDict(plan: Plan, midiFile: str = "", midiData: bytes | None = None,
-               targets: dict[str, Any] | None = None) -> dict[str, Any]:
+               targets: dict[str, Any] | None = None,
+               exportRange: dict[str, int] | None = None) -> dict[str, Any]:
     """Serialise a plan.
 
     Channels are written 1-based, as the channel strip shows them, because
@@ -793,13 +797,15 @@ def planToDict(plan: Plan, midiFile: str = "", midiData: bytes | None = None,
     left out. The MIDI file is named under `midiFile`, a path taken as
     relative to the plan file's directory unless absolute, and embedded
     under `midiBlob` as base64 with its SHA-256 when its bytes are given.
-    Each export target's own section goes under `targets` by its name.
+    Each export target's own section goes under `targets` by its name, and
+    the export's bars under `range`.
 
     Args:
         plan: the plan.
         midiFile: the MIDI file's path or name, empty to name none.
         midiData: the MIDI file's bytes to embed, None to embed none.
         targets: per-target sections, such as a ZSM target's patches.
+        exportRange: `start`, `end` and `loop` bars, those that are set.
 
     Returns:
         dict[str, Any]: JSON-ready data with a version number.
@@ -826,6 +832,9 @@ def planToDict(plan: Plan, midiFile: str = "", midiData: bytes | None = None,
 
     if targets:
         data["targets"] = targets
+
+    if exportRange:
+        data["range"] = exportRange
 
     return data
 
@@ -900,7 +909,8 @@ def planFromDict(data: dict[str, Any], source: str = "plan") -> Plan:
 
 
 def savePlan(plan: Plan, path: str, midiFile: str = "", midiData: bytes | None = None,
-             targets: dict[str, Any] | None = None) -> None:
+             targets: dict[str, Any] | None = None,
+             exportRange: dict[str, int] | None = None) -> None:
     """Write a plan as a `.monty` file.
 
     Args:
@@ -909,9 +919,10 @@ def savePlan(plan: Plan, path: str, midiFile: str = "", midiData: bytes | None =
         midiFile: the MIDI file's path or name to record, empty for none.
         midiData: the MIDI file's bytes to embed, None to embed none.
         targets: per-target sections to carry.
+        exportRange: the export's bars to carry.
     """
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(planToDict(plan, midiFile, midiData, targets), f, indent=2)
+        json.dump(planToDict(plan, midiFile, midiData, targets, exportRange), f, indent=2)
         f.write("\n")
 
 
@@ -967,6 +978,13 @@ def readPlanFile(path: str) -> PlanFile:
         raise ValueError(f"{path}: targets is not a table")
 
     result.targets = targets
+    bars = data.get("range", {})
+
+    try:
+        result.range = {k: int(bars[k]) for k in ("start", "end", "loop") if bars.get(k)}
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(f"{path}: range is not bars ({exc!r})") from exc
+
     return result
 
 

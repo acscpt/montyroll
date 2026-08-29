@@ -450,3 +450,17 @@ class TestFromBytes:
             [(n.channel, n.pitch, n.start, n.end) for n in loaded.notes]
         assert parsed.path == "memory.mid"
         assert model.Song.fromBytes(songPath.read_bytes()).path is None
+
+
+class TestBarTick:
+    """The tick a bar starts on, across the fixture's 4/4 to 3/4 change."""
+
+    def testInverseOfBarBeat(self, song: model.Song) -> None:
+        """Every bar's tick maps back to (bar, 1), and bar 1 and below are tick 0."""
+        assert song.barTick(1) == 0 and song.barTick(0) == 0
+        assert song.barTick(2) == 1920                      # 4/4 at 480
+        assert song.barTick(3) == 3840                      # the 3/4 change
+        assert song.barTick(4) == 3840 + 1440               # a 3/4 bar
+
+        for bar in range(1, 12):
+            assert song.barBeat(song.barTick(bar)) == (bar, 1)

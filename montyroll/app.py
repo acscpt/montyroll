@@ -237,6 +237,7 @@ class MidiEditorApp(tk.Tk):
         self.poolTierVar = tk.StringVar(value=NO_TIER)
         self.poolSoundVar = tk.StringVar(value=BY_INSTRUMENT)
         self.planTargets: dict[str, Any] = {}           # each export target's plan section
+        self.exportRange: dict[str, int] = {}           # start, end and loop bars, those set
         self.poolVars: dict[int, tk.StringVar] = {}      # per channel: the name of its pool
         self.releaseVars: dict[int, tk.StringVar] = {}   # per channel: ms, "" for the tier's
         self.poolCombos: list[ttk.Combobox] = []         # every card's pool picker
@@ -285,6 +286,7 @@ class MidiEditorApp(tk.Tk):
         fm.add_command(label="Save", accelerator="Ctrl+S", command=self.save)
         fm.add_command(label="Save As...", command=self.saveAs)
         fm.add_command(label="Save Reduced As...", command=self.saveReducedAs)
+        fm.add_command(label="Export Range...", command=self.exportRangeDialog)
 
         for key, target in export.TARGETS.items():
             fm.add_command(label=f"Export {target.NAME}...",
@@ -797,6 +799,7 @@ class MidiEditorApp(tk.Tk):
         self.plan = self._defaultPlan()
         self.editPool = self.plan.pools[0]
         self.planTargets = {}
+        self.exportRange = {}
 
         # Selection and mute/solo variables refer to the old song's notes and
         # channels; _buildChannelRows recreates the variables.
@@ -2155,12 +2158,16 @@ class MidiEditorApp(tk.Tk):
         target = export.TARGETS[key]
         plan = self._currentPlan()
         master = self.masterVar.get() / 100
+        bars = self.exportRange
+        start = self.song.barTick(bars["start"]) if "start" in bars else 0
+        end = self.song.barTick(bars["end"] + 1) if "end" in bars else None
+        loop = self.song.barTick(bars["loop"]) if "loop" in bars else None
 
         try:
             plan.validate()
             reduction = self._ensureReduction()
-            data = target.export(self.song, reduction, plan, master=master,
-                                 settings=self.planTargets.get(key, {}))
+            data = target.export(self.song, reduction, plan, start=start, end=end, loop=loop,
+                                 master=master, settings=self.planTargets.get(key, {}))
         except ValueError as exc:
             messagebox.showerror(f"Export {target.NAME}",
                                  f"{exc}\n\nGive every pool a tier with a chip of this target "
@@ -2185,8 +2192,10 @@ class MidiEditorApp(tk.Tk):
         # before the file is called good.
         problems = target.verify(data, plan)
         level = f" at {self.masterVar.get()}% level" if master < 1 else ""
+        span = (f", bars {bars.get('start', 1)} to {bars.get('end', 'the end')}"
+                + (f" looping to {bars['loop']}" if "loop" in bars else "")) if bars else ""
         summary = (f"Exported {path}: {target.describe(data, plan)}, "
-                   f"{len(reduction.placed)} notes{level}")
+                   f"{len(reduction.placed)} notes{level}{span}")
 
         if problems:
             messagebox.showwarning(f"Export {target.NAME}",
@@ -2195,6 +2204,81 @@ class MidiEditorApp(tk.Tk):
             self._setStatus(f"{summary}, {len(problems)} problems")
         else:
             self._setStatus(f"{summary}, no problems")
+
+    def exportRangeDialog(self):
+        """Ask for the export's bars: a start, an end and a loop, each optional.
+
+        Blank means the start of the song, its end, and no loop. The bars
+        are kept with the plan and used by every export.
+        """
+        dlg = tk.Toplevel(self)
+        dlg.title("Export range")
+        dlg.transient(self)
+        grid = ttk.Frame(dlg, padding=8)
+        grid.pack(fill="both", expand=True)
+        last = self.song.barBeat(self.song.maxTick)[0]
+        fields = (("start", "Start bar", "the song's start"), ("end", "End bar", "the song's end"),
+                  ("loop", "Loop back to bar", "no loop"))
+        entries: dict[str, tk.StringVar] = {}
+
+        for row, (key, label, blank) in enumerate(fields):
+            ttk.Label(grid, text=label).grid(row=row, column=0, sticky="w", padx=3, pady=2)
+            var = tk.StringVar(value=str(self.exportRange[key]) if key in self.exportRange else "")
+            ttk.Entry(grid, textvariable=var, width=6).grid(row=row, column=1, padx=3, pady=2)
+            ttk.Label(grid, text=f"blank for {blank}; 1 to {last}").grid(row=row, column=2,
+                                                                          sticky="w", padx=3)
+            entries[key] = var
+
+        def ok():
+            """Read the bars back and keep them, or say what is wrong."""
+            problem = self._applyExportRange({k: v.get() for k, v in entries.items()})
+
+            if problem:
+                messagebox.showerror("Export range", problem, parent=dlg)
+                return
+
+            dlg.destroy()
+
+        buttons = ttk.Frame(dlg, padding=(8, 0, 8, 8))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Cancel", command=dlg.destroy).pack(side="right")
+        ttk.Button(buttons, text="OK", command=ok).pack(side="right", padx=(0, 4))
+        dlg.grab_set()
+
+    def _applyExportRange(self, texts: dict[str, str]) -> str | None:
+        """Set the export's bars from the dialog's text.
+
+        Args:
+            texts: "start", "end" and "loop" as typed, blank for unset.
+
+        Returns:
+            str | None: what is wrong, or None once the bars are kept.
+        """
+        bars: dict[str, int] = {}
+
+        for key, text in texts.items():
+            if text.strip():
+                try:
+                    bars[key] = int(text)
+                except ValueError:
+                    problem = f"{key}: {text!r} is not a bar number"
+                    return problem
+
+                if bars[key] < 1:
+                    problem = f"{key}: bars are counted from 1"
+                    return problem
+
+        if "start" in bars and "end" in bars and bars["end"] < bars["start"]:
+            problem = "the end bar is before the start bar"
+            return problem
+
+        if "loop" in bars and (bars["loop"] < bars.get("start", 1)
+                               or ("end" in bars and bars["loop"] > bars["end"])):
+            problem = "the loop bar is outside the range"
+            return problem
+
+        self.exportRange = bars
+        return None
 
     # ----------------------------------------------------------------- plan
     def _defaultPlan(self) -> reduce.Plan:
@@ -2699,12 +2783,14 @@ class MidiEditorApp(tk.Tk):
         ttk.Button(buttons, text="OK", command=ok).pack(side="right", padx=(0, 4))
         dlg.grab_set()
 
-    def _applyPlan(self, plan: reduce.Plan, targets: dict[str, Any] | None = None):
+    def _applyPlan(self, plan: reduce.Plan, targets: dict[str, Any] | None = None,
+                   exportRange: dict[str, int] | None = None):
         """Make a plan the one the controls edit and the reduction uses.
 
         Args:
             plan: the plan; given a pool of every channel if it has none.
             targets: the export targets' sections that came with it.
+            exportRange: the export's bars that came with it.
         """
         if not plan.pools:
             channels = sorted({n.channel for n in self.song.notes})
@@ -2712,6 +2798,7 @@ class MidiEditorApp(tk.Tk):
 
         self.plan = plan
         self.planTargets = targets or {}
+        self.exportRange = dict(exportRange or {})
         self.editPool = plan.pools[0]
         self._syncCardsToPlan()
         self._loadPoolControls()
@@ -2763,7 +2850,7 @@ class MidiEditorApp(tk.Tk):
                 self.openFile(named)
                 opened = f"opened {named} and "
 
-        self._applyPlan(read.plan, read.targets)
+        self._applyPlan(read.plan, read.targets, read.range)
         self._setStatus(f"Loaded plan {path}" if not opened else f"Loaded plan {path}: {opened}"
                         "applied it")
 
@@ -2830,7 +2917,8 @@ class MidiEditorApp(tk.Tk):
             midiData: the song's bytes to embed, None to embed none.
         """
         try:
-            reduce.savePlan(self._currentPlan(), path, midiFile, midiData, self.planTargets)
+            reduce.savePlan(self._currentPlan(), path, midiFile, midiData, self.planTargets,
+                            self.exportRange)
         except OSError as exc:
             messagebox.showerror("Save failed", f"{path}\n\n{exc}")
             return
