@@ -874,6 +874,39 @@ class TestPlanControls:
         assert errors and errors[0][0] == "Plan not loaded"
         assert [p.name for p in app.plan.pools] == ["all"]
 
+    def testOverlapFollowsTheEditedPool(self, app: MidiEditorApp) -> None:
+        """Cards show their overlap with the edited pool; the panel shows the pool's worst."""
+        shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 1, 9])
+        worst = max(shares[ch] for ch in (0, 1, 9))
+        assert app.overlapLbl.cget("text") == f"all: its channels overlap {worst:.0%} at most"
+
+        for ch in (0, 1, 9):
+            assert app.usageLabels[ch].cget("text").endswith(f"| overlaps all {shares[ch]:.0%}")
+
+        # Move channel 1 out: the pool "all" is now measured without it and
+        # channel 1 against all of it.
+        app.poolVars[1].set(NO_POOL)
+        app._channelPoolChanged(1)
+        shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 9])
+        assert app.usageLabels[1].cget("text").endswith(f"| overlaps all {shares[1]:.0%}")
+        assert f"{max(shares[0], shares[9]):.0%}" in app.overlapLbl.cget("text")
+
+        # An empty new pool, then one channel in it.
+        app.addPool()
+        assert app.overlapLbl.cget("text") == "pool 2: no channels"
+        app.poolVars[1].set("pool 2")
+        app._channelPoolChanged(1)
+        assert app.overlapLbl.cget("text") == "pool 2: one channel"
+        against = analysis.poolOverlap(app._ensureSongDemand(), [1])
+        assert app.usageLabels[0].cget("text").endswith(f"| overlaps pool 2 {against[0]:.0%}")
+
+        # Editing the notes refreshes the figures at idle.
+        app.selectAll()
+        app.deleteSelection()
+        app.update()
+        assert app.overlapLbl.cget("text") == ""
+        assert app.usageLabels[0].cget("text") == app.usageText[0]
+
     def testReducedReportCarriesTheTotals(self, app: MidiEditorApp) -> None:
         """The reduced report's second line is the kept, cut, clipped and loss line."""
         app.budgetVar.set(2)

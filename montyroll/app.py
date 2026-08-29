@@ -214,6 +214,7 @@ class MidiEditorApp(tk.Tk):
         # notes, and the strip is redrawn through an idle callback so a burst
         # of scroll events costs one redraw.
         self.demand: analysis.Demand | None = None
+        self.songDemand: analysis.Demand | None = None   # the song as written, reduced or not
         self.chords: list[tuple[int, int, str]] | None = None
         self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
 
@@ -236,6 +237,9 @@ class MidiEditorApp(tk.Tk):
         self.poolVars: dict[int, tk.StringVar] = {}      # per channel: the name of its pool
         self.releaseVars: dict[int, tk.StringVar] = {}   # per channel: ms, "" for the tier's
         self.poolCombos: list[ttk.Combobox] = []         # every card's pool picker
+        self.usageLabels: dict[int, tk.Label] = {}       # per channel: the demand figures
+        self.usageText: dict[int, str] = {}              # those figures without the overlap
+        self._overlapAfter: str | None = None
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
         self.reports: dict[str, str | None] = {"original": None, "reduced": None}
@@ -763,6 +767,7 @@ class MidiEditorApp(tk.Tk):
         self.player.stop()
         self.playStart = None
         self.demand = None
+        self.songDemand = None
         self.chords = None
         self.reduction = None
         self.reducedSong = None
@@ -771,6 +776,8 @@ class MidiEditorApp(tk.Tk):
         self.poolVars.clear()
         self.releaseVars.clear()
         self.poolCombos.clear()
+        self.usageLabels.clear()
+        self.usageText.clear()
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
 
         # A fresh song starts with one pool of every channel; a sidecar, if
@@ -844,7 +851,8 @@ class MidiEditorApp(tk.Tk):
             w.destroy()
 
         self.channelRows.clear()
-        figures = analysis.channelDemand(self._ensureDemand())
+        figures = analysis.channelDemand(self._ensureSongDemand())
+        scaling = float(self.tk.call("tk", "scaling"))   # the figures line wraps at high DPI
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
@@ -939,10 +947,14 @@ class MidiEditorApp(tk.Tk):
                 usage = (f"peak {figure.peak} | mean {figure.mean:.1f} | "
                          f"plays {figure.fraction:.0%}")
                 ul = tk.Label(row, text=usage, anchor="w", font=("TkDefaultFont", 8),
-                              fg="#555")
+                              fg="#555", justify="left", wraplength=int(290 * scaling))
                 ul.pack(anchor="w", padx=(22, 0))
+                self.usageLabels[ch] = ul
+                self.usageText[ch] = usage
                 Tooltip(ul, "Voice demand: most notes at once, average while\n"
-                            "sounding, and how much of the piece the channel plays")
+                            "sounding, how much of the piece the channel plays,\n"
+                            "and how much of its playing time the pool being\n"
+                            "edited already sounds (low: it could share that pool)")
 
                 # Reduction: the pool the channel belongs to, its own release
                 # (blank for the tier's) and its priority.
@@ -1558,13 +1570,27 @@ class MidiEditorApp(tk.Tk):
                 spans = [replace(p, end=p.free) if p.release else p for p in placed]
                 self.demand = analysis.sweep(self.song, spans)
             else:
-                self.demand = analysis.sweep(self.song)
+                self.demand = self._ensureSongDemand()
 
         return self.demand
+
+    def _ensureSongDemand(self) -> analysis.Demand:
+        """Return the sweep of the song as written, reduced or not, rebuilding it if needed.
+
+        Returns:
+            analysis.Demand: the sweep the cards' figures and the pool
+            overlap come from.
+        """
+        if self.songDemand is None:
+            self.songDemand = analysis.sweep(self.song)
+
+        return self.songDemand
 
     def _invalidateDemand(self):
         """Forget the sweep, the chords, the reduction and the report after an edit."""
         self.demand = None
+        self.songDemand = None
+        self._scheduleOverlap()
         self.chords = None
         self.reduction = None
         self.reducedSong = None
@@ -1900,6 +1926,13 @@ class MidiEditorApp(tk.Tk):
         self.tierCombo.bind("<<ComboboxSelected>>", lambda e: self._reductionChanged())
         Tooltip(self.tierCombo, "The chip this pool's voices come from")
 
+        # How much the edited pool's channels play at the same time: low is
+        # what makes sharing its voices work.
+        self.overlapLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8),
+                                    foreground="#555")
+        self.overlapLbl.pack(fill="x")
+        self.overlapTip = Tooltip(self.overlapLbl, "")
+
         # Transform switches, each one a pool setting.
         switches = ttk.Frame(panel)
         switches.pack(fill="x")
@@ -2221,6 +2254,51 @@ class MidiEditorApp(tk.Tk):
         self.tremoloVar.set(pool.tremoloGap)
         self.legatoVar.set(pool.legatoGap)
         self.maxChordVar.set(pool.maxChord)
+        self._refreshOverlap()
+
+    def _scheduleOverlap(self):
+        """Refresh the overlap figures once the current burst of edits is over."""
+        if self._overlapAfter is None:
+            self._overlapAfter = self.after_idle(self._refreshOverlap)
+
+    def _refreshOverlap(self):
+        """Show how much the edited pool's channels coincide, on its label and every card.
+
+        A card's figure is the share of that channel's playing time during
+        which the rest of the edited pool already sounds, so a low figure
+        marks a channel that could share the pool's voices; the panel's line
+        is the worst of the pool's own members.
+        """
+        self._overlapAfter = None
+        pool = self.editPool
+
+        if pool is None or not self.song.notes:
+            self.overlapLbl.config(text="")
+            self.overlapTip.text = ""
+
+            for ch, lbl in self.usageLabels.items():
+                lbl.config(text=self.usageText[ch])
+
+            return
+
+        shares = analysis.poolOverlap(self._ensureSongDemand(), pool.channels)
+
+        for ch, lbl in self.usageLabels.items():
+            lbl.config(text=f"{self.usageText[ch]} | overlaps {pool.name} {shares.get(ch, 0):.0%}")
+
+        members = [ch for ch in pool.channels if ch in shares]
+
+        if len(members) < 2:
+            text = f"{pool.name}: {'one channel' if members else 'no channels'}"
+            self.overlapTip.text = "A pool of one channel has nothing to share"
+        else:
+            worst = max(shares[ch] for ch in members)
+            text = f"{pool.name}: its channels overlap {worst:.0%} at most"
+            lines = "\n".join(f"ch {ch + 1}: {shares[ch]:.0%}" for ch in members)
+            self.overlapTip.text = ("Share of each channel's playing time during which\n"
+                                    "the rest of the pool already sounds:\n" + lines)
+
+        self.overlapLbl.config(text=text)
 
     def _storePoolControls(self):
         """Write the panel's controls into the edited pool.
@@ -2321,6 +2399,7 @@ class MidiEditorApp(tk.Tk):
             pool.channels.append(ch)
             pool.channels.sort()
 
+        self._refreshOverlap()
         self._reductionChanged()
 
     def _channelReleaseChanged(self, ch: int):

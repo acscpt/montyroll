@@ -8,17 +8,21 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ### Added
 
-- **Tiers.** Pools now belong to tiers, one per chip, each with a capacity, a number of channels reserved for other uses, and a default release. Each tier's voices are numbered as one contiguous block, and a plan whose pools want more voices than their tier has is refused.
+- **Tiers.** Pools now belong to tiers, one per chip, each with a channel count, a reserve kept for sound effects, and a default release for its patches. A plan whose pools ask a tier for more voices than it has is refused.
 
-- **Release tails.** A voice now stays busy until its note's release has died away, not just until the note ends; the release is set in milliseconds per tier or per channel and converted to ticks through the tempo map. Stealing a voice during its tail costs a fraction of the note's weight and clipped tails count towards the loss, while the same pitch struck again on a channel whose voice is still releasing retriggers that voice rather than taking another.
+- **Release tails.** A voice now stays busy until its note's release has died away, not just until the note ends; the release is set in milliseconds per tier or per channel and converted to ticks through the tempo map. A voice stolen during its tail costs a fraction of the note's weight, the clipped tail counts towards the loss, and a channel re-striking the same pitch simply retriggers its releasing voice.
 
-- **Pools on the cards.** Each channel card now names the pool its notes are reduced in, with a release override and the priority beside it, and the Reduce panel edits one pool at a time: its voices, its tier and its transforms, with buttons to add, remove and rename pools and a Tiers dialog with a Commander X16 preset. The demand strip stacks channels by tier and pool, draws a budget line per tier, and shows occupancy (notes plus their releases) while the reduction is on; hovering reports each tier's count against its budget.
+- **Pool editing.** Each channel card names the pool its notes are reduced in, beside its release override and priority. The Reduce panel edits one pool at a time (voices, tier and transforms), with buttons to add, remove and rename pools and a Tiers dialog that has a Commander X16 preset.
 
-- **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as JSON beside the MIDI file (`name.plan.json`, channels numbered as the cards show them), and opening a file loads the plan found beside it. Load Plan and Save Plan As take any path.
+- **Overlap.** Each card shows how much of the channel's playing time falls while the pool being edited is already sounding: a low figure marks a channel that could share that pool's voices. The panel shows the worst figure among the pool's own members.
+
+- **Demand strip with tiers.** The strip stacks channels by tier and pool and draws a budget line for each tier. While the reduction is on it shows occupancy, notes plus their releases, and hovering reports each tier's count against its budget.
+
+- **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as JSON beside the MIDI file (`name.plan.json`, with channels numbered as the cards show them), and opening a file loads the plan found beside it. Load Plan and Save Plan As take any path.
 
 ### Fixed
 
-- **Drum unison.** A drum hit is no longer dropped as a unison when a pitched note on another channel shares its key number and start tick. The unison transform passes the drum channel through, as the octave transform already did.
+- **Drum unison.** A drum hit is no longer dropped as a unison when a pitched note on another channel shares its key number and start tick. The unison transform now passes the drum channel through, as the octave transform already did.
 
 ## [0.2.0] - 2026-08-23
 
