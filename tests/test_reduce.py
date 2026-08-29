@@ -133,10 +133,49 @@ class TestPlanFile:
     """The sidecar JSON."""
 
     def testSidecarPath(self) -> None:
-        """The plan file takes the MIDI file's name with `.plan.json` for the extension."""
-        assert reduce.sidecarPath("/x/JSBD-1.mid") == "/x/JSBD-1.plan.json"
-        assert reduce.sidecarPath("song.midi") == "song.plan.json"
-        assert reduce.sidecarPath("a.b.mid") == "a.b.plan.json"
+        """The plan file takes the MIDI file's name with `.monty` for the extension."""
+        assert reduce.sidecarPath("/x/JSBD-1.mid") == "/x/JSBD-1.monty"
+        assert reduce.sidecarPath("song.midi") == "song.monty"
+        assert reduce.sidecarPath("a.b.mid") == "a.b.monty"
+
+    def testMidiFileIsResolvedAgainstThePlan(self, tmp_path: Path) -> None:
+        """A bare name or a relative path is beside the plan file; an absolute one stands."""
+        plan = reduce.Plan([reduce.Pool("all", [0], 4)])
+        path = tmp_path / "sub" / "song.monty"
+        path.parent.mkdir()
+        reduce.savePlan(plan, str(path), midiFile="song.mid")
+        read = reduce.readPlanFile(str(path))
+        assert read.midiFile == str(tmp_path / "sub" / "song.mid")
+        assert read.midiData is None
+        assert read.plan.pools == plan.pools
+        reduce.savePlan(plan, str(path), midiFile="../song.mid")
+        assert reduce.readPlanFile(str(path)).midiFile == str(tmp_path / "sub" / ".." / "song.mid")
+        reduce.savePlan(plan, str(path), midiFile="/elsewhere/song.mid")
+        assert reduce.readPlanFile(str(path)).midiFile == "/elsewhere/song.mid"
+        reduce.savePlan(plan, str(path))
+        assert reduce.readPlanFile(str(path)).midiFile is None
+
+    def testEmbeddedMidiIsCheckedAndReturned(self, tmp_path: Path) -> None:
+        """A bundle carries the MIDI as base64 with its SHA-256, refused when it does not match."""
+        plan = reduce.Plan([reduce.Pool("all", [0], 4)])
+        raw = b"MThd" + bytes(range(40))
+        path = tmp_path / "bundle.monty"
+        reduce.savePlan(plan, str(path), midiFile="song.mid", midiData=raw)
+        data = reduce.planToDict(plan, "song.mid", raw)
+        assert data["midiBlob"]["sha256"] == __import__("hashlib").sha256(raw).hexdigest()
+        read = reduce.readPlanFile(str(path))
+        assert read.midiData == raw
+        assert read.midiFile == str(tmp_path / "song.mid")
+        text = path.read_text().replace(data["midiBlob"]["sha256"][:8], "00000000")
+        path.write_text(text)
+
+        with pytest.raises(ValueError, match="checksum"):
+            reduce.readPlanFile(str(path))
+
+        path.write_text('{"pools": [], "midiBlob": {"sha256": "x", "base64": "@@"}}')
+
+        with pytest.raises(ValueError, match="malformed"):
+            reduce.readPlanFile(str(path))
 
     def testRoundTrip(self, tmp_path: Path) -> None:
         """Tiers, pools with every switch, priorities and releases survive a save and load."""
@@ -144,9 +183,9 @@ class TestPlanFile:
                                         legatoGap=120, monoTop=True, maxChord=2, tier="opm"),
                             reduce.Pool("rest", [9], 1)],
                            priority={0: 2.0, 1: 1.0},
-                           tiers=[reduce.Tier("opm", 8, reserved=1, release=300.0)],
+                           tiers=[reduce.Tier("opm", 8, reserved=1, release=300.0, chip="opm")],
                            release={1: 20.0})
-        path = tmp_path / "x.plan.json"
+        path = tmp_path / "x.monty"
         reduce.savePlan(plan, str(path))
         back = reduce.loadPlan(str(path))
         assert back.tiers == plan.tiers
@@ -175,9 +214,9 @@ class TestPlanFile:
 
     def testMalformedIsRefusedWithThePath(self, tmp_path: Path) -> None:
         """Anything that is not a fitting plan is a ValueError naming the file."""
-        path = tmp_path / "bad.plan.json"
+        path = tmp_path / "bad.monty"
         cases = [
-            ("[1, 2]", "bad.plan.json"),
+            ("[1, 2]", "bad.monty"),
             ("{not json", "not JSON"),
             ('{"pools": [{"name": "a", "voices": 1}]}', "not a plan"),
             ('{"pools": [{"name": "a", "channels": [17], "voices": 1}]}', "channel 17"),

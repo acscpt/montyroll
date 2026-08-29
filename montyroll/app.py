@@ -26,6 +26,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 
 from . import analysis, gm, model, player, reduce, smf
+from .export import zsm, zsmcheck, zsmdecode, zsmsim
 
 CHANNEL_COLORS = [
     "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
@@ -41,8 +42,8 @@ DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
 NO_TIER = "(none)"   # a pool with no tier: plain voices, no chip
-X16_TIERS = [reduce.Tier("opm", 8, 0, 300.0),      # the Commander X16: YM2151 and VERA PSG
-             reduce.Tier("psg", 16, 4, 0.0)]
+X16_TIERS = [reduce.Tier("opm", 8, 0, 300.0, "opm"),   # the Commander X16: YM2151 and PSG
+             reduce.Tier("psg", 16, 4, 0.0, "psg")]
 SNAP_CHOICES = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "off"]
 MAX_EVENT_ROWS = 8000
 
@@ -282,10 +283,12 @@ class MidiEditorApp(tk.Tk):
         fm.add_command(label="Save", accelerator="Ctrl+S", command=self.save)
         fm.add_command(label="Save As...", command=self.saveAs)
         fm.add_command(label="Save Reduced As...", command=self.saveReducedAs)
+        fm.add_command(label="Export ZSM...", command=self.exportZsm)
         fm.add_separator()
         fm.add_command(label="Load Plan...", command=self.loadPlanDialog)
         fm.add_command(label="Save Plan", command=self.savePlan)
         fm.add_command(label="Save Plan As...", command=self.savePlanAs)
+        fm.add_command(label="Save Plan Bundle As...", command=self.savePlanBundleAs)
         fm.add_separator()
         fm.add_command(label="Quit", command=self.onClose)
         m.add_cascade(label="File", menu=fm)
@@ -712,7 +715,7 @@ class MidiEditorApp(tk.Tk):
         sidecar = reduce.sidecarPath(path)
 
         if os.path.exists(sidecar):
-            self._loadPlanFile(sidecar)
+            self._loadPlanFile(sidecar, withSong=False)
 
     def save(self):
         """Save to the song's own path, or go through Save As when it has none."""
@@ -2122,6 +2125,64 @@ class MidiEditorApp(tk.Tk):
             smf.write(reduce.toMidiFile(self.song, self._ensureReduction()), path)
             self._setStatus(f"Saved reduced song to {path}")
 
+    def exportZsm(self):
+        """Write the reduction as a ZSM file for the Commander X16.
+
+        The plan's pools must sit on tiers with a chip; otherwise the
+        export is refused with the reason. The toolbar's master volume is
+        the export's level. The written file is decoded, checked and
+        replayed, and the status bar reports its size in banks, the voices
+        used and any problems found.
+        """
+        plan = self._currentPlan()
+
+        master = self.masterVar.get() / 100
+
+        try:
+            plan.validate()
+            reduction = self._ensureReduction()
+            writes = zsm.exportWrites(self.song, reduction, plan, master=master)
+        except ValueError as exc:
+            messagebox.showerror("Export ZSM", f"{exc}\n\nGive every pool a tier with a chip "
+                                 "(Tiers... on the Reduce panel has a Commander X16 preset).")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export ZSM", defaultextension=".zsm",
+            filetypes=[("ZSM files", "*.zsm"), ("All files", "*")])
+
+        if not path:
+            return
+
+        data = zsm.build(writes)
+
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError as exc:
+            messagebox.showerror("Export failed", f"{path}\n\n{exc}")
+            return
+
+        # The written bytes go back through the decoder, the checks and
+        # the chip model before the file is called good.
+        decoded = zsmdecode.decode(data)
+        psgTier = next((t for t in plan.tiers if t.chip == "psg"), None)
+        release = {t.chip: round(t.release * zsm.FRAME_RATE / 1000) for t in plan.tiers if t.chip}
+        sim = zsmsim.simulate(decoded, psgTier.voices if psgTier else 16, release)
+        problems = zsmcheck.check(decoded) + sim.problems
+        banks = (len(data) + 8191) // 8192
+        level = f" at {self.masterVar.get()}% level" if master < 1 else ""
+        summary = (f"Exported {path}: {len(data) // 1024} KB, {banks} banks, "
+                   f"{decoded.length / zsm.FRAME_RATE:.0f} s, peak {sim.peakOpm} OPM and "
+                   f"{sim.peakPsg} PSG voices, {len(reduction.placed)} notes{level}")
+
+        if problems:
+            messagebox.showwarning("Export ZSM", f"{summary}\n\n{len(problems)} problems:\n"
+                                   + "\n".join(problems[:12]))
+            self._setStatus(f"{summary}, {len(problems)} problems")
+        else:
+            self._setStatus(f"{summary}, no problems")
+
     # ----------------------------------------------------------------- plan
     def _defaultPlan(self) -> reduce.Plan:
         """One pool of every channel with notes, at the strip's budget.
@@ -2482,7 +2543,7 @@ class MidiEditorApp(tk.Tk):
         return None
 
     def tiersDialog(self):
-        """Edit the tiers in a dialog: a row of name, channels, reserved and release each."""
+        """Edit the tiers in a dialog: a row of name, channels, reserved, release and chip each."""
         dlg = tk.Toplevel(self)
         dlg.title("Tiers")
         dlg.transient(self)
@@ -2495,7 +2556,7 @@ class MidiEditorApp(tk.Tk):
             for w in grid.winfo_children():
                 w.destroy()
 
-            for col, text in enumerate(("Tier", "Channels", "Reserved", "Release ms")):
+            for col, text in enumerate(("Tier", "Channels", "Reserved", "Release ms", "Chip")):
                 ttk.Label(grid, text=text).grid(row=0, column=col, padx=3)
 
             for r, cells in enumerate(rows, start=1):
@@ -2504,7 +2565,7 @@ class MidiEditorApp(tk.Tk):
                         row=r, column=col, padx=3, pady=2)
 
                 ttk.Button(grid, text="-", width=2, command=lambda c=cells: drop(c)).grid(
-                    row=r, column=4, padx=(6, 0))
+                    row=r, column=5, padx=(6, 0))
 
         def drop(cells: list[tk.StringVar]):
             """Remove one row."""
@@ -2513,8 +2574,8 @@ class MidiEditorApp(tk.Tk):
 
         def add(tier: reduce.Tier | None = None):
             """Append a row, filled from a tier or blank."""
-            values = ((tier.name, tier.capacity, tier.reserved, f"{tier.release:g}")
-                      if tier is not None else ("", 0, 0, 0))
+            values = ((tier.name, tier.capacity, tier.reserved, f"{tier.release:g}", tier.chip)
+                      if tier is not None else ("", 0, 0, 0, ""))
             rows.append([tk.StringVar(value=str(v)) for v in values])
             rebuild()
 
@@ -2529,7 +2590,8 @@ class MidiEditorApp(tk.Tk):
             """Read the rows back, apply them, and close unless they are refused."""
             try:
                 tiers = [reduce.Tier(cells[0].get().strip(), int(cells[1].get()),
-                                     int(cells[2].get()), float(cells[3].get()))
+                                     int(cells[2].get()), float(cells[3].get()),
+                                     cells[4].get().strip())
                          for cells in rows]
             except ValueError:
                 messagebox.showerror("Tiers", "Channels and reserved are whole numbers and "
@@ -2576,54 +2638,120 @@ class MidiEditorApp(tk.Tk):
         self._loadPoolControls()
         self._reductionChanged()
 
-    def _loadPlanFile(self, path: str):
-        """Load a plan file, reporting a bad one and keeping the current plan.
+    def _loadPlanFile(self, path: str, withSong: bool = True):
+        """Load a plan file, and the MIDI file it names or embeds.
+
+        A MIDI embedded in the plan is opened from it, after the
+        unsaved-changes check, since it is the song the plan was saved
+        with; failing that, a MIDI file the plan names that exists is
+        opened, and its own sidecar with it; failing both the plan applies
+        to the song already open. A bad plan file is reported and nothing
+        changes.
 
         Args:
             path: the plan file.
+            withSong: open the MIDI the plan names or embeds; False applies
+                the plan to the current song whatever the file says.
         """
         try:
-            plan = reduce.loadPlan(path)
+            read = reduce.readPlanFile(path)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Plan not loaded", str(exc))
             return
 
-        self._applyPlan(plan)
-        self._setStatus(f"Loaded plan {path}")
+        opened = ""
+
+        if withSong:
+            current = os.path.abspath(self.song.path) if self.song.path else ""
+            named = read.midiFile if read.midiFile and os.path.exists(read.midiFile) else None
+
+            if read.midiData is not None:
+                if not self._confirmDiscard():
+                    return
+
+                try:
+                    self.song = model.Song.fromBytes(read.midiData, read.midiFile)
+                except ValueError as exc:
+                    messagebox.showerror("Plan not loaded", f"{path}: embedded MIDI: {exc}")
+                    return
+
+                self._refreshAll()
+                opened = "opened the embedded MIDI and "
+            elif named and os.path.abspath(named) != current:
+                if not self._confirmDiscard():
+                    return
+
+                self.openFile(named)
+                opened = f"opened {named} and "
+
+        self._applyPlan(read.plan)
+        self._setStatus(f"Loaded plan {path}" if not opened else f"Loaded plan {path}: {opened}"
+                        "applied it")
 
     def loadPlanDialog(self):
-        """Ask for a plan file and load it."""
+        """Ask for a plan file and load it with the MIDI it belongs to."""
         path = filedialog.askopenfilename(
-            title="Load plan", filetypes=[("Plan files", "*.plan.json"), ("All files", "*")])
+            title="Load plan", filetypes=[("MontyRoll plans", "*.monty"), ("All files", "*")])
 
         if path:
             self._loadPlanFile(path)
 
     def savePlan(self):
-        """Write the plan beside the song, or ask where when the song has no path."""
+        """Write the plan beside the song, naming the song, or ask where when it has no path."""
         if not self.song.path:
             self.savePlanAs()
             return
 
-        self._writePlan(reduce.sidecarPath(self.song.path))
+        self._writePlan(reduce.sidecarPath(self.song.path), os.path.basename(self.song.path))
 
     def savePlanAs(self):
-        """Ask for a destination and write the plan there."""
+        """Ask for a destination and write the plan there, naming the song relative to it."""
         path = filedialog.asksaveasfilename(
             title="Save plan", defaultextension=reduce.PLAN_SUFFIX,
-            filetypes=[("Plan files", "*.plan.json"), ("All files", "*")])
+            filetypes=[("MontyRoll plans", "*.monty"), ("All files", "*")])
 
         if path:
-            self._writePlan(path)
+            self._writePlan(path, self._songRelativeTo(path))
 
-    def _writePlan(self, path: str):
+    def savePlanBundleAs(self):
+        """Ask for a destination and write the plan with the song embedded in it.
+
+        The song goes in as it is in memory, edits included, with its
+        checksum, so the bundle needs no file beside it.
+        """
+        path = filedialog.asksaveasfilename(
+            title="Save plan bundle", defaultextension=reduce.PLAN_SUFFIX,
+            filetypes=[("MontyRoll plans", "*.monty"), ("All files", "*")])
+
+        if path:
+            self._writePlan(path, self._songRelativeTo(path), smf.toBytes(self.song.mf))
+
+    def _songRelativeTo(self, path: str) -> str:
+        """The song's path as a plan file at `path` should name it.
+
+        Args:
+            path: the plan file's path.
+
+        Returns:
+            str: the song's path relative to the plan file's directory, or
+            empty when the song has no path.
+        """
+        if not self.song.path:
+            return ""
+
+        relative = os.path.relpath(self.song.path, os.path.dirname(os.path.abspath(path)))
+        return relative
+
+    def _writePlan(self, path: str, midiFile: str = "", midiData: bytes | None = None):
         """Write the plan as the controls have it.
 
         Args:
             path: where to write it.
+            midiFile: the song's path or name to record in the file.
+            midiData: the song's bytes to embed, None to embed none.
         """
         try:
-            reduce.savePlan(self._currentPlan(), path)
+            reduce.savePlan(self._currentPlan(), path, midiFile, midiData)
         except OSError as exc:
             messagebox.showerror("Save failed", f"{path}\n\n{exc}")
             return

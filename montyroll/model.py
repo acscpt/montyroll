@@ -172,6 +172,24 @@ class Song:
         return song
 
     @classmethod
+    def fromBytes(cls, data: bytes, path: str | None = None) -> "Song":
+        """Parse a Standard MIDI File held in memory into a Song.
+
+        Args:
+            data: the file's bytes.
+            path: the path a later save() writes to, or None for none yet.
+
+        Returns:
+            Song: the parsed song.
+
+        Raises:
+            ValueError: if the data is not an SMF or uses SMPTE time division.
+        """
+        mf = smf.parseBytes(data, path or "MIDI data")
+        song = cls(mf, path)
+        return song
+
+    @classmethod
     def new(cls) -> "Song":
         """Create an empty song with one track at 120 bpm in 4/4.
 

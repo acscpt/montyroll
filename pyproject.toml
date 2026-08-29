@@ -41,7 +41,7 @@ Repository = "https://github.com/acscpt/montyroll"
 Issues = "https://github.com/acscpt/montyroll/issues"
 
 [tool.setuptools]
-packages = ["montyroll"]
+packages = ["montyroll", "montyroll.export"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

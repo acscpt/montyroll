@@ -437,3 +437,16 @@ class TestTempoEdits:
         song.scaleTempos(1.5)
         song.removeTempo(480)
         assert [(n.pitch, n.start, n.end) for n in song.notes] == before
+
+
+class TestFromBytes:
+    """A song parsed from memory."""
+
+    def testFromBytesMatchesLoad(self, songPath: Path) -> None:
+        """The same notes come from the bytes as from the file, with the path as given."""
+        loaded = model.Song.load(str(songPath))
+        parsed = model.Song.fromBytes(songPath.read_bytes(), "memory.mid")
+        assert [(n.channel, n.pitch, n.start, n.end) for n in parsed.notes] == \
+            [(n.channel, n.pitch, n.start, n.end) for n in loaded.notes]
+        assert parsed.path == "memory.mid"
+        assert model.Song.fromBytes(songPath.read_bytes()).path is None

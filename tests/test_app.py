@@ -32,6 +32,7 @@ from montyroll.app import (
     MidiEditorApp,
     _shade,
 )
+from montyroll.export import zsmcheck, zsmdecode
 
 pytestmark = needsDisplay
 
@@ -701,6 +702,40 @@ class TestReduction:
         assert len(saved.notes) < len(app.song.notes)
         assert not app.song.dirty
         assert "Saved reduced song" in app.status.cget("text")
+
+    def testExportZsm(self, app: MidiEditorApp, tmp_path: Path,
+                      monkeypatch: pytest.MonkeyPatch) -> None:
+        """Export ZSM writes a file that decodes clean and reports its size and voices."""
+        out = tmp_path / "song.zsm"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        errors: list[str] = []
+        monkeypatch.setattr("montyroll.app.messagebox.showerror",
+                            lambda title, text, **k: errors.append(text))
+
+        # With no tiers the export is refused and explains itself.
+        app.exportZsm()
+        assert not out.exists()
+        assert errors and "no tier" in errors[0] and "Commander X16" in errors[0]
+
+        app._applyTiers(list(X16_TIERS))
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        app.exportZsm()
+        assert out.exists()
+        decoded = zsmdecode.decode(out.read_bytes())
+        assert zsmcheck.check(decoded) == []
+        assert decoded.header.fmMask and not decoded.header.psgMask
+        status = app.status.cget("text")
+        assert status.startswith("Exported ") and "no problems" in status
+        assert f"{len(app.reduction.placed)} notes, no problems" in status
+
+        # The toolbar's master volume is the export's level.
+        app.masterVar.set(60)
+        app.exportZsm()
+        assert "at 60% level" in app.status.cget("text")
+        assert zsmcheck.check(zsmdecode.decode(out.read_bytes())) == []
+
+
 class TestWeightShading:
     """The Shade by weight switch on the Reduce panel."""
 
@@ -915,6 +950,45 @@ class TestPlanControls:
         assert app.priorityVars[0].get() == 2.5
         assert app.releaseVars[1].get() == "40"
         assert app.budgetVar.get() == app._totalVoices()
+
+    def testLoadPlanOpensTheSongItNames(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        """Load Plan on a .monty that names a MIDI file opens that file, then applies the plan."""
+        app.priorityVars[0].set(3.0)
+        app.savePlan()
+        sidecar = Path(reduce.sidecarPath(str(songPath)))
+        assert sidecar.suffix == ".monty"
+        assert '"midiFile": "song.mid"' in sidecar.read_text()
+
+        # Another song is open; loading the plan brings the named one back.
+        other = tmp_path / "other.mid"
+        smf.write(app.song.mf, str(other))
+        app.openFile(str(other))
+        assert Path(app.song.path).name == "other.mid"
+        monkeypatch.setattr("montyroll.app.filedialog.askopenfilename", lambda **k: str(sidecar))
+        app.loadPlanDialog()
+        assert Path(app.song.path).name == "song.mid"
+        assert app.plan.priority[0] == 3.0
+        assert "opened" in app.status.cget("text")
+
+    def testBundleOpensWithoutItsFile(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bundle carries the song: it loads from an empty directory and keeps the edits."""
+        app.selectAll()
+        app.deleteSelection()
+        notes = len(app.song.notes)
+        bundle = tmp_path / "away" / "bundle.monty"
+        bundle.parent.mkdir()
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(bundle))
+        app.savePlanBundleAs()
+        assert '"midiBlob"' in bundle.read_text()
+        monkeypatch.setattr("montyroll.app.messagebox.askyesnocancel", lambda *a, **k: False)
+        app.newFile()
+        assert not app.song.notes
+        monkeypatch.setattr("montyroll.app.filedialog.askopenfilename", lambda **k: str(bundle))
+        app.loadPlanDialog()
+        assert len(app.song.notes) == notes
+        assert "embedded" in app.status.cget("text")
 
     def testBadSidecarIsReported(self, app: MidiEditorApp, songPath: Path,
                                  monkeypatch: pytest.MonkeyPatch) -> None:

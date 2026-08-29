@@ -20,7 +20,9 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Shade by weight.** A switch on the Reduce panel colours notes by their reduction weight instead of velocity, scaled to the heaviest note in the song, so raising a channel's priority visibly brightens it and dims the rest. Hovering a note then reports its weight in the status bar.
 
-- **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as JSON beside the MIDI file (`name.plan.json`, with channels numbered as the cards show them), and opening a file loads the plan found beside it. Load Plan and Save Plan As take any path.
+- **ZSM export for the Commander X16.** File > Export ZSM writes the reduction as a ZSM file for ZSMKit: each pool's voices go to the chip of its tier (YM2151 or VERA PSG), frames come from the tempo map, a note's velocity and channel volume set its level, its channel's pan places it, and a PSG part takes a waveform and, for plucked instruments, a decay from its GM program. The written file is decoded, checked and replayed through a chip model before the status bar reports its size in banks and the voices used. New package `montyroll.export`.
+
+- **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as a `.monty` file beside the MIDI file (JSON, with channels numbered as the cards show them), and opening a file loads the plan found beside it. The file names the MIDI it belongs to, so Load Plan opens that file as well; Save Plan As takes any path, and Save Plan Bundle As embeds the MIDI in the plan with a checksum, so a bundle needs no other file.
 
 ### Fixed
 

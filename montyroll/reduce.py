@@ -10,11 +10,10 @@ applies the transforms to each pool's notes, allocates what remains to the
 pool's voices, and returns a `Reduction`: every note that sounds with the
 voice it plays on, every note that was dropped or cut short, and the
 musical cost of those losses. A voice stays busy through its note's
-release, so the budget is honest for a chip whose envelopes outlast the
-key. The song itself is never modified; the reduction is a view over it,
+release. The song itself is never modified; the reduction is a view over it,
 and `toMidiFile` builds a playable copy for audition or saving. A plan is
-saved beside its MIDI file as JSON (`savePlan`, `loadPlan`, `sidecarPath`)
-so it can be versioned with the file it belongs to.
+saved as a `.monty` file, JSON that names the MIDI file it belongs to or
+embeds it outright (`savePlan`, `readPlanFile`, `sidecarPath`).
 
 Every decision rests on a weight per note (see `weights`), so a note is
 dropped because of a number the user can inspect and steer through the
@@ -23,6 +22,9 @@ per-channel priorities. The module knows nothing about tkinter.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -32,7 +34,7 @@ from . import model, smf
 
 RELEASE_WEIGHT = 0.25   # a voice in its release counts this much of its note's weight
 PLAN_VERSION = 1        # written into every plan file
-PLAN_SUFFIX = ".plan.json"
+PLAN_SUFFIX = ".monty"
 
 
 @dataclass
@@ -44,12 +46,15 @@ class Tier:
     range; the pools naming the tier may not add up to more than the rest.
     `release` is the default time in milliseconds a voice stays busy after
     its note ends, which is the release of the patches the tier carries.
+    `chip` names the hardware for the export: "opm" or "psg" on the X16,
+    empty for a tier with no export target.
     """
 
     name: str
     capacity: int
     reserved: int = 0
     release: float = 0.0
+    chip: str = ""
 
     @property
     def voices(self) -> int:
@@ -741,6 +746,21 @@ def allocate(placed: list[Placed], voices: int, base: int, reduction: Reduction)
 
 
 # -------------------------------------------------------------- plan file
+@dataclass
+class PlanFile:
+    """A plan as read from a `.monty` file, with the MIDI it belongs to.
+
+    `midiFile` is the path the file names, made absolute against the
+    file's own directory when it is relative, whether or not it exists;
+    `midiData` is the MIDI embedded in the file, its checksum verified.
+    Either or both may be None.
+    """
+
+    plan: Plan
+    midiFile: str | None = None
+    midiData: bytes | None = None
+
+
 def sidecarPath(path: str) -> str:
     """The plan file that belongs beside a MIDI file.
 
@@ -748,30 +768,35 @@ def sidecarPath(path: str) -> str:
         path: the MIDI file's path.
 
     Returns:
-        str: the same path with `.plan.json` in place of the extension.
+        str: the same path with `.monty` in place of the extension.
     """
     base, _ = os.path.splitext(path)
     sidecar = base + PLAN_SUFFIX
     return sidecar
 
 
-def planToDict(plan: Plan) -> dict[str, Any]:
+def planToDict(plan: Plan, midiFile: str = "",
+               midiData: bytes | None = None) -> dict[str, Any]:
     """Serialise a plan.
 
     Channels are written 1-based, as the channel strip shows them, because
     the file is meant to be read and tuned by hand. Neutral priorities are
-    left out.
+    left out. The MIDI file is named under `midiFile`, a path taken as
+    relative to the plan file's directory unless absolute, and embedded
+    under `midiBlob` as base64 with its SHA-256 when its bytes are given.
 
     Args:
         plan: the plan.
+        midiFile: the MIDI file's path or name, empty to name none.
+        midiData: the MIDI file's bytes to embed, None to embed none.
 
     Returns:
         dict[str, Any]: JSON-ready data with a version number.
     """
-    data = {
+    data: dict[str, Any] = {
         "version": PLAN_VERSION,
         "tiers": [{"name": t.name, "capacity": t.capacity, "reserved": t.reserved,
-                   "release": t.release} for t in plan.tiers],
+                   "release": t.release, "chip": t.chip} for t in plan.tiers],
         "pools": [{"name": p.name, "tier": p.tier, "voices": p.voices,
                    "channels": [ch + 1 for ch in p.channels],
                    "dedupUnison": p.dedupUnison, "dedupOctave": p.dedupOctave,
@@ -780,6 +805,14 @@ def planToDict(plan: Plan) -> dict[str, Any]:
         "priority": {str(ch + 1): v for ch, v in sorted(plan.priority.items()) if v != 1.0},
         "release": {str(ch + 1): v for ch, v in sorted(plan.release.items())},
     }
+
+    if midiFile:
+        data["midiFile"] = midiFile
+
+    if midiData is not None:
+        data["midiBlob"] = {"sha256": hashlib.sha256(midiData).hexdigest(),
+                            "base64": base64.b64encode(midiData).decode("ascii")}
+
     return data
 
 
@@ -823,7 +856,8 @@ def planFromDict(data: dict[str, Any], source: str = "plan") -> Plan:
     """
     try:
         tiers = [Tier(str(t["name"]), int(t["capacity"]), int(t.get("reserved", 0)),
-                      float(t.get("release", 0.0))) for t in data.get("tiers", [])]
+                      float(t.get("release", 0.0)), str(t.get("chip", "")))
+                 for t in data.get("tiers", [])]
         pools = [Pool(str(p["name"]),
                       [_channelIndex(ch, source) for ch in p["channels"]],
                       int(p["voices"]),
@@ -851,30 +885,34 @@ def planFromDict(data: dict[str, Any], source: str = "plan") -> Plan:
     return plan
 
 
-def savePlan(plan: Plan, path: str) -> None:
-    """Write a plan as JSON.
+def savePlan(plan: Plan, path: str, midiFile: str = "", midiData: bytes | None = None) -> None:
+    """Write a plan as a `.monty` file.
 
     Args:
         plan: the plan.
         path: where to write it, normally `sidecarPath` of the MIDI file.
+        midiFile: the MIDI file's path or name to record, empty for none.
+        midiData: the MIDI file's bytes to embed, None to embed none.
     """
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(planToDict(plan), f, indent=2)
+        json.dump(planToDict(plan, midiFile, midiData), f, indent=2)
         f.write("\n")
 
 
-def loadPlan(path: str) -> Plan:
-    """Read a plan written by `savePlan`.
+def readPlanFile(path: str) -> PlanFile:
+    """Read a `.monty` file: the plan and the MIDI it names or embeds.
 
     Args:
         path: the plan file.
 
     Returns:
-        Plan: the plan.
+        PlanFile: the plan, the named MIDI file's path made absolute
+        against the plan file's directory, and the embedded MIDI bytes.
 
     Raises:
-        ValueError: the file is not JSON, not a plan, or its pools do not
-            fit its tiers; the message carries the path.
+        ValueError: the file is not JSON, not a plan, its pools do not fit
+            its tiers, or the embedded MIDI is malformed or does not match
+            its checksum; the message carries the path.
         OSError: the file cannot be read.
     """
     with open(path, encoding="utf-8") as f:
@@ -886,7 +924,44 @@ def loadPlan(path: str) -> Plan:
     if not isinstance(data, dict):
         raise ValueError(f"{path}: not a plan")
 
-    plan = planFromDict(data, path)
+    result = PlanFile(planFromDict(data, path))
+    named = data.get("midiFile")
+
+    if named:
+        folder = os.path.dirname(os.path.abspath(path))
+        result.midiFile = named if os.path.isabs(named) else os.path.join(folder, named)
+
+    blob = data.get("midiBlob")
+
+    if blob is not None:
+        try:
+            raw = base64.b64decode(blob["base64"], validate=True)
+            digest = blob["sha256"]
+        except (KeyError, TypeError, binascii.Error) as exc:
+            raise ValueError(f"{path}: the embedded MIDI is malformed ({exc!r})") from exc
+
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError(f"{path}: the embedded MIDI does not match its checksum")
+
+        result.midiData = raw
+
+    return result
+
+
+def loadPlan(path: str) -> Plan:
+    """Read the plan from a `.monty` file.
+
+    Args:
+        path: the plan file.
+
+    Returns:
+        Plan: the plan.
+
+    Raises:
+        ValueError: as `readPlanFile`.
+        OSError: the file cannot be read.
+    """
+    plan = readPlanFile(path).plan
     return plan
 
 
