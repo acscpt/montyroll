@@ -18,6 +18,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Demand strip with tiers.** The strip stacks channels by tier and pool and draws a budget line for each tier. While the reduction is on it shows occupancy, notes plus their releases, and hovering reports each tier's count against its budget.
 
+- **Shade by weight.** A switch on the Reduce panel colours notes by their reduction weight instead of velocity, scaled to the heaviest note in the song, so raising a channel's priority visibly brightens it and dims the rest. Hovering a note then reports its weight in the status bar.
+
 - **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as JSON beside the MIDI file (`name.plan.json`, with channels numbered as the cards show them), and opening a file loads the plan found beside it. Load Plan and Save Plan As take any path.
 
 ### Fixed

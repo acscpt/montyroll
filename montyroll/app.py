@@ -242,6 +242,8 @@ class MidiEditorApp(tk.Tk):
         self._overlapAfter: str | None = None
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
+        self.shadeVar = tk.BooleanVar(value=False)       # notes coloured by weight, not velocity
+        self.noteWeights: dict[int, float] | None = None  # id(note) -> weight, cached with the plan
         self.reports: dict[str, str | None] = {"original": None, "reduced": None}
         self._demandAfter: str | None = None
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
@@ -770,6 +772,7 @@ class MidiEditorApp(tk.Tk):
         self.songDemand = None
         self.chords = None
         self.reduction = None
+        self.noteWeights = None
         self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
         self.priorityVars.clear()
@@ -1333,16 +1336,24 @@ class MidiEditorApp(tk.Tk):
             for placed in reduction.placed:
                 segments.setdefault(id(placed.note), []).append(placed)
 
+        # Shading by weight scales to the heaviest note in the song, so a
+        # priority raised on one channel brightens it and dims the rest.
+        weights = self._ensureWeights() if self.shadeVar.get() else None
+        heaviest = max(weights.values(), default=1.0) if weights else 1.0
+
         for note in s.notes:
             y1 = (127 - note.pitch) * self.rowH + 1
             y2 = y1 + self.rowH - 2
             base = CHANNEL_COLORS[note.channel]
 
-            if note.channel in audible:
-                fill = _shade(base, 0.65 + 0.35 * note.velocity / 127)
+            if note.channel not in audible:
+                fill, outline = "#3a3a40", "#2c2c31"
+            elif weights is not None:
+                fill = _shade(base, 0.3 + 0.7 * weights[id(note)] / heaviest)
                 outline = _shade(base, 0.45)
             else:
-                fill, outline = "#3a3a40", "#2c2c31"
+                fill = _shade(base, 0.65 + 0.35 * note.velocity / 127)
+                outline = _shade(base, 0.45)
 
             # With the reduction on, a note is drawn as the segments that
             # sound, over a stippled ghost of its original extent wherever
@@ -1593,6 +1604,7 @@ class MidiEditorApp(tk.Tk):
         self._scheduleOverlap()
         self.chords = None
         self.reduction = None
+        self.noteWeights = None
         self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
         self._scheduleDemand()
@@ -1880,6 +1892,12 @@ class MidiEditorApp(tk.Tk):
         cb.pack(side="left")
         Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
                     "Dropped notes are stippled; the file is not changed.")
+        sh = ttk.Checkbutton(top, text="Shade by weight", variable=self.shadeVar,
+                             command=self.redraw)
+        sh.pack(side="right")
+        Tooltip(sh, "Colour notes by their reduction weight instead of\n"
+                    "velocity: the brighter a note, the harder the\n"
+                    "reduction tries to keep it")
         self.lossLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8), wraplength=320,
                                  justify="left")
         self.lossLbl.pack(fill="x", pady=(2, 0))
@@ -2008,6 +2026,17 @@ class MidiEditorApp(tk.Tk):
 
         return self.reduction
 
+    def _ensureWeights(self) -> dict[int, float]:
+        """Return every note's reduction weight under the current plan, computing it if needed.
+
+        Returns:
+            dict[int, float]: keyed by `id(note)`.
+        """
+        if self.noteWeights is None:
+            self.noteWeights = reduce.weights(self.song, self._currentPlan())
+
+        return self.noteWeights
+
     def _invalidateReducedSong(self):
         """Discard the playable copy of the reduction after a channel event edit.
 
@@ -2067,11 +2096,12 @@ class MidiEditorApp(tk.Tk):
             self.budgetVar.set(self._totalVoices())
 
         self.reduction = None
+        self.noteWeights = None
         self.reducedSong = None
         self.demand = None
         self.reports["reduced"] = None
 
-        if self.reduceVar.get():
+        if self.reduceVar.get() or self.shadeVar.get():
             self.redraw()
         else:
             self.lossLbl.config(text="")
@@ -3003,9 +3033,11 @@ class MidiEditorApp(tk.Tk):
                  else gm.noteName(note.pitch))
         info = self.song.channels.get(note.channel)
         inst = info.instrument if info else "?"
+        weight = (f" | weight {self._ensureWeights()[id(note)]:.2f}"
+                  if self.shadeVar.get() else "")
         self._setStatus(
             f"{prefix}{pname} vel {note.velocity} | ch {note.channel + 1} ({inst}) | "
-            f"tick {note.start}-{note.end} ({note.length}) | track {note.track}")
+            f"tick {note.start}-{note.end} ({note.length}) | track {note.track}{weight}")
 
     def onWheel(self, event):
         """Mouse wheel over the roll: scroll, Shift-scroll sideways or

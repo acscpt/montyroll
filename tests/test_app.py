@@ -21,6 +21,7 @@ import pytest
 from conftest import TRACK_NAMES, needsDisplay
 from montyroll import analysis, model, player, reduce, smf
 from montyroll.app import (
+    CHANNEL_COLORS,
     DEMAND_MAX_H,
     DEMAND_MIN_H,
     MAX_EVENT_ROWS,
@@ -700,6 +701,58 @@ class TestReduction:
         assert len(saved.notes) < len(app.song.notes)
         assert not app.song.dirty
         assert "Saved reduced song" in app.status.cget("text")
+class TestWeightShading:
+    """The Shade by weight switch on the Reduce panel."""
+
+    def _brightness(self, colour: str) -> int:
+        """Sum of the RGB components of a #rrggbb colour."""
+        total = sum(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+        return total
+
+    def testShadingFollowsTheWeights(self, app: MidiEditorApp) -> None:
+        """A quieter note that carries more weight is darker by velocity and brighter by weight."""
+        assert not app.shadeVar.get()
+        weights = app._ensureWeights()
+        louder, heavier = next((a, b) for a in app.song.notes for b in app.song.notes
+                               if a.channel == b.channel and a.velocity > b.velocity
+                               and weights[id(a)] < weights[id(b)])
+        fill = lambda n: app.canvas.itemcget(app.noteToItem[id(n)], "fill")   # noqa: E731
+        assert self._brightness(fill(louder)) > self._brightness(fill(heavier))
+        assert fill(louder) == _shade(CHANNEL_COLORS[louder.channel],
+                                      0.65 + 0.35 * louder.velocity / 127)
+        app.shadeVar.set(True)
+        app.redraw()
+        assert self._brightness(fill(louder)) < self._brightness(fill(heavier))
+        heaviest = max(weights.values())
+        assert fill(heavier) == _shade(CHANNEL_COLORS[heavier.channel],
+                                       0.3 + 0.7 * weights[id(heavier)] / heaviest)
+        app.shadeVar.set(False)
+        app.redraw()
+        assert self._brightness(fill(louder)) > self._brightness(fill(heavier))
+
+    def testPriorityBrightensItsChannel(self, app: MidiEditorApp) -> None:
+        """Raising a channel's priority recomputes the weights and lifts its notes."""
+        app.shadeVar.set(True)
+        app.redraw()
+        note = next(n for n in app.song.notes if n.channel == 1)
+        before = self._brightness(app.canvas.itemcget(app.noteToItem[id(note)], "fill"))
+        first = app._ensureWeights()
+        app.priorityVars[1].set(5.0)
+        app._reductionChanged()
+        assert app._ensureWeights() is not first
+        after = self._brightness(app.canvas.itemcget(app.noteToItem[id(note)], "fill"))
+        assert after > before
+
+    def testHoverNamesTheWeight(self, app: MidiEditorApp) -> None:
+        """The status bar carries the weight only while shading by it."""
+        note = app.song.notes[0]
+        app._describeNote(note)
+        assert "weight" not in app.status.cget("text")
+        app.shadeVar.set(True)
+        app._describeNote(note)
+        assert f"weight {app._ensureWeights()[id(note)]:.2f}" in app.status.cget("text")
+
+
 class TestPlanControls:
     """Pools, tiers and releases on the panel and the cards, and the plan sidecar."""
 
