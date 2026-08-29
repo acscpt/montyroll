@@ -705,7 +705,7 @@ class TestReduction:
 
     def testExportZsm(self, app: MidiEditorApp, tmp_path: Path,
                       monkeypatch: pytest.MonkeyPatch) -> None:
-        """Export ZSM writes a file that decodes clean and reports its size and voices."""
+        """Export through the ZSM target writes a file that verifies clean and is described."""
         out = tmp_path / "song.zsm"
         monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
         errors: list[str] = []
@@ -713,14 +713,14 @@ class TestReduction:
                             lambda title, text, **k: errors.append(text))
 
         # With no tiers the export is refused and explains itself.
-        app.exportZsm()
+        app.exportTarget("zsm")
         assert not out.exists()
-        assert errors and "no tier" in errors[0] and "Commander X16" in errors[0]
+        assert errors and "no tier" in errors[0] and "preset" in errors[0]
 
         app._applyTiers(list(X16_TIERS))
         app.poolTierVar.set("opm")
         app._reductionChanged()
-        app.exportZsm()
+        app.exportTarget("zsm")
         assert out.exists()
         decoded = zsmdecode.decode(out.read_bytes())
         assert zsmcheck.check(decoded) == []
@@ -731,7 +731,7 @@ class TestReduction:
 
         # The toolbar's master volume is the export's level.
         app.masterVar.set(60)
-        app.exportZsm()
+        app.exportTarget("zsm")
         assert "at 60% level" in app.status.cget("text")
         assert zsmcheck.check(zsmdecode.decode(out.read_bytes())) == []
 
@@ -982,7 +982,7 @@ class TestPlanControls:
         monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(bundle))
         app.savePlanBundleAs()
         assert '"midiBlob"' in bundle.read_text()
-        monkeypatch.setattr("montyroll.app.messagebox.askyesnocancel", lambda *a, **k: False)
+        monkeypatch.setattr("montyroll.app.messagebox.askyesno", lambda *a, **k: True)
         app.newFile()
         assert not app.song.notes
         monkeypatch.setattr("montyroll.app.filedialog.askopenfilename", lambda **k: str(bundle))

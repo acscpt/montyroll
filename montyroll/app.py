@@ -25,8 +25,7 @@ from dataclasses import replace
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 
-from . import analysis, gm, model, player, reduce, smf
-from .export import zsm, zsmcheck, zsmdecode, zsmsim
+from . import analysis, export, gm, model, player, reduce, smf
 
 CHANNEL_COLORS = [
     "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
@@ -42,8 +41,7 @@ DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
 NO_TIER = "(none)"   # a pool with no tier: plain voices, no chip
-X16_TIERS = [reduce.Tier("opm", 8, 0, 300.0, "opm"),   # the Commander X16: YM2151 and PSG
-             reduce.Tier("psg", 16, 4, 0.0, "psg")]
+X16_TIERS = export.presetTiers(export.TARGETS["zsm"])   # the Commander X16's two chips
 SNAP_CHOICES = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "off"]
 MAX_EVENT_ROWS = 8000
 
@@ -283,7 +281,11 @@ class MidiEditorApp(tk.Tk):
         fm.add_command(label="Save", accelerator="Ctrl+S", command=self.save)
         fm.add_command(label="Save As...", command=self.saveAs)
         fm.add_command(label="Save Reduced As...", command=self.saveReducedAs)
-        fm.add_command(label="Export ZSM...", command=self.exportZsm)
+
+        for key, target in export.TARGETS.items():
+            fm.add_command(label=f"Export {target.NAME}...",
+                           command=lambda k=key: self.exportTarget(k))
+
         fm.add_separator()
         fm.add_command(label="Load Plan...", command=self.loadPlanDialog)
         fm.add_command(label="Save Plan", command=self.savePlan)
@@ -2125,36 +2127,38 @@ class MidiEditorApp(tk.Tk):
             smf.write(reduce.toMidiFile(self.song, self._ensureReduction()), path)
             self._setStatus(f"Saved reduced song to {path}")
 
-    def exportZsm(self):
-        """Write the reduction as a ZSM file for the Commander X16.
+    def exportTarget(self, key: str):
+        """Write the reduction as a file for one export target.
 
-        The plan's pools must sit on tiers with a chip; otherwise the
-        export is refused with the reason. The toolbar's master volume is
-        the export's level. The written file is decoded, checked and
-        replayed, and the status bar reports its size in banks, the voices
-        used and any problems found.
+        The plan's pools must sit on tiers with a chip of the target;
+        otherwise the export is refused with the reason. The toolbar's
+        master volume is the export's level. The written file is verified
+        by the target, and the status bar reports its description and any
+        problems found.
+
+        Args:
+            key: the target's key in `export.TARGETS`.
         """
+        target = export.TARGETS[key]
         plan = self._currentPlan()
-
         master = self.masterVar.get() / 100
 
         try:
             plan.validate()
             reduction = self._ensureReduction()
-            writes = zsm.exportWrites(self.song, reduction, plan, master=master)
+            data = target.export(self.song, reduction, plan, master=master)
         except ValueError as exc:
-            messagebox.showerror("Export ZSM", f"{exc}\n\nGive every pool a tier with a chip "
-                                 "(Tiers... on the Reduce panel has a Commander X16 preset).")
+            messagebox.showerror(f"Export {target.NAME}",
+                                 f"{exc}\n\nGive every pool a tier with a chip of this target "
+                                 f"(Tiers... on the Reduce panel has a preset for it).")
             return
 
         path = filedialog.asksaveasfilename(
-            title="Export ZSM", defaultextension=".zsm",
-            filetypes=[("ZSM files", "*.zsm"), ("All files", "*")])
+            title=f"Export {target.NAME}", defaultextension=target.SUFFIX,
+            filetypes=[(f"{target.NAME} files", f"*{target.SUFFIX}"), ("All files", "*")])
 
         if not path:
             return
-
-        data = zsm.build(writes)
 
         try:
             with open(path, "wb") as f:
@@ -2163,21 +2167,16 @@ class MidiEditorApp(tk.Tk):
             messagebox.showerror("Export failed", f"{path}\n\n{exc}")
             return
 
-        # The written bytes go back through the decoder, the checks and
-        # the chip model before the file is called good.
-        decoded = zsmdecode.decode(data)
-        psgTier = next((t for t in plan.tiers if t.chip == "psg"), None)
-        release = {t.chip: round(t.release * zsm.FRAME_RATE / 1000) for t in plan.tiers if t.chip}
-        sim = zsmsim.simulate(decoded, psgTier.voices if psgTier else 16, release)
-        problems = zsmcheck.check(decoded) + sim.problems
-        banks = (len(data) + 8191) // 8192
+        # The written bytes go back through the target's own checks
+        # before the file is called good.
+        problems = target.verify(data, plan)
         level = f" at {self.masterVar.get()}% level" if master < 1 else ""
-        summary = (f"Exported {path}: {len(data) // 1024} KB, {banks} banks, "
-                   f"{decoded.length / zsm.FRAME_RATE:.0f} s, peak {sim.peakOpm} OPM and "
-                   f"{sim.peakPsg} PSG voices, {len(reduction.placed)} notes{level}")
+        summary = (f"Exported {path}: {target.describe(data, plan)}, "
+                   f"{len(reduction.placed)} notes{level}")
 
         if problems:
-            messagebox.showwarning("Export ZSM", f"{summary}\n\n{len(problems)} problems:\n"
+            messagebox.showwarning(f"Export {target.NAME}",
+                                   f"{summary}\n\n{len(problems)} problems:\n"
                                    + "\n".join(problems[:12]))
             self._setStatus(f"{summary}, {len(problems)} problems")
         else:
@@ -2579,11 +2578,11 @@ class MidiEditorApp(tk.Tk):
             rows.append([tk.StringVar(value=str(v)) for v in values])
             rebuild()
 
-        def preset():
-            """Replace the rows with the Commander X16's two chips."""
+        def preset(target):
+            """Replace the rows with a target's chips."""
             rows.clear()
 
-            for tier in X16_TIERS:
+            for tier in export.presetTiers(target):
                 add(tier)
 
         def ok():
@@ -2617,7 +2616,11 @@ class MidiEditorApp(tk.Tk):
         buttons = ttk.Frame(dlg, padding=(8, 0, 8, 8))
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Add tier", command=add).pack(side="left")
-        ttk.Button(buttons, text="Commander X16", command=preset).pack(side="left", padx=(4, 0))
+
+        for target in export.TARGETS.values():
+            ttk.Button(buttons, text=target.NAME.split(" (")[0],
+                       command=lambda t=target: preset(t)).pack(side="left", padx=(4, 0))
+
         ttk.Button(buttons, text="Cancel", command=dlg.destroy).pack(side="right")
         ttk.Button(buttons, text="OK", command=ok).pack(side="right", padx=(0, 4))
         dlg.grab_set()

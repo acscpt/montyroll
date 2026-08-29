@@ -3,10 +3,12 @@
 
 """ZSM export for the Commander X16: the YM2151 and the VERA PSG.
 
-The module holds the two chips' pitch arithmetic, the patch and note
-register writes, and the ZSM header and stream writer. It works in frames,
-one sixtieth of a second, the rate the X16 player runs at; a MIDI tick is
-converted through the song's tempo map.
+The module is an export target (see the package docstring): it holds the
+two chips' pitch arithmetic, the patch and note register writes, the ZSM
+header and stream writer, and the `export`, `verify` and `describe` the
+application calls. It works in frames, one sixtieth of a second, the rate
+the X16 player runs at; a MIDI tick is converted through the song's tempo
+map.
 
 The YM2151's key code (KC) is not a linear note number: its low nibble is a
 note field where the four values with both low bits set are unused, and
@@ -22,6 +24,12 @@ import math
 from dataclasses import dataclass, field
 
 from .. import model, reduce
+from . import zsmcheck, zsmdecode, zsmsim
+from .chip import Chip
+
+NAME = "Commander X16 (ZSM)"
+SUFFIX = ".zsm"
+BANK = 8192               # bytes per RAM bank the player reads from
 
 # YM2151 key code: the note field for each semitone above C, C# to C in the
 # nibble order the chip wants, with 3, 7, 11 and 15 never used.
@@ -334,6 +342,7 @@ def opmNoteOff(channel: int) -> list[tuple[int, int]]:
 
 
 PSG_PULSE, PSG_SAW, PSG_TRIANGLE, PSG_NOISE = 0, 1, 2, 3
+PSG_CHANNELS = 16
 
 
 @dataclass
@@ -597,7 +606,11 @@ def chromaticScale(chip: str, low: int = 36, high: int = 84, hold: int = 20,
 
 
 # --------------------------------------------------------------- export
-def frameOf(song: model.Song, tick: float) -> int:
+CHIPS = (Chip("opm", 8, 300.0), Chip("psg", PSG_CHANNELS, 0.0, 4))
+CHIP_NAMES = tuple(c.name for c in CHIPS)
+
+
+def frameOf(song: model.Song, tick: float, rate: int = FRAME_RATE) -> int:
     """The frame a tick falls on, through the song's tempo map.
 
     Absolute positions are rounded, and deltas are taken between the
@@ -607,11 +620,12 @@ def frameOf(song: model.Song, tick: float) -> int:
     Args:
         song: for the tempo map.
         tick: an absolute tick.
+        rate: frames per second.
 
     Returns:
-        int: the frame at 60 Hz.
+        int: the frame.
     """
-    frame = round(song.tickToSeconds(tick) * FRAME_RATE)
+    frame = round(song.tickToSeconds(tick) * rate)
     return frame
 
 
@@ -691,7 +705,7 @@ def _voiceMap(reduction: reduce.Reduction, plan: reduce.Plan) -> dict[int, tuple
         if tier is None:
             raise ValueError(f"pool {pool.name} has no tier, so its voices have no chip")
 
-        if tier.chip not in ("opm", "psg"):
+        if tier.chip not in CHIP_NAMES:
             raise ValueError(f"tier {tier.name}: chip {tier.chip!r} is not opm or psg")
 
         mapping[voice] = (tier.chip, voice - reduction.tierBase[tier.name], pool.name)
@@ -851,28 +865,70 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
     return writes
 
 
-def export(song: model.Song, reduction: reduce.Reduction, plan: reduce.Plan,
-           patches: dict[str, Patch] | None = None,
-           psgSounds: dict[int, PsgSound] | None = None,
+def export(song: model.Song, reduction: reduce.Reduction, plan: reduce.Plan, *,
            start: int = 0, end: int | None = None, loop: int | None = None,
-           master: float = 1.0) -> bytes:
+           master: float = 1.0, patches: dict[str, Patch] | None = None,
+           psgSounds: dict[int, PsgSound] | None = None) -> bytes:
     """A ZSM file from a reduction.
 
     Args:
         song: for the tempo map, pans, volumes and programs.
         reduction: the placed notes.
         plan: the pools and tiers.
-        patches: OPM patches by pool name.
-        psgSounds: sounds by MIDI channel; by GM program when omitted.
         start: first tick to export.
         end: tick to stop at; the end of the song when None.
         loop: tick to loop back to, or None for no loop.
         master: an amplitude factor for the whole export, 1.0 for full.
+        patches: OPM patches by pool name.
+        psgSounds: sounds by MIDI channel; by GM program when omitted.
 
     Returns:
         bytes: the file.
+
+    Raises:
+        ValueError: a placed note's voice has no chip to go to.
     """
     writes = exportWrites(song, reduction, plan, patches, psgSounds, start, end, master)
     loopFrame = frameOf(song, loop) - frameOf(song, start) if loop is not None else None
     data = build(writes, loopFrame)
     return data
+
+
+def verify(data: bytes, plan: reduce.Plan) -> list[str]:
+    """Problems in a written ZSM file.
+
+    The bytes go through the decoder, the structural checks and the chip
+    model, with the PSG's reserve and each tier's release from the plan.
+
+    Args:
+        data: the file.
+        plan: the tiers it was exported under.
+
+    Returns:
+        list[str]: one line per problem, empty when the file is sound.
+    """
+    decoded = zsmdecode.decode(data)
+    psgTier = next((t for t in plan.tiers if t.chip == "psg"), None)
+    release = {t.chip: round(t.release * FRAME_RATE / 1000) for t in plan.tiers if t.chip}
+    sim = zsmsim.simulate(decoded, psgTier.voices if psgTier else PSG_CHANNELS, release)
+    problems = zsmcheck.check(decoded) + sim.problems
+    return problems
+
+
+def describe(data: bytes, plan: reduce.Plan) -> str:
+    """One line about a written ZSM file.
+
+    Args:
+        data: the file.
+        plan: the tiers it was exported under.
+
+    Returns:
+        str: its size in kilobytes and banks, its length, and the peak
+        voices sounding on each chip.
+    """
+    decoded = zsmdecode.decode(data)
+    sim = zsmsim.simulate(decoded)
+    banks = (len(data) + BANK - 1) // BANK
+    text = (f"{len(data) // 1024} KB, {banks} banks, {decoded.length / FRAME_RATE:.0f} s, "
+            f"peak {sim.peakOpm} OPM and {sim.peakPsg} PSG voices")
+    return text

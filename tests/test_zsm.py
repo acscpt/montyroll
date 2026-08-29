@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from montyroll import model, reduce, smf
+from montyroll import export, model, reduce, smf
 from montyroll.export import zsm, zsmcheck, zsmdecode, zsmsim
 
 GOLDEN = Path(__file__).resolve().parent / "data" / "golden.zsm"
@@ -778,3 +778,34 @@ class TestExpression:
         regs = [r for _, r, _ in writes[30]]
         assert 0x08 not in regs
         assert 0x28 in regs and regs.count(0x60) == 1
+
+
+class TestTarget:
+    """The export target contract, as the application uses it."""
+
+    def testRegistryAndChips(self) -> None:
+        """The ZSM target is registered with its name, suffix, rate and two chips."""
+        target = export.TARGETS["zsm"]
+        assert target is zsm
+        assert (target.NAME, target.SUFFIX) == ("Commander X16 (ZSM)", ".zsm")
+        assert target.FRAME_RATE == 60
+        assert [c.name for c in target.CHIPS] == ["opm", "psg"]
+        assert export.presetTiers(target) == [reduce.Tier("opm", 8, 0, 300.0, "opm"),
+                                              reduce.Tier("psg", 16, 4, 0.0, "psg")]
+
+    def testVerifyAndDescribe(self) -> None:
+        """The golden file verifies clean and is described by size, banks, length and voices."""
+        song = sixteenBars()
+        plan = x16Plan()
+        data = zsm.export(song, reduce.reduce(song, plan), plan)
+        assert zsm.verify(data, plan) == []
+        text = zsm.describe(data, plan)
+        assert text.startswith("6 KB, 1 banks, 35 s, peak 2 OPM and 3 PSG voices")
+        broken = data[:16] + bytes([0x41, 0x28, 0x43, 0x80])
+        assert any("not a note" in p for p in zsm.verify(broken, plan))
+
+    def testFrameRateIsAParameter(self) -> None:
+        """Another target's rate gives other frames from the same tempo map."""
+        song = sixteenBars()
+        assert zsm.frameOf(song, 1920, 50) == 100
+        assert zsm.frameOf(song, 1920) == 120
