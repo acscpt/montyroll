@@ -26,7 +26,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from typing import Any
 
-from . import analysis, export, gm, model, player, reduce, smf
+from . import analysis, arrange, export, gm, model, player, reduce, smf
 
 CHANNEL_COLORS = [
     "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
@@ -242,6 +242,7 @@ class MidiEditorApp(tk.Tk):
         self.releaseVars: dict[int, tk.StringVar] = {}   # per channel: ms, "" for the tier's
         self.poolCombos: list[ttk.Combobox] = []         # every card's pool picker
         self.usageLabels: dict[int, tk.Label] = {}       # per channel: the demand figures
+        self.descLabels: dict[int, tk.Label] = {}        # per channel: notes, range, family
         self.usageText: dict[int, str] = {}              # those figures without the overlap
         self._overlapAfter: str | None = None
         self.reduction: reduce.Reduction | None = None
@@ -305,6 +306,10 @@ class MidiEditorApp(tk.Tk):
         em.add_command(label="Select All", accelerator="Ctrl+A", command=self.selectAll)
         em.add_command(label="Delete Selection", accelerator="Del", command=self.deleteSelection)
         em.add_command(label="Set Velocity...", command=self.setVelocityDialog)
+        em.add_separator()
+        em.add_command(label="Split Channel into Parts...", command=self.splitChannelDialog)
+        em.add_command(label="Double Channel...", command=self.doubleChannelDialog)
+        em.add_command(label="Echo Channel...", command=self.echoChannelDialog)
         em.add_separator()
         em.add_command(label="Set Tempo at Bar...", command=self.setTempoDialog)
         em.add_command(label="Scale All Tempos...", command=self.scaleTemposDialog)
@@ -792,6 +797,7 @@ class MidiEditorApp(tk.Tk):
         self.poolCombos.clear()
         self.usageLabels.clear()
         self.usageText.clear()
+        self.descLabels.clear()
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
 
         # A fresh song starts with one pool of every channel; a sidecar, if
@@ -950,7 +956,7 @@ class MidiEditorApp(tk.Tk):
             if info.hasPitchBend:
                 desc += " | bends"
 
-            dl = tk.Label(bottom, text=desc, anchor="w",
+            self.descLabels[ch] = dl = tk.Label(bottom, text=desc, anchor="w",
                           font=("TkDefaultFont", 8))
             dl.pack(side="left", padx=(8, 0))
             Tooltip(dl, "Note count, pitch range, GM instrument family")
@@ -1213,6 +1219,22 @@ class MidiEditorApp(tk.Tk):
         """
         program = int(var.get().split()[0])
         self.song.setProgram(ch, program)
+
+        # The card's summary line carries the instrument family, which the
+        # new program may have changed.
+        label = self.descLabels.get(ch)
+
+        if label is not None:
+            info = self.song.channels[ch]
+            desc = (f"{info.noteCount} notes | "
+                    f"{gm.noteName(info.lo)}-{gm.noteName(info.hi)} | "
+                    f"{gm.familyName(program)}")
+
+            if info.hasPitchBend:
+                desc += " | bends"
+
+            label.config(text=desc)
+
         self._markDirty()
         self._invalidateReducedSong()
         self._setStatus(f"Ch {ch + 1} {ARROW} {gm.programName(program)}")
@@ -3384,6 +3406,85 @@ class MidiEditorApp(tk.Tk):
         self._invalidateDemand()
         self.redraw()
         self._setStatus(f"Deleted {n} note{'s' if n != 1 else ''}")
+
+    def _replaceSong(self, mf: smf.MidiFile, message: str):
+        """Swap the song for a rebuilt file, keeping the path and marking it dirty.
+
+        Args:
+            mf: the new file.
+            message: shown in the status bar.
+        """
+        path = self.song.path
+        self.song = model.Song(mf, path)
+        self.song.dirty = True
+        self._refreshAll()
+        self._setStatus(message)
+
+    def splitChannelDialog(self):
+        """Ask for a part count and split the active channel into parts.
+
+        The active channel's polyphony spreads over that many channels,
+        the top voice keeping the channel and the rest taking the lowest
+        free ones.
+        """
+        ch = self.activeChannel
+        peak = max((analysis.sweep(self.song,
+                                   [n for n in self.song.notes if n.channel == ch]).peak, 2))
+        parts = simpledialog.askinteger(
+            "Split channel", f"Split Ch {ch + 1} into how many parts (2-{arrange.MAX_PARTS})?",
+            initialvalue=min(peak, arrange.MAX_PARTS), minvalue=2,
+            maxvalue=arrange.MAX_PARTS, parent=self)
+
+        if parts is None:
+            return
+
+        try:
+            mf = arrange.splitChannel(self.song, ch, parts)
+        except ValueError as exc:
+            messagebox.showerror("Split channel", str(exc))
+            return
+
+        self._replaceSong(mf, f"Split Ch {ch + 1} into {parts} parts")
+
+    def doubleChannelDialog(self):
+        """Ask for a transposition and copy the active channel onto a free one."""
+        ch = self.activeChannel
+        semitones = simpledialog.askinteger(
+            "Double channel", f"Double Ch {ch + 1} at how many semitones (+12 octave up)?",
+            initialvalue=12, minvalue=-24, maxvalue=24, parent=self)
+
+        if semitones is None:
+            return
+
+        try:
+            target = arrange.freeChannels(self.song, 2, ch)[1]
+            mf = arrange.double(self.song, ch, semitones, target)
+        except ValueError as exc:
+            messagebox.showerror("Double channel", str(exc))
+            return
+
+        self._replaceSong(mf, f"Doubled Ch {ch + 1} onto Ch {target + 1} "
+                              f"at {semitones:+d} semitones")
+
+    def echoChannelDialog(self):
+        """Ask for a delay in ticks and echo the active channel onto a free one."""
+        ch = self.activeChannel
+        delay = simpledialog.askinteger(
+            "Echo channel", f"Echo Ch {ch + 1} after how many ticks "
+                            f"({self.song.mf.division} is a beat)?",
+            initialvalue=self.song.mf.division // 2, minvalue=1, parent=self)
+
+        if delay is None:
+            return
+
+        try:
+            target = arrange.freeChannels(self.song, 2, ch)[1]
+            mf = arrange.echo(self.song, ch, delay, target)
+        except ValueError as exc:
+            messagebox.showerror("Echo channel", str(exc))
+            return
+
+        self._replaceSong(mf, f"Echoed Ch {ch + 1} onto Ch {target + 1} after {delay} ticks")
 
     def setVelocityDialog(self):
         """Ask for a velocity and apply it to every selected note."""

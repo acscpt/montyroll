@@ -45,6 +45,26 @@ PSG_MAX_WORD = 0xFFFF
 
 
 # --------------------------------------------------------------- YM2151
+def foldToOpmRange(note: int) -> int:
+    """Move a note by octaves until the YM2151 can play it.
+
+    Args:
+        note: MIDI note number.
+
+    Returns:
+        int: the note, raised or lowered by whole octaves into 13 to 108.
+    """
+    folded = note
+
+    while folded < KC_LOWEST:
+        folded += 12
+
+    while folded > KC_HIGHEST:
+        folded -= 12
+
+    return folded
+
+
 def midiToKc(note: int) -> int:
     """Turn a MIDI note number into a YM2151 key code.
 
@@ -928,8 +948,12 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
             held = voiceRegs[p.voice]
             regs = [(r, v) for r, v in wanted.items() if held.get(r) != v]
             held.update(regs)
-            events.append((on, 1, p.voice, p.pitch, regs + opmNoteOn(channel, p.pitch)))
-            events.append((off, 0, p.voice, p.pitch, opmNoteOff(channel)))
+
+            # A note outside the chip's range plays in the nearest octave
+            # it can reach.
+            pitch = foldToOpmRange(p.pitch)
+            events.append((on, 1, p.voice, pitch, regs + opmNoteOn(channel, pitch)))
+            events.append((off, 0, p.voice, pitch, opmNoteOff(channel)))
         else:
             sound = soundOf(p)
             volume = max(1, round(loudness * scale * 63))

@@ -190,6 +190,13 @@ class TestKeyCode:
         for note in range(13, 109):
             assert (zsm.midiToKc(note) & 0x0F) not in (3, 7, 11, 15)
 
+    def testFoldToRange(self) -> None:
+        """A note beyond the chip's range moves by octaves until it fits."""
+        assert zsm.foldToOpmRange(12) == 24
+        assert zsm.foldToOpmRange(0) == 24
+        assert zsm.foldToOpmRange(127) == 103
+        assert zsm.foldToOpmRange(60) == 60
+
     def testOutOfRangeIsRefused(self) -> None:
         """C0 would need an octave field of -1 and C#8 one of 8: both refused."""
         for note in (12, 109, 0, 127):
@@ -774,6 +781,14 @@ class TestExpression:
         writes = zsm.exportWrites(song, reduce.reduce(song, psg), psg, master=0.5,
                                   psgSounds={0: zsm.PsgSound()})
         assert [v & 0x3F for _, r, v in writes[6] if r == 2] == [32]
+
+    def testLowNoteFoldsInTheExport(self) -> None:
+        """A C0 on an OPM pool plays as C1 instead of stopping the export."""
+        song = self._song((0, 12, 100, 100, 200))
+        plan = self._plan("opm", [0])
+        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan, patches=self.PLAIN)
+        kcs = [v for f in writes.values() for chip, r, v in f if chip == "opm" and r == 0x28]
+        assert kcs == [zsm.midiToKc(24)]
 
     def testSlideKeepsTheLevel(self) -> None:
         """An OPM slide carries the new note's level writes but no key cycle."""

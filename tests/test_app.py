@@ -319,6 +319,14 @@ class TestChannelStrip:
         assert app.song.dirty
         assert "Violin" in app.status.cget("text")
 
+    def testProgramChangeRefreshesTheFamily(self, app: MidiEditorApp) -> None:
+        """Picking an instrument updates the card's family text, not just the picker."""
+        assert "Piano" in app.descLabels[0].cget("text")
+        var = tk.StringVar(value=" 56  Trumpet")
+        app._programChanged(0, var)
+        assert "Brass" in app.descLabels[0].cget("text")
+        assert "Piano" not in app.descLabels[0].cget("text")
+
     def testVolumeChangeWritesCc7(self, app: MidiEditorApp) -> None:
         """Moving the volume slider rewrites the channel's CC7 events."""
         app._volumeChanged(0, "33")
@@ -1100,6 +1108,56 @@ class TestPlanControls:
         text = app._ensureReport("reduced")
         assert text.splitlines()[1].startswith("kept ")
         assert "tails clipped" in text.splitlines()[1]
+
+
+class TestArrangeMenu:
+    """Split, double and echo from the Edit menu."""
+
+    def testSplitReplacesTheSong(self, app: MidiEditorApp,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """The active channel's polyphony spreads over new channels; the song is dirty."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 2)
+        app._setActiveChannel(0)
+        path = app.song.path
+        before = len(app.song.notes)
+        app.splitChannelDialog()
+        assert len(app.song.notes) == before
+        assert app.song.dirty and app.song.path == path
+        assert any(n.channel == 3 for n in app.song.notes)   # the first note-free channel
+        assert "Split Ch 1 into 2 parts" in app.status.cget("text")
+
+    def testDoubleAddsAChannel(self, app: MidiEditorApp,
+                               monkeypatch: pytest.MonkeyPatch) -> None:
+        """The copy lands an octave up on the lowest free channel."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 12)
+        app._setActiveChannel(0)
+        originals = [n.pitch for n in app.song.notes if n.channel == 0]
+        app.doubleChannelDialog()
+        copies = [n.pitch for n in app.song.notes if n.channel == 3]
+        assert sorted(copies) == sorted(p + 12 for p in originals if p + 12 <= 127)
+
+    def testEchoDelaysOntoAFreeChannel(self, app: MidiEditorApp,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """The copy lags by the asked delay at lower velocity."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 240)
+        app._setActiveChannel(0)
+        starts = sorted(n.start for n in app.song.notes if n.channel == 0)
+        app.echoChannelDialog()
+        copies = sorted(n.start for n in app.song.notes if n.channel == 3)
+        assert copies == [t + 240 for t in starts]
+
+    def testRefusalIsReported(self, app: MidiEditorApp,
+                              monkeypatch: pytest.MonkeyPatch) -> None:
+        """A channel with no notes reports the error and the song stands."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 3)
+        errors: list[str] = []
+        monkeypatch.setattr("montyroll.app.messagebox.showerror",
+                            lambda title, text, **k: errors.append(text))
+        app._setActiveChannel(5)
+        song = app.song
+        app.splitChannelDialog()
+        assert errors and "no notes" in errors[0]
+        assert app.song is song
 
 
 class TestTempoEditing:

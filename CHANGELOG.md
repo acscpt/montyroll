@@ -8,6 +8,9 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ### Added
 
+- **Splitting a channel into parts.** Edit > Split Channel into Parts separates a flattened channel's polyphony into voice streams, each on its own channel: chords assign top-down without crossing, each note to the stream whose last pitch is nearest, and the opening chord cuts at its widest pitch gaps. The top stream keeps the source channel with its program and controllers. Edit > Double Channel and Edit > Echo Channel copy a part onto a free channel, transposed or delayed, at a scaled velocity. New module `arrange.py`.
+
+
 - **Tiers.** Pools now belong to tiers, one per chip, each with a channel count, a reserve kept for sound effects, and a default release for its patches. A plan whose pools ask a tier for more voices than it has is refused.
 
 - **Release tails.** A voice now stays busy until its note's release has died away, not just until the note ends; the release is set in milliseconds per tier or per channel and converted to ticks through the tempo map. A voice stolen during its tail costs a fraction of the note's weight, the clipped tail counts towards the loss, and a channel re-striking the same pitch simply retriggers its releasing voice.
@@ -25,6 +28,10 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 - **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as a `.monty` file beside the MIDI file (JSON, with channels numbered as the cards show them), and opening a file loads the plan found beside it. The file names the MIDI it belongs to, so Load Plan opens that file as well; Save Plan As takes any path, and Save Plan Bundle As embeds the MIDI in the plan with a checksum, so a bundle needs no other file.
 
 ### Fixed
+
+- **Notes beyond the YM2151's range.** The Commander X16 export now folds a note outside MIDI 13 to 108 by octaves instead of stopping; a C0 bass plays as C1.
+
+- **Stale instrument family on the cards.** Picking an instrument now updates the card's summary line as well as the picker; it kept the old program's family before.
 
 - **Drum unison.** A drum hit is no longer dropped as a unison when a pitched note on another channel shares its key number and start tick. The unison transform now passes the drum channel through, as the octave transform already did.
 
