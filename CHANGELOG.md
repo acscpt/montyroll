@@ -10,6 +10,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Splitting a channel into parts.** Edit > Split Channel into Parts separates a flattened channel's polyphony into voice streams, each on its own channel: chords assign top-down without crossing, each note to the stream whose last pitch is nearest, and the opening chord cuts at its widest pitch gaps. The top stream keeps the source channel with its program and controllers. Edit > Double Channel and Edit > Echo Channel copy a part onto a free channel, transposed or delayed, at a scaled velocity. New module `arrange.py`.
 
+- **Detuned doubles and downbeats.** `arrange.double` takes a detune in cents, written as a pitch bend at tick 0, so a unison copy sounds as a second desk beside its source, and `arrange.downbeats` copies the lowest note that starts each bar onto a new channel, for timpani under a bass line. The Commander X16 export plays a channel's tick-0 pitch bend as a static detune: the key fraction on the YM2151, the frequency word on the PSG.
+
 
 - **Tiers.** Pools now belong to tiers, one per chip, each with a channel count, a reserve kept for sound effects, and a default release for its patches. A plan whose pools ask a tier for more voices than it has is refused.
 

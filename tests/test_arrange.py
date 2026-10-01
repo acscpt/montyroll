@@ -193,3 +193,24 @@ class TestDoubleAndEcho:
 
         with pytest.raises(ValueError, match="drum"):
             arrange.echo(song, 0, 240, 9)
+
+    def testDetuneIsABendAtTickZero(self) -> None:
+        """A detuned unison copy carries a pitch bend at tick 0 and the same pitches."""
+        song = _song((0, 60, 100, 0, 400))
+        mf = arrange.double(song, 0, 0, 1, detune=8.0)
+        bends = [e for track in mf.tracks for e in track if e.status == 0xE1]
+        assert len(bends) == 1 and bends[0].tick == 0
+        value = bends[0].data[0] | (bends[0].data[1] << 7)
+        assert value == 8192 + round(8 / 200 * 8192)
+        assert _pitches(model.Song(mf), 1) == [60]
+        plain = arrange.double(song, 0, 12, 1)
+        assert not [e for track in plain.tracks for e in track if (e.status & 0xF0) == 0xE0]
+
+    def testDownbeatsTakeTheLowestNoteOfEachBar(self) -> None:
+        """Only notes that start a bar are copied, the lowest of a chord, at the asked length."""
+        song = _song((0, 40, 100, 0, 400), (0, 52, 100, 0, 400), (0, 43, 100, 480, 880),
+                     (0, 45, 100, 1920, 2320), (0, 47, 100, 3850, 4000))
+        out = model.Song(arrange.downbeats(song, 0, 1, length=120, velocity=0.5, program=47))
+        hits = [(n.start, n.end, n.pitch, n.velocity) for n in out.notes if n.channel == 1]
+        assert hits == [(0, 120, 40, 50), (1920, 2040, 45, 50)]
+        assert out.channels[1].program == 47

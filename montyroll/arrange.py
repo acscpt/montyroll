@@ -7,8 +7,9 @@ The module takes a `Song` and returns a new `smf.MidiFile`. `splitChannel`
 separates one channel's polyphony into voice streams and puts each stream
 on its own channel, so a file with everything on one piano channel becomes
 parts a channel strip can give instruments to. `double` and `echo` add a
-channel that copies an existing part, transposed or delayed, at a scaled
-velocity. The song itself is never modified.
+channel that copies an existing part, transposed, detuned or delayed, at a
+scaled velocity, and `downbeats` copies only the notes that start a bar.
+The song itself is never modified.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 from . import model, smf
 
 MAX_PARTS = 8            # streams one split may produce
+BEND_RANGE = 200         # cents either side of centre in a default pitch bend
 _NO_NOTE = -1            # a stream that has not sounded yet
 
 
@@ -113,7 +115,8 @@ def _assign(pitches: list[int], recents: list[int]) -> list[int]:
 
 
 def _buildFile(song: model.Song, byChannel: dict[int, list[tuple[int, int, int, int]]],
-               programs: dict[int, int] | None = None) -> smf.MidiFile:
+               programs: dict[int, int] | None = None,
+               detunes: dict[int, float] | None = None) -> smf.MidiFile:
     """Build a file from note tuples per channel plus the song's other events.
 
     Track 0 carries every meta event of the original except track names;
@@ -125,6 +128,7 @@ def _buildFile(song: model.Song, byChannel: dict[int, list[tuple[int, int, int, 
         song: the original, for its metas, channel events and other notes.
         byChannel: (start, end, pitch, velocity) tuples per channel.
         programs: a program change written at tick 0, per new channel.
+        detunes: cents written as a pitch bend at tick 0, per new channel.
 
     Returns:
         smf.MidiFile: a new file at the song's division.
@@ -156,6 +160,13 @@ def _buildFile(song: model.Song, byChannel: dict[int, list[tuple[int, int, int, 
 
     for ch, program in (programs or {}).items():
         events.setdefault(ch, []).insert(0, smf.Event(0, 0xC0 | ch, bytearray([program])))
+
+    # A detune is a pitch bend held from tick 0: 14 bits about a centre of
+    # 8192, the default bend range either side.
+    for ch, cents in (detunes or {}).items():
+        value = max(0, min(16383, 8192 + round(cents / BEND_RANGE * 8192)))
+        events.setdefault(ch, []).insert(
+            0, smf.Event(0, 0xE0 | ch, bytearray([value & 0x7F, value >> 7])))
 
     for ch, pairs in notes.items():
         out = events.setdefault(ch, [])
@@ -278,18 +289,22 @@ def splitChannel(song: model.Song, channel: int, parts: int,
 
 
 def double(song: model.Song, channel: int, semitones: int, target: int,
-           velocity: float = 0.7, program: int | None = None) -> smf.MidiFile:
-    """Copy a channel's notes onto another channel, transposed.
+           velocity: float = 0.7, program: int | None = None,
+           detune: float = 0.0) -> smf.MidiFile:
+    """Copy a channel's notes onto another channel, transposed or detuned.
 
     Notes that would leave the MIDI range are dropped rather than folded.
+    A detune is written as a pitch bend at tick 0 on the copy's channel,
+    so a unison copy a few cents off its source sounds as a second desk.
 
     Args:
         song: the song; never modified.
         channel: 0-based channel to copy.
-        semitones: transposition; +12 doubles the octave above.
+        semitones: transposition; +12 doubles the octave above, 0 a unison.
         target: 0-based channel for the copy, which must be free.
         velocity: factor on each copied note's velocity, floored at 1.
         program: GM program for the copy, or None for none.
+        detune: cents the copy sits off pitch, within the bend range.
 
     Returns:
         smf.MidiFile: a new file with the copy added.
@@ -301,6 +316,48 @@ def double(song: model.Song, channel: int, semitones: int, target: int,
     copied = [(n.start, n.end, n.pitch + semitones, max(1, round(n.velocity * velocity)))
               for n in song.notes
               if n.channel == channel and 0 <= n.pitch + semitones <= 127]
+    programs = {target: program} if program is not None else None
+    detunes = {target: detune} if detune else None
+    mf = _buildFile(song, {target: copied}, programs, detunes)
+    return mf
+
+
+def downbeats(song: model.Song, channel: int, target: int, length: int | None = None,
+              velocity: float = 1.0, program: int | None = None) -> smf.MidiFile:
+    """Copy the notes that start a bar onto another channel.
+
+    Where several notes start a bar together the lowest is taken, so a
+    bass line gives one stroke per bar.
+
+    Args:
+        song: the song; never modified.
+        channel: 0-based channel to take the notes from.
+        target: 0-based channel for the copy, which must be free.
+        length: ticks each copied note lasts; its own length when None.
+        velocity: factor on each copied note's velocity, floored at 1.
+        program: GM program for the copy, or None for none.
+
+    Returns:
+        smf.MidiFile: a new file with the downbeats added.
+
+    Raises:
+        ValueError: the target channel is in use or is the drum channel.
+    """
+    _checkTarget(song, target)
+    lowest: dict[int, model.Note] = {}
+
+    for n in song.notes:
+        if n.channel != channel:
+            continue
+
+        bar = song.barBeat(n.start)[0]
+
+        if song.barTick(bar) == n.start and (bar not in lowest
+                                             or n.pitch < lowest[bar].pitch):
+            lowest[bar] = n
+
+    copied = [(n.start, n.start + (length if length is not None else n.length), n.pitch,
+               max(1, round(n.velocity * velocity))) for n in lowest.values()]
     programs = {target: program} if program is not None else None
     mf = _buildFile(song, {target: copied}, programs)
     return mf

@@ -790,6 +790,37 @@ class TestExpression:
         kcs = [v for f in writes.values() for chip, r, v in f if chip == "opm" and r == 0x28]
         assert kcs == [zsm.midiToKc(24)]
 
+    def testBendAtTickZeroDetunes(self) -> None:
+        """A sharp bend adds a key fraction; a flat one drops a semitone and adds the rest."""
+        assert zsm.opmDetune(60, 0.0) == (60, 0)
+        assert zsm.opmDetune(60, 25.0) == (60, 16)
+        assert zsm.opmDetune(60, -25.0) == (59, 48)
+        assert zsm.opmDetune(60, 99.9) == (61, 0)
+        bend = 8192 + round(25 / 200 * 8192)
+        up = smf.Event(0, 0xE0, bytearray([bend & 0x7F, bend >> 7]))
+        track = [smf.Event(0, smf.META, bytearray((500_000).to_bytes(3, "big")), smf.META_TEMPO),
+                 up, smf.Event(100, 0x90, bytearray([60, 127])),
+                 smf.Event(200, 0x80, bytearray([60, 64]))]
+        song = model.Song(smf.MidiFile(0, 480, [track]))
+        assert zsm.channelBends(song) == {0: pytest.approx(25.0, abs=0.05)}
+        opm = self._plan("opm", [0])
+        writes = zsm.exportWrites(song, reduce.reduce(song, opm), opm, patches=self.PLAIN)
+        fractions = [v >> 2 for f in writes.values() for chip, r, v in f
+                     if chip == "opm" and r == 0x30]
+        assert fractions == [16]
+        psg = self._plan("psg", [0])
+        pw = zsm.exportWrites(song, reduce.reduce(song, psg), psg, psgSounds={0: zsm.PsgSound()})
+        word = [v for chip, r, v in pw[6] if r == 0][0] | ([v for chip, r, v in pw[6]
+                                                            if r == 1][0] << 8)
+        assert word == zsm.midiToFreqword(60.25)
+
+    def testNoBendWritesNoKeyFraction(self) -> None:
+        """A channel with no bend never touches the key fraction register."""
+        song = self._song((0, 60, 127, 100, 200))
+        plan = self._plan("opm", [0])
+        writes = zsm.exportWrites(song, reduce.reduce(song, plan), plan, patches=self.PLAIN)
+        assert not [r for f in writes.values() for chip, r, v in f if 0x30 <= r < 0x38]
+
     def testSlideKeepsTheLevel(self) -> None:
         """An OPM slide carries the new note's level writes but no key cycle."""
         song = self._song((0, 60, 127, 0, 480), (0, 64, 64, 480, 960))

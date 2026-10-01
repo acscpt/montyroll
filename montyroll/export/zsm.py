@@ -759,6 +759,57 @@ def channelPans(song: model.Song) -> dict[int, tuple[bool, bool]]:
     return pans
 
 
+def channelBends(song: model.Song) -> dict[int, float]:
+    """Each channel's pitch bend at tick 0 as a detune in cents.
+
+    A bend held from the start of the song is a static detune, the way a
+    second desk of strings sits a few cents off the first. Bends later in
+    the song are not followed.
+
+    Args:
+        song: the song.
+
+    Returns:
+        dict[int, float]: cents per channel that has a bend at tick 0, at
+        the default bend range of 200 cents either side.
+    """
+    bends: dict[int, float] = {}
+
+    for track in song.mf.tracks:
+        for e in track:
+            if e.tick == 0 and e.channel >= 0 and (e.status & 0xF0) == 0xE0:
+                value = e.data[0] | (e.data[1] << 7)
+                bends[e.channel] = (value - 8192) / 8192 * 200
+
+    return bends
+
+
+def opmDetune(note: int, cents: float) -> tuple[int, int]:
+    """A note and a detune as the YM2151 plays them: a note and a key fraction.
+
+    The key fraction only raises a pitch, in 64 steps per semitone, so a
+    flat detune becomes the semitone below plus the fraction that remains.
+
+    Args:
+        note: MIDI note number.
+        cents: the detune, either sign.
+
+    Returns:
+        tuple[int, int]: the note folded into the chip's range, and the key
+        fraction, 0 to 63.
+    """
+    total = note + cents / 100
+    base = math.floor(total)
+    fraction = round((total - base) * 64)
+
+    if fraction == 64:
+        base += 1
+        fraction = 0
+
+    pair = (foldToOpmRange(base), fraction)
+    return pair
+
+
 def channelVolumes(song: model.Song) -> dict[int, float]:
     """Each channel's first CC7 as a factor, 1.0 when it has none.
 
@@ -848,7 +899,9 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
     below the patch; on the PSG it is the volume, 1 to 63. A master level
     below 1.0 takes both chips down together, as TL steps on every carrier
     and a factor on PSG volume. The channel's pan (CC10) places the note
-    left, right or both. A PSG note takes the sound its pool is given by
+    left, right or both, and a pitch bend at tick 0 detunes every note of
+    the channel: the key fraction on the OPM, the frequency word on the
+    PSG. A PSG note takes the sound its pool is given by
     name, else its channel's `PsgSound`, else one by GM program: the
     waveform is rewritten on the voice when it changes, and a decay fades
     the volume in steps to silence. Notes are taken from `start` to `end`
@@ -877,6 +930,7 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
     scale = min(master, 1.0)
     pans = channelPans(song)
     volumes = channelVolumes(song)
+    bends = channelBends(song)
     poolSounds = (settings or {}).get("sounds", {})
     placed = sorted(reduction.placed, key=lambda p: (p.start, p.voice))
 
@@ -946,12 +1000,17 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
             wanted = dict(patchWrites(channel, patch, left, right))
             wanted.update(opmLevelWrites(channel, patch, loudness, steps))
             held = voiceRegs[p.voice]
-            regs = [(r, v) for r, v in wanted.items() if held.get(r) != v]
-            held.update(regs)
 
             # A note outside the chip's range plays in the nearest octave
-            # it can reach.
-            pitch = foldToOpmRange(p.pitch)
+            # it can reach, and a detuned channel adds its key fraction; a
+            # voice that has never been detuned leaves the fraction alone.
+            pitch, fraction = opmDetune(p.pitch, bends.get(p.channel, 0.0))
+
+            if fraction or (0x30 + channel) in held:
+                wanted[0x30 + channel] = fraction << 2
+
+            regs = [(r, v) for r, v in wanted.items() if held.get(r) != v]
+            held.update(regs)
             events.append((on, 1, p.voice, pitch, regs + opmNoteOn(channel, pitch)))
             events.append((off, 0, p.voice, pitch, opmNoteOff(channel)))
         else:
@@ -963,8 +1022,9 @@ def exportWrites(song: model.Song, reduction: reduce.Reduction, plan: reduce.Pla
                 regs += psgVoice(channel, sound.wave, sound.width)
                 voiceWave[p.voice] = (sound.wave, sound.width)
 
+            bent = p.pitch + bends.get(p.channel, 0.0) / 100
             events.append((on, 1, p.voice, p.pitch,
-                           regs + psgNoteOn(channel, p.pitch, volume, left, right)))
+                           regs + psgNoteOn(channel, bent, volume, left, right)))
             events.append((off, 0, p.voice, p.pitch, psgNoteOff(channel)))
 
             # The decay: the volume stepped down every other frame until
