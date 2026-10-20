@@ -204,6 +204,8 @@ class MidiEditorApp(tk.Tk):
         self.muteVars: dict[int, tk.BooleanVar] = {}
         self.soloVars: dict[int, tk.BooleanVar] = {}
         self.channelRows: dict[int, tk.Frame] = {}
+        self.channelDetails: dict[int, tk.Frame] = {}    # per channel: the part shown when active
+        self.nameLabels: dict[int, tk.Label] = {}        # per channel: the instrument on its row
         self.activeChannel = 0
         self.originalPrograms: dict[int, int] = {}   # per channel, as the file was opened
 
@@ -999,96 +1001,80 @@ class MidiEditorApp(tk.Tk):
 
     # ------------------------------------------------------- channel strip
     def _buildChannelRows(self):
-        """Rebuild the channel strip, one card per channel the song uses.
+        """Rebuild the channel strip, one compact row per channel the song uses.
 
-        Each card carries the channel colour swatch and number, a preview
-        button, the GM instrument picker (a fixed label on the drum channel),
-        mute and solo checkbuttons, a CC7 volume slider and a one-line
-        summary. Clicking a card makes it the active channel for adding
-        notes, and wheel events on the card scroll the strip.
+        A row is one line: the channel colour and number, the instrument,
+        mute and solo toggles and a CC7 volume slider. Under it sits the
+        row's detail, shown for the active channel only: the summary, the
+        demand figures, and the pool, release and priority controls. The
+        detail is built for every row, so each channel's controls and
+        figures exist whichever row is active. Clicking a row makes it the
+        active channel, and wheel events on a row scroll the strip.
         """
-        # Throw away the previous song's cards.
+        # Throw away the previous song's rows.
         for w in self.chanHolder.winfo_children():
             w.destroy()
 
         self.channelRows.clear()
+        self.channelDetails.clear()
+        self.nameLabels.clear()
         figures = analysis.channelDemand(self._ensureSongDemand())
         self.channelFigures = figures
-        scaling = float(self.tk.call("tk", "scaling"))   # the figures line wraps at high DPI
+        p = self.palette
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
-            color = CHANNEL_COLORS[ch]
-            row = tk.Frame(self.chanHolder, bd=1, relief="solid",
-                           padx=4, pady=3)
-            row.pack(fill="x", padx=4, pady=2)
+            row = tk.Frame(self.chanHolder, padx=6, pady=3)
+            row.pack(fill="x", padx=2, pady=1)
 
-            # Top line: colour swatch, channel number, preview button and the
-            # instrument. The lambda default pins ch to this card.
+            # The one-line row: swatch, number and instrument on the left;
+            # volume, solo and mute packed from the right.
             top = tk.Frame(row)
             top.pack(fill="x")
-            sw = tk.Canvas(top, width=14, height=14, highlightthickness=0)
-            sw.create_rectangle(0, 0, 14, 14, fill=color, outline="")
+            sw = tk.Canvas(top, width=10, height=16, highlightthickness=0)
+            sw.create_rectangle(0, 0, 10, 16, fill=CHANNEL_COLORS[ch], outline="")
             sw.pack(side="left")
-            tk.Label(top, text=f"Ch {ch + 1}", width=5, anchor="w",
-                     font=(self.uiFamily, 9, "bold")).pack(side="left", padx=(4, 0))
-            pb = ttk.Button(top, text=PREVIEW_GLYPH, width=2,
-                            command=lambda c=ch: self._previewChannel(c))
-            pb.pack(side="left", padx=(0, 2))
-            Tooltip(pb, "Play a short sample of this channel's instrument\n"
-                    "(in the channel's own pitch range)")
-
-            # Channel 10 is fixed to GM percussion, so it gets a label where
-            # the other channels get a program picker. Picker entries are
-            # "nnn  Name"; _programChanged parses the number back out.
-            if info.isDrums:
-                dl = tk.Label(top, text="Drum Kit (GM percussion)", anchor="w")
-                dl.pack(side="left", fill="x", expand=True)
-                Tooltip(dl, "Channel 10 is the GM percussion channel:\n"
-                        "each pitch is a different drum sound")
-            else:
-                var = tk.StringVar(value=f"{info.program:3d}  {info.instrument}")
-                combo = ttk.Combobox(
-                    top, textvariable=var, state="readonly",
-                    values=[f"{i:3d}  {n}" for i, n in enumerate(gm.GM_PROGRAMS)])
-                combo.pack(side="left", fill="x", expand=True, padx=(4, 0))
-                combo.bind("<<ComboboxSelected>>",
-                           lambda e, c=ch, v=var: self._programChanged(c, v))
-                Tooltip(combo, "GM instrument for this channel.\n"
-                        "Picking one writes a program-change event\n"
-                        "into the file (saved on Ctrl+S).")
-
-            # Bottom line: mute and solo share _channelsChanged, which dims
-            # the roll and restarts the synth when playing.
-            bottom = tk.Frame(row)
-            bottom.pack(fill="x")
-            self.muteVars[ch] = tk.BooleanVar(value=False)
-            self.soloVars[ch] = tk.BooleanVar(value=False)
-            mb = tk.Checkbutton(bottom, text="M", variable=self.muteVars[ch],
-                                command=self._channelsChanged)
-            mb.pack(side="left")
-            Tooltip(mb, f"Mute channel {ch + 1}: silence it during playback\n"
-                    "and dim its notes in the piano roll")
-            sb = tk.Checkbutton(bottom, text="S", variable=self.soloVars[ch],
-                                command=self._channelsChanged)
-            sb.pack(side="left")
-            Tooltip(sb, f"Solo channel {ch + 1}: when any channel is soloed,\n"
-                    "only soloed channels play (solo overrides mute)")
+            tk.Label(top, text=f"Ch {ch + 1}", anchor="w",
+                     font=(self.uiFamily, 10, "bold")).pack(side="left", padx=(6, 4))
+            name = tk.Label(top, text=info.instrument, anchor="w", font=(self.uiFamily, 10))
+            name.pack(side="left", fill="x", expand=True)
+            self.nameLabels[ch] = name
 
             # Volume slider starts at the file's CC7 value, or 100 when the
             # channel has none. set() fires the command once during
             # construction; _volumeChanged treats that no-op as a no-op.
-            vol = tk.Scale(bottom, from_=0, to=127, orient="horizontal",
-                           showvalue=0, length=70, width=9,
+            vol = tk.Scale(top, from_=0, to=127, orient="horizontal", showvalue=0,
+                           length=56, width=7, sliderlength=12, bd=0, highlightthickness=0,
+                           bg=_shade(CHANNEL_COLORS[ch], 0.8),
+                           activebackground=CHANNEL_COLORS[ch], troughcolor=p["field"],
                            command=lambda v, c=ch: self._volumeChanged(c, v))
             vol.set(info.volume if info.volume >= 0 else 100)
-            vol.pack(side="right", padx=(4, 0))
+            vol.pack(side="right", padx=(6, 0))
             Tooltip(vol, f"Channel {ch + 1} volume (MIDI CC7, 0-127).\n"
                     "Writes a volume event into the file (saved on\n"
                     "Ctrl+S). Applies live while playing.")
 
-            # Summary: note count, pitch range and GM family, flagged when
-            # the channel uses pitch bend.
+            # Mute and solo are toggle buttons that share _channelsChanged,
+            # which dims the roll and restarts the synth when playing.
+            self.muteVars[ch] = tk.BooleanVar(value=False)
+            self.soloVars[ch] = tk.BooleanVar(value=False)
+
+            for text, var, tip in (
+                    ("S", self.soloVars[ch], f"Solo channel {ch + 1}: when any channel is "
+                     "soloed,\nonly soloed channels play (solo overrides mute)"),
+                    ("M", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
+                     "playback\nand dim its notes in the piano roll")):
+                b = tk.Checkbutton(top, text=text, variable=var, indicatoron=False, width=2,
+                                   bd=0, relief="flat", offrelief="flat", bg=p["raised"],
+                                   selectcolor=p["accent"], font=(self.uiFamily, 9, "bold"),
+                                   command=self._channelsChanged)
+                b.pack(side="right", padx=(3, 0))
+                Tooltip(b, tip)
+
+            # The detail, shown under the active row: summary, figures, and
+            # the reduction controls.
+            detail = tk.Frame(row)
+            self.channelDetails[ch] = detail
             fam = "Percussion" if info.isDrums else gm.familyName(info.program)
             desc = (f"{info.noteCount} notes | "
                     f"{gm.noteName(info.lo)}-{gm.noteName(info.hi)} | {fam}")
@@ -1096,9 +1082,9 @@ class MidiEditorApp(tk.Tk):
             if info.hasPitchBend:
                 desc += " | bends"
 
-            self.descLabels[ch] = dl = tk.Label(bottom, text=desc, anchor="w",
-                          font=(self.uiFamily, 8))
-            dl.pack(side="left", padx=(8, 0))
+            self.descLabels[ch] = dl = tk.Label(detail, text=desc, anchor="w",
+                                                fg=p["muted"], font=(self.uiFamily, 9))
+            dl.pack(fill="x", pady=(3, 0))
             Tooltip(dl, "Note count, pitch range, GM instrument family")
 
             # Voice demand: the channel's own peak, its mean while sounding
@@ -1108,10 +1094,9 @@ class MidiEditorApp(tk.Tk):
             if figure is not None:
                 usage = (f"peak {figure.peak} | mean {figure.mean:.1f} | "
                          f"plays {figure.fraction:.0%}")
-                ul = tk.Label(row, text=usage, anchor="w", font=(self.uiFamily, 8),
-                              fg=self.palette["muted"], justify="left",
-                              wraplength=int(290 * scaling))
-                ul.pack(anchor="w", padx=(22, 0))
+                ul = tk.Label(detail, text=usage, anchor="w", font=(self.uiFamily, 9),
+                              fg=p["muted"], justify="left", wraplength=330)
+                ul.pack(fill="x")
                 self.usageLabels[ch] = ul
                 self.usageText[ch] = usage
                 Tooltip(ul, "Voice demand: most notes at once, average while\n"
@@ -1121,47 +1106,48 @@ class MidiEditorApp(tk.Tk):
 
                 # Reduction: the pool the channel belongs to, its own release
                 # (blank for the tier's) and its priority.
-                prow = tk.Frame(row)
-                prow.pack(fill="x", padx=(20, 0))
-                tk.Label(prow, text="Pool", font=(self.uiFamily, 8)).pack(side="left")
+                prow = tk.Frame(detail)
+                prow.pack(fill="x", pady=(3, 1))
+                tk.Label(prow, text="Pool", fg=p["muted"],
+                         font=(self.uiFamily, 9)).pack(side="left")
                 pv = self.poolVars.setdefault(ch, tk.StringVar(value=self._poolNameOf(ch)))
-                pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=8,
+                pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=7,
                                   values=self._poolNames())
-                pc.pack(side="left", padx=(2, 6))
+                pc.pack(side="left", padx=(3, 8))
                 pc.bind("<<ComboboxSelected>>", lambda e, c=ch: self._channelPoolChanged(c))
                 self.poolCombos.append(pc)
                 Tooltip(pc, "The pool this channel's notes are reduced in;\n"
                             "(none) leaves the channel out of the reduction")
-                tk.Label(prow, text="Rel", font=(self.uiFamily, 8)).pack(side="left")
+                tk.Label(prow, text="Rel", fg=p["muted"],
+                         font=(self.uiFamily, 9)).pack(side="left")
                 release = f"{self.plan.release[ch]:g}" if ch in self.plan.release else ""
                 rv = self.releaseVars.setdefault(ch, tk.StringVar(value=release))
-                rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=5,
+                rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=4,
                                  textvariable=rv,
                                  command=lambda c=ch: self._channelReleaseChanged(c))
-                rs.pack(side="left", padx=(2, 6))
+                rs.pack(side="left", padx=(3, 8))
                 rs.bind("<KeyRelease>", lambda e, c=ch: self._channelReleaseChanged(c))
                 Tooltip(rs, "Release in milliseconds: how long a voice stays busy\n"
                             "after this channel's notes end; blank uses the tier's")
-                tk.Label(prow, text="Pri", font=(self.uiFamily, 8)).pack(side="left")
+                tk.Label(prow, text="Pri", fg=p["muted"],
+                         font=(self.uiFamily, 9)).pack(side="left")
                 var = self.priorityVars.setdefault(
                     ch, tk.DoubleVar(value=self.plan.priorityOf(ch)))
-                pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=4,
+                pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=3,
                                  textvariable=var, command=self._reductionChanged)
-                pr.pack(side="left", padx=(2, 0))
+                pr.pack(side="left", padx=(3, 0))
                 pr.bind("<KeyRelease>", lambda e: self._reductionChanged())
                 Tooltip(pr, "Reduction priority: 1 is neutral, higher keeps\n"
                             "this channel's notes at the expense of others")
-                prow.bind("<Button-1>", lambda e, c=ch: self._setActiveChannel(c))
 
-                for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
-                    prow.bind(seq, self._onChanWheel)
-
-            # A click on any part of the card makes it the active channel,
-            # and the wheel scrolls the strip from the card too: X11 delivers
-            # wheel events to the widget under the pointer, so the canvas
-            # binding alone never sees them while the pointer is on a card.
-            for w in (row, top, bottom):
+            # A click on any plain part of the row makes it the active
+            # channel, and the wheel scrolls the strip from the row too: X11
+            # delivers wheel events to the widget under the pointer, so the
+            # canvas binding alone never sees them while the pointer is on a
+            # row.
+            for w in self._rowSurfaces(row):
                 w.bind("<Button-1>", lambda e, c=ch: self._setActiveChannel(c))
+
                 for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
                     w.bind(seq, self._onChanWheel)
 
@@ -1170,6 +1156,28 @@ class MidiEditorApp(tk.Tk):
             self.channelRows[ch] = row
 
         self._highlightActiveRow()
+
+    @staticmethod
+    def _rowSurfaces(row: tk.Frame) -> list[tk.Misc]:
+        """List a row's frames, labels and swatch: the parts a click or a tint applies to.
+
+        Args:
+            row: a channel row.
+
+        Returns:
+            list[tk.Misc]: the row and every frame, label and canvas inside it.
+        """
+        surfaces: list[tk.Misc] = []
+        stack: list[tk.Misc] = [row]
+
+        while stack:
+            w = stack.pop()
+
+            if isinstance(w, (tk.Frame, tk.Label, tk.Canvas)):
+                surfaces.append(w)
+                stack.extend(w.winfo_children())
+
+        return surfaces
 
     def _channelsChanged(self):
         """Mute or solo toggled: dim the roll and restart the synth if playing."""
@@ -1340,10 +1348,20 @@ class MidiEditorApp(tk.Tk):
         self._setStatus(f"Active channel: {ch + 1} - double-click the roll to add notes")
 
     def _highlightActiveRow(self):
-        """Tint the active channel's card and reset every other card."""
+        """Tint the active channel's row and show its detail; reset every other row."""
         for ch, row in self.channelRows.items():
             active = ch == self.activeChannel
-            row.config(bg=self.palette["active"] if active else self.palette["panel"])
+            colour = self.palette["active"] if active else self.palette["panel"]
+
+            for w in self._rowSurfaces(row):
+                w.configure(bg=colour)
+
+            detail = self.channelDetails.get(ch)
+
+            if detail is not None and active:
+                detail.pack(fill="x")
+            elif detail is not None:
+                detail.pack_forget()
 
     def _programChanged(self, ch: int, var: tk.StringVar):
         """Instrument picked in a card: write the program change into the song.
@@ -1356,8 +1374,11 @@ class MidiEditorApp(tk.Tk):
         program = int(var.get().split()[0])
         self.song.setProgram(ch, program)
 
-        # The card's summary line carries the instrument family, which the
-        # new program may have changed.
+        # The row shows the instrument, and its summary line carries the
+        # instrument family, which the new program may have changed.
+        if ch in self.nameLabels:
+            self.nameLabels[ch].config(text=gm.programName(program))
+
         label = self.descLabels.get(ch)
 
         if label is not None:

@@ -421,6 +421,24 @@ class TestChannelStrip:
         assert app.song.dirty
         assert "Violin" in app.status.cget("text")
 
+    def testOnlyTheActiveRowShowsItsDetail(self, app: MidiEditorApp) -> None:
+        """The active row shows its figures and controls; the others are one line."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        app.update()
+        assert app.channelDetails[second].winfo_ismapped()
+        assert not app.channelDetails[first].winfo_ismapped()
+
+        # Every channel keeps its controls, shown or not.
+        assert set(app.poolVars) >= {first, second}
+        assert set(app.priorityVars) >= {first, second}
+
+    def testRowNamesTheInstrument(self, app: MidiEditorApp) -> None:
+        """The row's instrument name follows a program change."""
+        var = tk.StringVar(value=" 56  Trumpet")
+        app._programChanged(0, var)
+        assert app.nameLabels[0].cget("text") == "Trumpet"
+
     def testProgramChangeRefreshesTheFamily(self, app: MidiEditorApp) -> None:
         """Picking an instrument updates the card's family text, not just the picker."""
         assert "Piano" in app.descLabels[0].cget("text")
@@ -614,13 +632,8 @@ class TestDemandStrip:
         assert app.demandCanvas.find_all() == ()
 
     def testCardsShowDemandFigures(self, app: MidiEditorApp) -> None:
-        """Each channel card carries its peak, mean and share of the piece."""
-        texts = []
-
-        for row in app.channelRows.values():
-            for w in row.winfo_children():
-                if isinstance(w, tk.Label) and "peak" in w.cget("text"):
-                    texts.append(w.cget("text"))
+        """Each channel row's detail carries its peak, mean and share of the piece."""
+        texts = [label.cget("text") for label in app.usageLabels.values()]
 
         withNotes = {n.channel for n in app.song.notes}
         assert len(texts) == len(withNotes)
