@@ -12,7 +12,6 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Detuned doubles and downbeats.** `arrange.double` takes a detune in cents, written as a pitch bend at tick 0, so a unison copy sounds as a second desk beside its source, and `arrange.downbeats` copies the lowest note that starts each bar onto a new channel, for timpani under a bass line. The Commander X16 export plays a channel's tick-0 pitch bend as a static detune: the key fraction on the YM2151, the frequency word on the PSG.
 
-
 - **Tiers.** Pools now belong to tiers, one per chip, each with a channel count, a reserve kept for sound effects, and a default release for its patches. A plan whose pools ask a tier for more voices than it has is refused.
 
 - **Release tails.** A voice now stays busy until its note's release has died away, not just until the note ends; the release is set in milliseconds per tier or per channel and converted to ticks through the tempo map. A voice stolen during its tail costs a fraction of the note's weight, the clipped tail counts towards the loss, and a channel re-striking the same pitch simply retriggers its releasing voice.
@@ -28,6 +27,12 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 - **ZSM export for the Commander X16.** File > Export Commander X16 (ZSM) writes the reduction as a ZSM file for ZSMKit: each pool's voices go to the chip of its tier (YM2151 or VERA PSG), frames come from the tempo map, a note's velocity and channel volume set its level, its channel's pan places it, an FM part plays a patch from a small library chosen by its GM program (strings, flute, reed, brass, bass, piano) and a PSG part a waveform and, for plucked instruments, a decay likewise. A Sound box on the Reduce panel names a patch or waveform for a whole pool instead, and File > Export Range sets the bars to export and a bar to loop back to; both are saved with the plan. The toolbar's volume is the export's level. The written file is decoded, checked and replayed through a chip model before the status bar reports its size in banks and the voices used. New package `montyroll.export`.
 
 - **Plan files.** File > Save Plan writes the tiers, pools, priorities and releases as a `.monty` file beside the MIDI file (JSON, with channels numbered as the cards show them), and opening a file loads the plan found beside it. The file names the MIDI it belongs to, so Load Plan opens that file as well; Save Plan As takes any path, and Save Plan Bundle As embeds the MIDI in the plan with a checksum, so a bundle needs no other file.
+
+- **Documentation.** A `docs/` section with a quick start on the demo file, installation, an overview of how a reduction works, usage, a reference for every control and the plan file, troubleshooting, the architecture, and a worked example that exports the demo for the Commander X16.
+
+### Changed
+
+- **README.** Rewritten for the current features: reduction with pools and tiers, plan files, the arrange commands, and the ZSM export, with a link to the documentation and current screenshots.
 
 ### Fixed
 
