@@ -51,6 +51,11 @@ class TestPickFont:
         """A later preference is chosen when the earlier ones are missing."""
         assert theme.pickFont(["Courier", "DejaVu Sans"]) == "DejaVu Sans"
 
+    def testOtherPreferences(self) -> None:
+        """The readout's fixed-width faces are chosen the same way."""
+        installed = {"DejaVu Sans Mono", "Ubuntu"}
+        assert theme.pickFont(installed, theme.MONO_FONTS) == "DejaVu Sans Mono"
+
     def testNoneInstalled(self) -> None:
         """None when no preferred family is installed."""
         assert theme.pickFont(("Courier",)) is None

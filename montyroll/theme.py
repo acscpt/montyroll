@@ -15,16 +15,17 @@ from __future__ import annotations
 # Palette keys: window is the toplevel background, panel the frames and
 # labels, raised the buttons and cards, field the entries and lists, border
 # the frame edges, text and muted the two text colours, accent the
-# highlight, and active the tint of the active channel's row.
+# highlight, active the tint of the active channel's row, and lcd the panel
+# behind the toolbar readout.
 SUN_VALLEY = {
     "window": "#1c1c1c", "panel": "#1c1c1c", "raised": "#2a2a2a", "field": "#232323",
     "border": "#3a3a3a", "text": "#fafafa", "muted": "#a0a0a0", "accent": "#57c8ff",
-    "active": "#203547",
+    "active": "#203547", "lcd": "#0b0e13",
 }
 CLAM_DARK = {
     "window": "#1d1f25", "panel": "#262931", "raised": "#2f333d", "field": "#20232b",
     "border": "#3a3f4c", "text": "#d9dce3", "muted": "#8a90a0", "accent": "#5b8def",
-    "active": "#2c3b5a",
+    "active": "#2c3b5a", "lcd": "#0b0e13",
 }
 
 # The roll, ruler, keyboard gutter and strip: quieter grid lines than the
@@ -36,6 +37,7 @@ ROLL = {
 }
 
 UI_FONTS = ("Ubuntu", "Noto Sans", "Cantarell", "DejaVu Sans")   # first one installed wins
+MONO_FONTS = ("Ubuntu Mono", "Noto Sans Mono", "DejaVu Sans Mono")   # the toolbar readout
 UI_FONT_PT = 10          # the interface text size, in points, so it follows Tk scaling
 UI_CAPTION_PT = 9        # captions and small labels
 
@@ -96,16 +98,18 @@ def mix(colour: str, target: str, amount: float) -> str:
     return mixed
 
 
-def pickFont(installed: set[str] | list[str] | tuple[str, ...]) -> str | None:
-    """Choose the interface font family from those installed.
+def pickFont(installed: set[str] | list[str] | tuple[str, ...],
+             preferences: tuple[str, ...] = UI_FONTS) -> str | None:
+    """Choose a font family from those installed.
 
     Args:
         installed: the font families the display offers.
+        preferences: the families to try, best first.
 
     Returns:
-        str | None: the first of `UI_FONTS` that is installed, or None when
-        none is.
+        str | None: the first of `preferences` that is installed, or None
+        when none is.
     """
     available = set(installed)
-    family = next((name for name in UI_FONTS if name in available), None)
+    family = next((name for name in preferences if name in available), None)
     return family

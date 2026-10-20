@@ -30,6 +30,7 @@ from montyroll.app import (
     NO_POOL,
     PLAY_GLYPH,
     STOP_GLYPH,
+    TEMPO_GLYPH,
     X16_TIERS,
     MidiEditorApp,
     _shade,
@@ -105,7 +106,7 @@ class TestStartup:
         """The title names the file and the summary counts tracks and notes."""
         assert app.title().startswith("MontyRoll - ")
         summary = app.infoLbl.cget("text")
-        assert f"{len(TRACK_NAMES)} trk" in summary
+        assert f"{len(TRACK_NAMES)} tracks" in summary
         assert f"{len(app.song.notes)} notes" in summary
 
     def testEmptyStart(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1467,6 +1468,28 @@ class TestPlayback:
         app.stopPlayback()
         assert app.cursorItem is None
         assert app.demandCursorItem is None
+
+    def testReadoutWhenStopped(self, app: MidiEditorApp) -> None:
+        """Stopped, the readout shows the opening position and tempo."""
+        assert app.timeLbl.cget("text") == "0:00.00"
+        bpm = round(app.song.tempoAt(0))
+        assert app.posLbl.cget("text") == f"bar 1:1   {TEMPO_GLYPH}={bpm}"
+
+    def testReadoutFollowsPlayback(self, app: MidiEditorApp,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        """Playing, the readout shows the cursor; stopping puts the opening position back."""
+        calls: list[int] = []
+        monkeypatch.setattr(app.player, "play", lambda *a, **k: calls.append(1) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        monkeypatch.setattr(type(app.player), "playing", property(lambda self: bool(calls)))
+        bar2 = app.song.barTick(2)
+        app.playFrom(bar2)
+        app._tickCursor()
+        assert app.posLbl.cget("text").startswith("bar 2:1")
+        assert app.timeLbl.cget("text") != "0:00.00"
+        app.stopPlayback()
+        assert app.timeLbl.cget("text") == "0:00.00"
+        assert app.posLbl.cget("text").startswith("bar 1:1")
 
     def testLiveUpdateIsDebounced(self, app: MidiEditorApp,
                                   monkeypatch: pytest.MonkeyPatch) -> None:

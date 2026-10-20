@@ -349,8 +349,12 @@ class MidiEditorApp(tk.Tk):
                     selectforeground="#ffffff", insertcolor=p["text"], arrowcolor=p["text"])
         s.map(".", foreground=[("disabled", p["muted"])],
               background=[("disabled", p["panel"])])
-        s.configure("TButton", background=p["raised"], padding=(8, 2), borderwidth=1)
+        s.configure("TButton", background=p["raised"], padding=(8, 2), borderwidth=1,
+                    width=-6)
         s.map("TButton", background=[("pressed", p["active"]), ("active", p["border"])])
+        s.configure("Accent.TButton", background=p["accent"], foreground="#ffffff")
+        s.map("Accent.TButton", background=[("pressed", p["active"]),
+                                            ("active", theme.mix(p["accent"], "#ffffff", 0.2))])
         s.configure("TNotebook", background=p["panel"], borderwidth=0)
         s.configure("TNotebook.Tab", background=p["window"], foreground=p["muted"],
                     padding=(12, 4))
@@ -426,39 +430,64 @@ class MidiEditorApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.onClose)
 
     def _buildToolbar(self):
-        """Build the toolbar across the top of the window.
+        """Build the toolbar across the top of the window, then the header line under it.
 
-        Left to right: Open and Save, Play/Stop, master volume, speed, the
-        playback position readout, grid snap, the four zoom buttons and, at
-        the right-hand end, the file summary label.
+        Left to right: Open and Save, then the transport, which is Play/Stop
+        and the position readout. At the right-hand end: master volume,
+        speed, grid snap and the four zoom buttons.
         """
-        bar = ttk.Frame(self, padding=(6, 4))
+        bar = ttk.Frame(self, padding=(6, 5))
         bar.pack(fill="x")
+        p = self.palette
 
         b = ttk.Button(bar, text="Open", command=self.openDialog)
         b.pack(side="left")
         Tooltip(b, "Open a MIDI file (Ctrl+O)")
 
         b = ttk.Button(bar, text="Save", command=self.save)
-        b.pack(side="left", padx=(4, 12))
+        b.pack(side="left", padx=(4, 0))
         Tooltip(b, "Save the file (Ctrl+S)")
 
         # Transport: one button whose caption flips between Play and Stop.
-        self.playBtn = ttk.Button(bar, text=f"{PLAY_GLYPH} Play", command=self.togglePlay)
-        self.playBtn.pack(side="left")
+        self.playBtn = ttk.Button(bar, text=f"{PLAY_GLYPH} Play", style="Accent.TButton",
+                                  width=7, command=self.togglePlay)
+        self.playBtn.pack(side="left", padx=(28, 0))
         Tooltip(self.playBtn, "Play / stop (Space).\n"
                 "Mute/solo and volume changes apply live:\n"
                 "playback resumes from the cursor position.")
 
+        # The readout: the time in a large fixed-width face, then the bar and
+        # beat and the tempo, on a dark panel. _showReadout fills it, from
+        # _tickCursor while playing and with the opening position when not.
+        mono = theme.pickFont(tkfont.families(self), theme.MONO_FONTS)
+        family = mono or tkfont.nametofont("TkFixedFont").actual("family")
+        readout = tk.Frame(bar, bg=p["lcd"], padx=12, pady=1)
+        readout.pack(side="left", padx=(8, 0))
+        self.timeLbl = tk.Label(readout, text="", bg=p["lcd"], fg=p["accent"],
+                                font=(family, 17, "bold"))
+        self.timeLbl.pack(side="left")
+        self.posLbl = tk.Label(readout, text="", bg=p["lcd"], fg=p["muted"],
+                               font=(family, 10), width=22, anchor="w")
+        self.posLbl.pack(side="left", padx=(10, 0))
+
+        for w in (readout, self.timeLbl, self.posLbl):
+            Tooltip(w, "Playback position: time, bar:beat and current\n"
+                    "tempo from the file's tempo events. (If a file has\n"
+                    "no tempo events, this stays constant even when the\n"
+                    "music speeds up - the rubato is in the note spacing.)")
+
+        # The view controls sit together at the right-hand end.
+        view = ttk.Frame(bar)
+        view.pack(side="right")
+
         # Master volume scales note velocities in the playback copy only. The
         # slider's command goes through _liveUpdate, so moving it during
         # playback restarts the synth once the drag settles.
-        ttk.Label(bar, text="Vol:").pack(side="left", padx=(10, 0))
+        ttk.Label(view, text="Vol").pack(side="left")
         self.masterVar = tk.IntVar(value=100)
-        mv = tk.Scale(bar, from_=0, to=150, orient="horizontal", showvalue=0,
-                      length=90, variable=self.masterVar,
-                      command=lambda v: self._liveUpdate())
-        mv.pack(side="left")
+        mv = ttk.Scale(view, from_=0, to=150, orient="horizontal", length=90,
+                       variable=self.masterVar, command=lambda v: self._liveUpdate())
+        mv.pack(side="left", padx=(4, 12))
         Tooltip(mv, "Master playback volume (0-150%).\n"
                 "Scales note velocities in the playback copy only -\n"
                 "the file is not changed. Applies live while playing.")
@@ -466,39 +495,25 @@ class MidiEditorApp(tk.Tk):
         # Speed scales the tempo events in the playback copy. The label beside
         # the slider mirrors its value; _speedChanged updates it and then
         # feeds _liveUpdate like the other live controls.
-        ttk.Label(bar, text="Speed:").pack(side="left", padx=(10, 0))
+        ttk.Label(view, text="Speed").pack(side="left")
         self.speedVar = tk.IntVar(value=100)
-        sv = tk.Scale(bar, from_=25, to=300, orient="horizontal", showvalue=0,
-                      length=90, variable=self.speedVar,
-                      command=lambda v: self._speedChanged())
-        sv.pack(side="left")
-        self.speedLbl = ttk.Label(bar, text="100%", width=5)
-        self.speedLbl.pack(side="left")
+        sv = ttk.Scale(view, from_=25, to=300, orient="horizontal", length=90,
+                       variable=self.speedVar, command=lambda v: self._speedChanged())
+        sv.pack(side="left", padx=(4, 0))
+        self.speedLbl = ttk.Label(view, text="100%", width=5)
+        self.speedLbl.pack(side="left", padx=(4, 0))
         Tooltip(sv, "Playback speed (25-300%): scales the file's tempo\n"
                 "in the playback copy only - pitch is unaffected and\n"
                 "the file is not changed. Applies live while playing.\n"
                 "Handy for files sequenced at the wrong base tempo.")
 
-        # Position readout, refreshed by _tickCursor at 30 Hz while playing.
-        # A fixed-width font and a reserved width keep the digits from
-        # shuffling the rest of the toolbar as they change.
-        readoutFont = tkfont.nametofont("TkFixedFont").copy()
-        readoutFont.configure(size=9)
-        self.posLbl = ttk.Label(bar, text="", width=26, font=readoutFont)
-        self.posLbl.pack(side="left", padx=(10, 0))
-        Tooltip(self.posLbl, "Playback position: time, bar:beat and current\n"
-                "tempo from the file's tempo events. (If a file has\n"
-                "no tempo events, this stays constant even when the\n"
-                "music speeds up - the rubato is in the note spacing.)")
-
         # Grid snap: read back by _snapTicks whenever a note is moved,
         # resized or added.
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
-        ttk.Label(bar, text="Snap:").pack(side="left")
+        ttk.Label(view, text="Snap").pack(side="left", padx=(8, 0))
         self.snapVar = tk.StringVar(value="1/16")
-        snap = ttk.Combobox(bar, textvariable=self.snapVar, values=SNAP_CHOICES,
+        snap = ttk.Combobox(view, textvariable=self.snapVar, values=SNAP_CHOICES,
                             width=5, state="readonly")
-        snap.pack(side="left", padx=(2, 12))
+        snap.pack(side="left", padx=(4, 10))
         Tooltip(snap, "Grid snap for moving, resizing and adding notes.\n"
                 "1/16 = sixteenth notes; 'off' = free placement.")
 
@@ -513,15 +528,19 @@ class MidiEditorApp(tk.Tk):
 
         for text, cmd in (("H+", lambda: self.zoom(1.25)), (f"H{MINUS}", lambda: self.zoom(0.8)),
                           ("V+", lambda: self.vzoom(2)), (f"V{MINUS}", lambda: self.vzoom(-2))):
-            b = ttk.Button(bar, text=text, width=4, command=cmd)
+            b = ttk.Button(view, text=text, width=3, command=cmd)
             b.pack(side="left", padx=1)
             Tooltip(b, zoom_tips[text])
 
-        # File summary at the right-hand end, filled in by _refreshAll.
-        self.infoLbl = ttk.Label(bar, text="", anchor="e")
-        self.infoLbl.pack(side="right")
+        # The file summary has a line of its own, so it is never clipped by
+        # the toolbar; _updateSummary fills it.
+        header = tk.Frame(self, bg=p["window"])
+        header.pack(fill="x")
+        self.infoLbl = tk.Label(header, text="", anchor="w", bg=p["window"], fg=p["muted"],
+                                font=(self.uiFamily, 9))
+        self.infoLbl.pack(side="left", padx=10, pady=(0, 4))
         Tooltip(self.infoLbl, "File summary: format, tracks, ticks per quarter\n"
-                "note, time signature, tempo, note count, duration")
+                "note, time signature, tempo, note count, duration, key")
 
     def _buildBody(self):
         """Build the paned body: channel strip on the left, notebook on the right.
@@ -929,20 +948,21 @@ class MidiEditorApp(tk.Tk):
         self._fillEvents()
         self._updateTitle()
         self._updateSummary()
+        self._showReadout(0.0)
         self._showReportIfSelected()
 
     def _updateSummary(self):
-        """Refresh the toolbar file summary: name, format, tracks, resolution,
-        time signature, starting tempo, note count and duration."""
+        """Refresh the file summary on the header line: name, format, tracks,
+        resolution, time signature, starting tempo, note count, duration and key."""
         s = self.song
         name = s.path.rsplit("/", 1)[-1] if s.path else "untitled"
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
         key = analysis.songKey(s)
         keyText = f" | {key.name}" if key else ""
         self.infoLbl.config(text=(
-            f"{name}   fmt {s.mf.format} | {len(s.mf.tracks)} trk | "
+            f"{name}     format {s.mf.format} | {len(s.mf.tracks)} tracks | "
             f"{s.mf.division} tpq | {num}/{den} | {s.initialBpm():.0f} bpm | "
-            f"{len(s.notes)} notes | {s.duration:.1f}s{keyText}"))
+            f"{len(s.notes):,} notes | {s.duration:.1f} s{keyText}"))
 
     def _updateTitle(self):
         """Set the window title to the file path, starred when unsaved."""
@@ -3686,6 +3706,19 @@ class MidiEditorApp(tk.Tk):
         self.playStart = time.monotonic()
         return True
 
+    def _showReadout(self, seconds: float, speed: float = 1.0):
+        """Show a position on the toolbar readout: time, bar and beat, and tempo.
+
+        Args:
+            seconds: song time of the position.
+            speed: playback speed factor, which scales the tempo shown.
+        """
+        tick = self.song.secondsToTick(seconds)
+        bar, beat = self.song.barBeat(tick)
+        bpm = self.song.tempoAt(tick) * speed
+        self.timeLbl.config(text=f"{int(seconds) // 60}:{seconds % 60:05.2f}")
+        self.posLbl.config(text=f"bar {bar}:{beat}   {TEMPO_GLYPH}={bpm:.0f}")
+
     def _speedChanged(self):
         """Speed slider moved: update its label and restart the synth if
         playing."""
@@ -3738,7 +3771,7 @@ class MidiEditorApp(tk.Tk):
         self.playStart = None
         self.playOffset = 0.0
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
-        self.posLbl.config(text="")
+        self._showReadout(0.0)
 
         if self.cursorItem:
             self.canvas.delete(self.cursorItem)
@@ -3772,11 +3805,7 @@ class MidiEditorApp(tk.Tk):
         # scaled by the playback speed.
         tick = self.song.secondsToTick(elapsed)
         x = tick * self.ppt
-        bar, beat = self.song.barBeat(tick)
-        bpm = self.song.tempoAt(tick) * self.playSpeed
-        self.posLbl.config(text=(
-            f"{int(elapsed) // 60}:{elapsed % 60:04.1f} "
-            f"bar {bar}:{beat} {TEMPO_GLYPH}={bpm:.0f}"))
+        self._showReadout(elapsed, self.playSpeed)
 
         # The cursor line is created on the first tick after a redraw and
         # moved on every tick after that.
