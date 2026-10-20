@@ -26,6 +26,8 @@ from montyroll.app import (
     CHANNEL_COLORS,
     DEMAND_MAX_H,
     DEMAND_MIN_H,
+    DRAWER_CLOSE_GLYPH,
+    DRAWER_OPEN_GLYPH,
     MAX_EVENT_ROWS,
     NO_POOL,
     PLAY_GLYPH,
@@ -1447,13 +1449,43 @@ class TestTempoEditing:
         assert scheduled == [1]
 
 
+class TestDrawer:
+    """Events and Report in the drawer under the roll."""
+
+    def testClosedAtStart(self, app: MidiEditorApp) -> None:
+        """The window opens with the drawer shut and both buttons pointing up."""
+        assert not app.drawerOpen
+        assert not app.nb.winfo_ismapped()
+        assert all(b.cget("text").startswith(DRAWER_OPEN_GLYPH)
+                   for b in app.drawerButtons.values())
+
+    def testButtonOpensAndClosesItsPage(self, app: MidiEditorApp) -> None:
+        """A button opens its page; the same button again closes the drawer."""
+        app.toggleDrawer("Events")
+        app.update()
+        assert app.drawerOpen and app.nb.winfo_ismapped()
+        assert app.drawerButtons["Events"].cget("text").startswith(DRAWER_CLOSE_GLYPH)
+        app.toggleDrawer("Report")
+        assert app.drawerOpen
+        assert app.drawerButtons["Report"].cget("text").startswith(DRAWER_CLOSE_GLYPH)
+        assert app.drawerButtons["Events"].cget("text").startswith(DRAWER_OPEN_GLYPH)
+        app.toggleDrawer("Report")
+        app.update()
+        assert not app.drawerOpen and not app.nb.winfo_ismapped()
+
+    def testEventCount(self, app: MidiEditorApp) -> None:
+        """The bar counts every event in the file."""
+        total = sum(len(track) for track in app.song.mf.tracks)
+        assert app.eventCountLbl.cget("text") == f"{total:,} events"
+
+
 class TestReportTab:
     """The Report tab: Original and Reduced sub-tabs and the Save button."""
 
     def testOriginalIsGeneratedWhenShown(self, app: MidiEditorApp) -> None:
         """Nothing is generated until the tab is selected; then the text appears."""
         assert app.reports == {"original": None, "reduced": None}
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.update()
         text = app.reportTexts["original"].get("1.0", "end")
         assert text.startswith("MontyRoll report: song.mid")
@@ -1463,14 +1495,14 @@ class TestReportTab:
 
     def testReducedIsANoteWhileReductionIsOff(self, app: MidiEditorApp) -> None:
         """The Reduced sub-tab explains itself until the reduction is on."""
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.reportNb.select(1)
         app.update()
         assert app.reportTexts["reduced"].get("1.0", "end").startswith("Reduction is off.")
 
     def testReducedFollowsTheReduction(self, app: MidiEditorApp) -> None:
         """With Reduce on, the Reduced sub-tab describes the reduced song and says so."""
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.reportNb.select(1)
         app.budgetVar.set(1)
         app.reduceVar.set(True)
@@ -1488,7 +1520,7 @@ class TestReportTab:
 
     def testReportsFollowEdits(self, app: MidiEditorApp) -> None:
         """Deleting every note regenerates the report on view."""
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.update()
         app.selectAll()
         app.deleteSelection()
@@ -1503,7 +1535,7 @@ class TestReportTab:
         app.saveReport()
         assert out.read_text(encoding="ascii") == app._ensureReport("original")
         assert "Saved original report" in app.status.cget("text")
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.reportNb.select(1)
         app.update()
         app.saveReport()

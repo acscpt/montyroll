@@ -46,6 +46,7 @@ DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
 LANES = ("Demand", "Velocity", "Weight")   # what the strip under the roll can show
+DRAWER_PAGES = ("Events", "Report")        # the drawer's pages, in tab order
 INSPECTOR_W = 290    # the inspector's width when open
 INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
@@ -64,6 +65,8 @@ MINUS = "\u2212"            # true minus sign, the same width as "+" on the zoom
 ARROW = "\u2192"            # rightwards arrow in the "Ch 1 -> Flute" status text
 NEWLINE_GLYPH = "\u23ce"    # return symbol standing in for newlines in event text
 BURGER_GLYPH = "\u2630"     # trigram for heaven, on the inspector's fold button
+DRAWER_OPEN_GLYPH = "\u25b4"    # small up-pointing triangle: a drawer button that opens
+DRAWER_CLOSE_GLYPH = "\u25be"   # small down-pointing triangle: one that closes
 
 
 def _shade(color: str, factor: float) -> str:
@@ -269,6 +272,7 @@ class MidiEditorApp(tk.Tk):
         self.reports: dict[str, str | None] = {"original": None, "reduced": None}
         self._demandAfter: str | None = None
         self.laneVar = tk.StringVar(value=LANES[0])     # what the strip under the roll shows
+        self.drawerOpen = False                           # Events and Report showing under the roll
         self.laneBars: list[tuple[float, float, model.Note]] = []   # x extents drawn in a note lane
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
 
@@ -285,6 +289,7 @@ class MidiEditorApp(tk.Tk):
         self._buildMenu()
         self._buildToolbar()
         self._buildStatusbar()   # before body: last-packed widgets get squeezed out
+        self._buildDrawerBar()   # the same
         self._buildBody()
         self._bindKeys()
 
@@ -555,13 +560,14 @@ class MidiEditorApp(tk.Tk):
                 "note, time signature, tempo, note count, duration, key")
 
     def _buildBody(self):
-        """Build the paned body: channel strip on the left, notebook on the right.
+        """Build the paned body: channel strip, centre column, and inspector.
 
-        The channel strip is a canvas holding an inner frame, because sixteen
-        channel cards never fit on screen and need a scrollbar. The notebook
-        holds the piano roll (ruler, keyboard gutter, note canvas and
-        scrollbars wired so the ruler and keys track the roll) and the raw
-        event list.
+        The channel strip is a canvas holding an inner frame, so a long list
+        of channel rows scrolls. The centre column holds the piano roll
+        (ruler, keyboard gutter, note canvas and scrollbars wired so the
+        ruler and keys track the roll, then the lane switch and the strip)
+        over the drawer, a notebook of the event list and the report. The
+        inspector is the right-hand pane.
         """
         paned = ttk.PanedWindow(self, orient="horizontal")
         paned.pack(fill="both", expand=True)
@@ -622,9 +628,12 @@ class MidiEditorApp(tk.Tk):
             for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
                 w.bind(seq, self._onChanWheel)
 
-        # -- notebook: piano roll + events
-        self.nb = ttk.Notebook(paned)
-        paned.add(self.nb, weight=1)
+        # -- centre: the roll over the drawer. The drawer is a notebook of
+        # Events and Report, added to the column by openDrawer and taken out
+        # by closeDrawer.
+        self.centre = ttk.PanedWindow(paned, orient="vertical")
+        paned.add(self.centre, weight=1)
+        self.nb = ttk.Notebook(self.centre)
 
         # -- inspector: the active channel and the selected note, folding to
         # a narrow strip from its burger button. Its pane keeps the width it
@@ -638,8 +647,8 @@ class MidiEditorApp(tk.Tk):
         # The roll is a 3x3 grid: ruler above the note canvas, keyboard gutter
         # to its left, scrollbars to the right and below. Row 1 / column 1
         # (the note canvas) take all the spare space.
-        roll = ttk.Frame(self.nb)
-        self.nb.add(roll, text="Piano Roll")
+        roll = ttk.Frame(self.centre)
+        self.centre.add(roll, weight=3)
         roll.rowconfigure(1, weight=1)
         roll.columnconfigure(1, weight=1)
         # Ruler rows are sized from their fonts, so the text fits at any
@@ -778,7 +787,8 @@ class MidiEditorApp(tk.Tk):
             text.pack(side="left", fill="both", expand=True)
             self.reportTexts[key] = text
 
-        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
+        self.nb.bind("<<NotebookTabChanged>>",
+                     lambda e: (self._updateDrawerButtons(), self._showReportIfSelected()))
         self.reportNb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
 
         # Mouse bindings for the roll. Wheel events are bound on the ruler and
@@ -807,6 +817,79 @@ class MidiEditorApp(tk.Tk):
         """
         self.status = ttk.Label(self, text="Ready", padding=(8, 3), relief="sunken")
         self.status.pack(fill="x", side="bottom")
+
+    def _buildDrawerBar(self):
+        """Create the bar of drawer buttons along the bottom, above the status bar.
+
+        Packed before the body, for the same reason as the status bar. Each
+        button opens the drawer on its page, or closes it when that page is
+        already showing; the count of events in the file sits at the right.
+        """
+        bar = ttk.Frame(self, padding=(6, 1))
+        bar.pack(fill="x", side="bottom")
+        self.drawerButtons: dict[str, ttk.Button] = {}
+
+        for name, tip in (("Events", "Open the list of every event in the file"),
+                          ("Report", "Open the file's analysis as text")):
+            b = ttk.Button(bar, text=name, style="Toolbutton",
+                           command=lambda n=name: self.toggleDrawer(n))
+            b.pack(side="left", padx=(0, 4))
+            Tooltip(b, tip)
+            self.drawerButtons[name] = b
+
+        self.eventCountLbl = ttk.Label(bar, text="", foreground=self.palette["muted"],
+                                       font=(self.uiFamily, 9))
+        self.eventCountLbl.pack(side="right", padx=6)
+        self._updateDrawerButtons()
+
+    def toggleDrawer(self, page: str):
+        """Open the drawer on a page, or close it when that page is already showing.
+
+        Args:
+            page: "Events" or "Report".
+        """
+        if self.drawerOpen and DRAWER_PAGES[self.nb.index(self.nb.select())] == page:
+            self.closeDrawer()
+        else:
+            self.openDrawer(page)
+
+    def openDrawer(self, page: str):
+        """Open the drawer under the roll, on one of its pages.
+
+        The drawer is the lower pane of the centre column; opening it gives
+        it the lower two fifths, and its sash can be dragged from there.
+
+        Args:
+            page: "Events" or "Report".
+        """
+        if not self.drawerOpen:
+            self.centre.add(self.nb, weight=1)
+            self.drawerOpen = True
+            self.update_idletasks()
+            height = self.centre.winfo_height()
+
+            if height > 1:
+                self.centre.sashpos(0, int(height * 0.6))
+
+        self.nb.select(DRAWER_PAGES.index(page))
+        self._updateDrawerButtons()
+        self._showReportIfSelected()
+
+    def closeDrawer(self):
+        """Close the drawer; the roll takes the whole centre column again."""
+        if self.drawerOpen:
+            self.centre.forget(self.nb)
+            self.drawerOpen = False
+
+        self._updateDrawerButtons()
+
+    def _updateDrawerButtons(self):
+        """Point each drawer button's arrow up to open its page, or down to close it."""
+        showing = DRAWER_PAGES[self.nb.index(self.nb.select())] if self.drawerOpen else None
+
+        for name, button in self.drawerButtons.items():
+            glyph = DRAWER_CLOSE_GLYPH if name == showing else DRAWER_OPEN_GLYPH
+            button.configure(text=f"{glyph}  {name}")
 
     def _bindKeys(self):
         """Bind the keyboard shortcuts advertised in the menus and tooltips.
@@ -2131,8 +2214,8 @@ class MidiEditorApp(tk.Tk):
         return self.reports[key]
 
     def _showReportIfSelected(self):
-        """Fill the report sub-tab on view when the Report tab is showing."""
-        if self.nb.index(self.nb.select()) != 2:
+        """Fill the report sub-tab on view when the drawer is open on the Report."""
+        if not self.drawerOpen or DRAWER_PAGES[self.nb.index(self.nb.select())] != "Report":
             return
 
         key = self._reportKey()
@@ -4296,6 +4379,8 @@ class MidiEditorApp(tk.Tk):
             tree.insert("", "end", values=(
                 "", "", "", "", "", "...",
                 f"{len(rows) - MAX_EVENT_ROWS} more events not shown"))
+
+        self.eventCountLbl.config(text=f"{len(rows):,} events")
 
     @staticmethod
     def _evType(e: smf.Event) -> str:
