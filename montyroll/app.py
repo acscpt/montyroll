@@ -203,6 +203,7 @@ class MidiEditorApp(tk.Tk):
         self.selection: set[model.Note] = set()
         self.itemToNote: dict[int, model.Note] = {}
         self.noteToItem: dict[int, int] = {}
+        self.itemOutline: dict[int, str] = {}        # canvas item -> its unselected edge
 
         # Channel strip state.
         self.muteVars: dict[int, tk.BooleanVar] = {}
@@ -273,6 +274,7 @@ class MidiEditorApp(tk.Tk):
         self._demandAfter: str | None = None
         self.laneVar = tk.StringVar(value=LANES[0])     # what the strip under the roll shows
         self.drawerOpen = False                           # Events and Report showing under the roll
+        self._centrePending = False                       # the roll waits to be laid out to centre
         self.laneBars: list[tuple[float, float, model.Note]] = []   # x extents drawn in a note lane
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
 
@@ -661,12 +663,12 @@ class MidiEditorApp(tk.Tk):
         for f in self.rulerFonts:
             self.rulerRows.append(self.rulerRows[-1] + f.metrics("linespace") + 3)
 
-        self.ruler = tk.Canvas(roll, height=self.rulerRows[-1], bg="#2a2a30",
+        self.ruler = tk.Canvas(roll, height=self.rulerRows[-1], bg=theme.ROLL["ruler"],
                                highlightthickness=0)
         self.ruler.grid(row=0, column=1, sticky="ew")
-        self.keys = tk.Canvas(roll, width=KEYS_W, bg="#1c1c20", highlightthickness=0)
+        self.keys = tk.Canvas(roll, width=KEYS_W, bg=theme.ROLL["roll"], highlightthickness=0)
         self.keys.grid(row=1, column=0, sticky="ns")
-        self.canvas = tk.Canvas(roll, bg="#18181c", highlightthickness=0)
+        self.canvas = tk.Canvas(roll, bg=theme.ROLL["roll"], highlightthickness=0)
         self.canvas.grid(row=1, column=1, sticky="nsew")
 
         # The ruler and keyboard gutter have no scrollbars of their own: the
@@ -718,7 +720,7 @@ class MidiEditorApp(tk.Tk):
         self.budgetSpin.bind("<KeyRelease>", lambda e: self._reductionChanged())
         Tooltip(gutter, "Voice budget: the line on the demand strip.\n"
                 "Where the stack crosses it, notes would have to go.")
-        self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg="#202026",
+        self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg=theme.ROLL["strip"],
                                       highlightthickness=0)
         self.demandCanvas.grid(row=4, column=1, sticky="ew")
         self.demandCanvas.bind("<Configure>", lambda e: self._scheduleDemand())
@@ -802,6 +804,8 @@ class MidiEditorApp(tk.Tk):
         self.ruler.bind("<Double-Button-1>", self.onRulerDouble)
         self.ruler.bind("<Button-3>", self.onRulerContext)
         self.canvas.bind("<Motion>", self.onMotion)
+        self.canvas.bind("<Configure>", lambda e: self._centreOnNotes()
+                         if self._centrePending else None, add="+")
 
         for w in (self.canvas, self.keys, self.ruler, self.demandCanvas):
             w.bind("<Button-4>", self.onWheel)
@@ -1061,6 +1065,7 @@ class MidiEditorApp(tk.Tk):
         self._buildChannelRows()
         self._loadPoolControls()
         self.redraw()
+        self.after_idle(self._centreOnNotes)
         self._fillEvents()
         self._updateTitle()
         self._updateSummary()
@@ -1837,6 +1842,7 @@ class MidiEditorApp(tk.Tk):
         c.delete("all")
         self.itemToNote.clear()
         self.noteToItem.clear()
+        self.itemOutline.clear()
         self.cursorItem = None
 
         # Scrollregion leaves 200 px of slack past the last note; zoom() uses
@@ -1852,11 +1858,11 @@ class MidiEditorApp(tk.Tk):
 
             if pitch % 12 in (1, 3, 6, 8, 10):
                 c.create_rectangle(0, y, width, y + self.rowH,
-                                   fill="#1e1e24", outline="")
+                                   fill=theme.ROLL["row"], outline="")
 
             if pitch % 12 == 0:
                 c.create_line(0, y + self.rowH, width, y + self.rowH,
-                              fill="#33333c")
+                              fill=theme.ROLL["octave"])
 
         # bar / beat grid from the first time signature
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
@@ -1868,7 +1874,7 @@ class MidiEditorApp(tk.Tk):
             x = t * self.ppt
             is_bar = t % bar == 0
             c.create_line(x, 0, x, height,
-                          fill="#3d3d48" if is_bar else "#26262e")
+                          fill=theme.ROLL["bar"] if is_bar else theme.ROLL["beat"])
             t += beat
 
         # Tempo changes as lines down the roll in the ruler's tempo colour,
@@ -1913,10 +1919,10 @@ class MidiEditorApp(tk.Tk):
                 fill, outline = "#3a3a40", "#2c2c31"
             elif weights is not None:
                 fill = _shade(base, 0.3 + 0.7 * weights[id(note)] / heaviest)
-                outline = _shade(base, 0.45)
+                outline = theme.mix(fill, "#ffffff", 0.3)
             else:
                 fill = _shade(base, 0.65 + 0.35 * note.velocity / 127)
-                outline = _shade(base, 0.45)
+                outline = theme.mix(fill, "#ffffff", 0.3)
 
             # With the reduction on, a note is drawn as the segments that
             # sound, over a stippled ghost of its original extent wherever
@@ -1936,6 +1942,7 @@ class MidiEditorApp(tk.Tk):
                                           tags="note")
                 self.itemToNote[item] = note
                 self.noteToItem[id(note)] = item
+                self.itemOutline[item] = _shade(base, 0.3)
 
             for start, end in spans:
                 x1 = start * self.ppt
@@ -1943,6 +1950,7 @@ class MidiEditorApp(tk.Tk):
                 item = c.create_rectangle(x1, y1, x2, y2, fill=fill,
                                           outline=outline, tags="note")
                 self.itemToNote[item] = note
+                self.itemOutline[item] = outline
 
                 if not ghost:
                     self.noteToItem[id(note)] = item
@@ -1972,7 +1980,7 @@ class MidiEditorApp(tk.Tk):
         s = self.song
 
         for y in (r1, r2, r3):
-            r.create_line(0, y, width, y, fill="#44444e")
+            r.create_line(0, y, width, y, fill=theme.ROLL["octave"])
 
         # -- seconds scale (top row); tempo-aware: x from seconds_to_tick
         # The step is the smallest one whose ticks sit at least 45 px apart
@@ -2074,15 +2082,15 @@ class MidiEditorApp(tk.Tk):
             y = (127 - pitch) * self.rowH
             black = pitch % 12 in (1, 3, 6, 8, 10)
             k.create_rectangle(0, y, KEYS_W, y + self.rowH,
-                               fill="#2b2b31" if black else "#e8e8e8",
-                               outline="#555")
+                               fill=theme.ROLL["black"] if black else theme.ROLL["white"],
+                               outline=theme.ROLL["keyEdge"])
 
             # Octave labels on each C, once the rows are tall enough to hold
             # the text.
             if pitch % 12 == 0 and self.rowH >= 7:
                 k.create_text(KEYS_W - 4, y + self.rowH / 2,
                               text=gm.noteName(pitch), anchor="e",
-                              fill="#333", font=(self.uiFamily, 7))
+                              fill=theme.ROLL["keyText"], font=(self.uiFamily, 7))
 
     def _applySelectionStyle(self):
         """Outline the selected notes in white, the rest in their colour; refresh the inspector."""
@@ -2090,8 +2098,7 @@ class MidiEditorApp(tk.Tk):
             if note in self.selection:
                 self.canvas.itemconfigure(item, outline="#ffffff", width=2)
             else:
-                base = CHANNEL_COLORS[note.channel]
-                self.canvas.itemconfigure(item, outline=_shade(base, 0.5), width=1)
+                self.canvas.itemconfigure(item, outline=self.itemOutline[item], width=1)
 
         self._refreshInspector()
 
@@ -2121,6 +2128,30 @@ class MidiEditorApp(tk.Tk):
         total = self.song.maxTick * self.ppt + 200   # matches redraw scrollregion
         new_left = canvas_x * (self.zoomX / old) - anchor_x
         self._xview("moveto", max(0.0, new_left / total))
+
+    def _centreOnNotes(self):
+        """Scroll the roll vertically so the middle of the file's pitches is in view.
+
+        The middle is the median pitch of the pitched notes, or of every
+        note when the file holds drums alone. An empty song keeps the view.
+        Before the window is first laid out the canvas has no height yet, so
+        the scroll waits for the canvas's first <Configure>.
+        """
+        if self.canvas.winfo_height() <= 1:
+            self._centrePending = True
+            return
+
+        self._centrePending = False
+        notes = [n.pitch for n in self.song.notes if n.channel != model.DRUM_CHANNEL] \
+            or [n.pitch for n in self.song.notes]
+
+        if not notes:
+            return
+
+        notes.sort()
+        middle = notes[len(notes) // 2]
+        y = (127 - middle) * self.rowH + self.rowH / 2 - self.canvas.winfo_height() / 2
+        self._yview("moveto", max(0.0, y / (128 * self.rowH)))
 
     def vzoom(self, delta: int):
         """Change the note row height, clamped to 4-24 pixels, and redraw.
@@ -2543,7 +2574,7 @@ class MidiEditorApp(tk.Tk):
         cb.pack(anchor="w")
         Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
                     "Dropped notes are stippled; the file is not changed.")
-        self.lossLbl = ttk.Label(panel, text="", font=(self.uiFamily, 9), wraplength=320,
+        self.lossLbl = ttk.Label(panel, text="", font=(self.uiFamily, 9), wraplength=350,
                                  justify="left", foreground=self.palette["muted"])
         self.lossLbl.pack(fill="x", pady=(2, 4))
 
@@ -4319,7 +4350,7 @@ class MidiEditorApp(tk.Tk):
             self.canvas.coords(self.cursorItem, x, 0, x, 128 * self.rowH)
         else:
             self.cursorItem = self.canvas.create_line(
-                x, 0, x, 128 * self.rowH, fill="#ffffff", width=1)
+                x, 0, x, 128 * self.rowH, fill=self.palette["accent"], width=2)
 
         # The strip is a viewport, so its cursor sits at the roll's x less
         # the scroll offset; the strip's own redraw forgets it, and it is
@@ -4331,7 +4362,7 @@ class MidiEditorApp(tk.Tk):
             self.demandCanvas.coords(self.demandCursorItem, stripX, 0, stripX, stripH)
         else:
             self.demandCursorItem = self.demandCanvas.create_line(
-                stripX, 0, stripX, stripH, fill="#ffffff", width=1)
+                stripX, 0, stripX, stripH, fill=self.palette["accent"], width=2)
 
         # keep the cursor on screen: once it leaves the visible span, scroll
         # so it sits 40 px in from the left edge

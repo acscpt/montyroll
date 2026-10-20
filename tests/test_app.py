@@ -76,18 +76,34 @@ def app(songPath: Path, monkeypatch: pytest.MonkeyPatch) -> MidiEditorApp:
     application.destroy()
 
 
+def _toWidget(app: MidiEditorApp, x: float, y: float) -> tuple[float, float]:
+    """Convert canvas coordinates to the widget coordinates an event carries.
+
+    Args:
+        app: the application.
+        x: canvas x.
+        y: canvas y.
+
+    Returns:
+        tuple[float, float]: (x, y) relative to the visible part of the roll.
+    """
+    position = (x - app.canvas.canvasx(0), y - app.canvas.canvasy(0))
+    return position
+
+
 def _noteCentre(app: MidiEditorApp, note: model.Note) -> tuple[float, float]:
-    """Canvas coordinates at the middle of a note's rectangle.
+    """The point an event would carry at the middle of a note's rectangle.
 
     Args:
         app: the application.
         note: the note.
 
     Returns:
-        tuple[float, float]: (x, y) on the canvas.
+        tuple[float, float]: (x, y) in widget coordinates, allowing for the
+        roll's scroll position.
     """
     x1, y1, x2, y2 = app.canvas.coords(app.noteToItem[id(note)])
-    centre = ((x1 + x2) / 2, (y1 + y2) / 2)
+    centre = _toWidget(app, (x1 + x2) / 2, (y1 + y2) / 2)
     return centre
 
 
@@ -329,10 +345,10 @@ class TestEditing:
         start, end = note.start, note.end
         snap = app._snapTicks()
         x1, y1, x2, y2 = app.canvas.coords(app.noteToItem[id(note)])
-        y = (y1 + y2) / 2
-        app.onPress(FakeEvent(x2 - 2, y))
+        x, y = _toWidget(app, x2 - 2, (y1 + y2) / 2)
+        app.onPress(FakeEvent(x, y))
         assert app.drag["mode"] == "resize"
-        app.onDrag(FakeEvent(x2 - 2 + snap * app.ppt, y))
+        app.onDrag(FakeEvent(x + snap * app.ppt, y))
         app.onRelease(FakeEvent())
         assert (note.start, note.end) == (start, end + snap)
         assert app.status.cget("text") == "Resized 1 note"
@@ -343,7 +359,7 @@ class TestEditing:
         app._setActiveChannel(1)
         x = 20 * app.ppt * app.song.mf.division   # bar 5 and a bit
         y = (127 - 100) * app.rowH + 2           # pitch 100, nothing there
-        app.onDouble(FakeEvent(x, y))
+        app.onDouble(FakeEvent(*_toWidget(app, x, y)))
         assert len(app.song.notes) == before + 1
         added = next(iter(app.selection))
         assert added.channel == 1
@@ -520,6 +536,26 @@ class TestViewport:
         assert app.zoomX > before
         app.onWheel(FakeEvent(100, 100, num=5, widget=app.canvas))
         assert app.zoomX > before
+
+    def testOpensOnTheNotes(self, app: MidiEditorApp) -> None:
+        """The roll opens scrolled so the middle of the file's pitches is in view."""
+        pitches = sorted(n.pitch for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        middle = pitches[len(pitches) // 2]
+        top = app.canvas.canvasy(0)
+        bottom = top + app.canvas.winfo_height()
+        assert top <= (127 - middle) * app.rowH <= bottom
+
+    def testNotesHaveALighterEdge(self, app: MidiEditorApp) -> None:
+        """An unselected note's edge is its fill mixed towards white; selection is white."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        item = app.noteToItem[id(note)]
+        fill = app.canvas.itemcget(item, "fill")
+        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#ffffff", 0.3)
+        app.selection = {note}
+        app._applySelectionStyle()
+        assert app.canvas.itemcget(item, "outline") == "#ffffff"
+        app._clearSelection()
+        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#ffffff", 0.3)
 
     def testMotionUpdatesStatus(self, app: MidiEditorApp) -> None:
         """Moving the pointer reports bar, beat and the note under it."""
@@ -1709,7 +1745,7 @@ class TestPlayFromAndChangeAll:
                 pass
 
         monkeypatch.setattr("montyroll.app.tk.Menu", FakeMenu)
-        app.onContext(FakeEvent(x=int(3500 * app.ppt), y=3))     # late in bar 2, empty
+        app.onContext(FakeEvent(*_toWidget(app, int(3500 * app.ppt), 3)))   # late in bar 2, empty
         assert menus[-1].items == ["Play from bar 3", "Play from beat 2:4"]
         note = app.song.notes[0]
         app.onContext(FakeEvent(*_noteCentre(app, note)))
