@@ -183,17 +183,36 @@ def parse(path: str) -> MidiFile:
     with open(path, "rb") as f:
         raw = f.read()
 
+    mf = parseBytes(raw, path)
+    return mf
+
+
+def parseBytes(raw: bytes, name: str = "MIDI data") -> MidiFile:
+    """Parse a Standard MIDI File held in memory.
+
+    Args:
+        raw: the file's bytes.
+        name: what an error calls the data, normally its path.
+
+    Returns:
+        MidiFile: the header fields and one event list per MTrk chunk, with
+        ticks made absolute.
+
+    Raises:
+        ValueError: if the data has no MThd header or uses SMPTE time
+            division, which this module does not support.
+    """
     # Validate the header chunk; only PPQ division is accepted.
     pos = 0
 
     if raw[pos:pos + 4] != b"MThd":
-        raise ValueError(f"{path}: not a Standard MIDI File (missing MThd)")
+        raise ValueError(f"{name}: not a Standard MIDI File (missing MThd)")
 
     hdr_len = struct.unpack(">I", raw[pos + 4:pos + 8])[0]
     fmt, ntracks, division = struct.unpack(">HHH", raw[pos + 8:pos + 14])
 
     if division & 0x8000:
-        raise ValueError(f"{path}: SMPTE time division is not supported")
+        raise ValueError(f"{name}: SMPTE time division is not supported")
 
     # Advance by the declared header length, which tolerates headers longer
     # than the standard six bytes.
@@ -324,13 +343,26 @@ def _sortKey(seq_event: tuple[int, Event]) -> tuple[int, int, int]:
 def write(mf: MidiFile, path: str) -> None:
     """Serialise a MidiFile to disk.
 
+    Args:
+        mf: the file to write; its events are left untouched.
+        path: destination path, overwritten if it already exists.
+    """
+    with open(path, "wb") as f:
+        f.write(toBytes(mf))
+
+
+def toBytes(mf: MidiFile) -> bytes:
+    """Serialise a MidiFile.
+
     Every voice event is written with an explicit status byte, so the output
     never relies on running status.  Each track ends with exactly one
     end-of-track meta event regardless of what the event list holds.
 
     Args:
-        mf: the file to write; its events are left untouched.
-        path: destination path, overwritten if it already exists.
+        mf: the file to serialise; its events are left untouched.
+
+    Returns:
+        bytes: the file.
     """
     out = bytearray()
     out += b"MThd" + struct.pack(">IHHH", 6, mf.format, len(mf.tracks), mf.division)
@@ -363,5 +395,5 @@ def write(mf: MidiFile, path: str) -> None:
         body += _encodeVlq(0) + bytes([META, META_END_OF_TRACK, 0])
         out += b"MTrk" + struct.pack(">I", len(body)) + body
 
-    with open(path, "wb") as f:
-        f.write(out)
+    data = bytes(out)
+    return data

@@ -172,6 +172,24 @@ class Song:
         return song
 
     @classmethod
+    def fromBytes(cls, data: bytes, path: str | None = None) -> "Song":
+        """Parse a Standard MIDI File held in memory into a Song.
+
+        Args:
+            data: the file's bytes.
+            path: the path a later save() writes to, or None for none yet.
+
+        Returns:
+            Song: the parsed song.
+
+        Raises:
+            ValueError: if the data is not an SMF or uses SMPTE time division.
+        """
+        mf = smf.parseBytes(data, path or "MIDI data")
+        song = cls(mf, path)
+        return song
+
+    @classmethod
     def new(cls) -> "Song":
         """Create an empty song with one track at 120 bpm in 4/4.
 
@@ -370,6 +388,40 @@ class Song:
             float: tempo of the first tempo map entry in beats per minute.
         """
         return 60e6 / self.tempoMap[0][1]
+
+    def barTick(self, bar: int) -> int:
+        """The tick a 1-based bar starts on, the inverse of `barBeat`.
+
+        Time signature changes are honoured as `barBeat` honours them: each
+        signature's span holds whole bars of its own length.
+
+        Args:
+            bar: 1-based bar number; 1 and below give tick 0.
+
+        Returns:
+            int: the bar's first tick, past the last signature at its bar
+            length when the bar lies beyond every change.
+        """
+        remaining = max(0, bar - 1)
+        prev_tick = 0
+        num, denom = 4, 4
+
+        # Walk the signatures, spending whole bars of each span; the bar
+        # lies in the first span that has bars left over.
+        for ts_tick, ts_num, ts_denom in self.timeSigs:
+            if ts_tick:
+                barLen = num * (self.mf.division * 4 // denom)
+                span = int((ts_tick - prev_tick) // barLen)
+
+                if remaining < span:
+                    break
+
+                remaining -= span
+
+            prev_tick, num, denom = ts_tick, ts_num, ts_denom
+
+        tick = prev_tick + remaining * num * (self.mf.division * 4 // denom)
+        return tick
 
     def barBeat(self, tick: float) -> tuple[int, int]:
         """Locate a tick as a 1-based (bar, beat) pair.

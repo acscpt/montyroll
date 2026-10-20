@@ -17,13 +17,16 @@ cursor position rather than talking to the running process.
 
 from __future__ import annotations
 
+import os
 import time
 import tkinter as tk
 from bisect import bisect_right
+from dataclasses import replace
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
+from typing import Any
 
-from . import analysis, gm, model, player, reduce, smf
+from . import analysis, arrange, export, gm, model, player, reduce, smf
 
 CHANNEL_COLORS = [
     "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
@@ -37,6 +40,10 @@ DEMAND_H = 90        # initial height of the voice-demand strip under the roll
 DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
+NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
+NO_TIER = "(none)"   # a pool with no tier: plain voices, no chip
+BY_INSTRUMENT = "(by instrument)"   # a pool's sound left to each part's GM program
+X16_TIERS = export.presetTiers(export.TARGETS["zsm"])   # the Commander X16's two chips
 SNAP_CHOICES = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "off"]
 MAX_EVENT_ROWS = 8000
 
@@ -208,6 +215,7 @@ class MidiEditorApp(tk.Tk):
         # notes, and the strip is redrawn through an idle callback so a burst
         # of scroll events costs one redraw.
         self.demand: analysis.Demand | None = None
+        self.songDemand: analysis.Demand | None = None   # the song as written, reduced or not
         self.chords: list[tuple[int, int, str]] | None = None
         self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
 
@@ -222,11 +230,35 @@ class MidiEditorApp(tk.Tk):
         self.legatoVar = tk.IntVar(value=0)
         self.maxChordVar = tk.IntVar(value=0)
         self.priorityVars: dict[int, tk.DoubleVar] = {}
+        self.plan = reduce.Plan()
+        self.editPool: reduce.Pool | None = None        # the pool the panel's controls edit
+        self.poolVar = tk.StringVar()
+        self.poolVoicesVar = tk.IntVar(value=DEMAND_BUDGET)
+        self.poolTierVar = tk.StringVar(value=NO_TIER)
+        self.poolSoundVar = tk.StringVar(value=BY_INSTRUMENT)
+        self.planTargets: dict[str, Any] = {}           # each export target's plan section
+        self.exportRange: dict[str, int] = {}           # start, end and loop bars, those set
+        self.poolVars: dict[int, tk.StringVar] = {}      # per channel: the name of its pool
+        self.releaseVars: dict[int, tk.StringVar] = {}   # per channel: ms, "" for the tier's
+        self.poolCombos: list[ttk.Combobox] = []         # every card's pool picker
+        self.usageLabels: dict[int, tk.Label] = {}       # per channel: the demand figures
+        self.descLabels: dict[int, tk.Label] = {}        # per channel: notes, range, family
+        self.usageText: dict[int, str] = {}              # those figures without the overlap
+        self._overlapAfter: str | None = None
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
+        self.shadeVar = tk.BooleanVar(value=False)       # notes coloured by weight, not velocity
+        self.noteWeights: dict[int, float] | None = None  # id(note) -> weight, cached with the plan
         self.reports: dict[str, str | None] = {"original": None, "reduced": None}
         self._demandAfter: str | None = None
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
+
+        # With one pool the strip's budget and the pool's voices are one
+        # number, whichever control it was typed into.
+        self.budgetVar.trace_add(
+            "write", lambda *a: self._mirrorBudget(self.budgetVar, self.poolVoicesVar))
+        self.poolVoicesVar.trace_add(
+            "write", lambda *a: self._mirrorBudget(self.poolVoicesVar, self.budgetVar))
 
         # The status bar is packed before the body on purpose: tkinter starves
         # the last-packed widget when space runs short, and a bottom bar
@@ -255,6 +287,17 @@ class MidiEditorApp(tk.Tk):
         fm.add_command(label="Save", accelerator="Ctrl+S", command=self.save)
         fm.add_command(label="Save As...", command=self.saveAs)
         fm.add_command(label="Save Reduced As...", command=self.saveReducedAs)
+        fm.add_command(label="Export Range...", command=self.exportRangeDialog)
+
+        for key, target in export.TARGETS.items():
+            fm.add_command(label=f"Export {target.NAME}...",
+                           command=lambda k=key: self.exportTarget(k))
+
+        fm.add_separator()
+        fm.add_command(label="Load Plan...", command=self.loadPlanDialog)
+        fm.add_command(label="Save Plan", command=self.savePlan)
+        fm.add_command(label="Save Plan As...", command=self.savePlanAs)
+        fm.add_command(label="Save Plan Bundle As...", command=self.savePlanBundleAs)
         fm.add_separator()
         fm.add_command(label="Quit", command=self.onClose)
         m.add_cascade(label="File", menu=fm)
@@ -263,6 +306,10 @@ class MidiEditorApp(tk.Tk):
         em.add_command(label="Select All", accelerator="Ctrl+A", command=self.selectAll)
         em.add_command(label="Delete Selection", accelerator="Del", command=self.deleteSelection)
         em.add_command(label="Set Velocity...", command=self.setVelocityDialog)
+        em.add_separator()
+        em.add_command(label="Split Channel into Parts...", command=self.splitChannelDialog)
+        em.add_command(label="Double Channel...", command=self.doubleChannelDialog)
+        em.add_command(label="Echo Channel...", command=self.echoChannelDialog)
         em.add_separator()
         em.add_command(label="Set Tempo at Bar...", command=self.setTempoDialog)
         em.add_command(label="Scale All Tempos...", command=self.scaleTemposDialog)
@@ -677,6 +724,12 @@ class MidiEditorApp(tk.Tk):
 
         self._refreshAll()
 
+        # A plan saved beside the file comes back with it.
+        sidecar = reduce.sidecarPath(path)
+
+        if os.path.exists(sidecar):
+            self._loadPlanFile(sidecar, withSong=False)
+
     def save(self):
         """Save to the song's own path, or go through Save As when it has none."""
         if not self.song.path:
@@ -732,12 +785,27 @@ class MidiEditorApp(tk.Tk):
         self.player.stop()
         self.playStart = None
         self.demand = None
+        self.songDemand = None
         self.chords = None
         self.reduction = None
+        self.noteWeights = None
         self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
         self.priorityVars.clear()
+        self.poolVars.clear()
+        self.releaseVars.clear()
+        self.poolCombos.clear()
+        self.usageLabels.clear()
+        self.usageText.clear()
+        self.descLabels.clear()
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
+
+        # A fresh song starts with one pool of every channel; a sidecar, if
+        # there is one, replaces it once the cards exist.
+        self.plan = self._defaultPlan()
+        self.editPool = self.plan.pools[0]
+        self.planTargets = {}
+        self.exportRange = {}
 
         # Selection and mute/solo variables refer to the old song's notes and
         # channels; _buildChannelRows recreates the variables.
@@ -751,6 +819,7 @@ class MidiEditorApp(tk.Tk):
         self.activeChannel = chans[0] if chans else 0
         self.originalPrograms = {ch: info.program for ch, info in self.song.channels.items()}
         self._buildChannelRows()
+        self._loadPoolControls()
         self.redraw()
         self._fillEvents()
         self._updateTitle()
@@ -804,7 +873,8 @@ class MidiEditorApp(tk.Tk):
             w.destroy()
 
         self.channelRows.clear()
-        figures = analysis.channelDemand(self._ensureDemand())
+        figures = analysis.channelDemand(self._ensureSongDemand())
+        scaling = float(self.tk.call("tk", "scaling"))   # the figures line wraps at high DPI
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
@@ -886,7 +956,7 @@ class MidiEditorApp(tk.Tk):
             if info.hasPitchBend:
                 desc += " | bends"
 
-            dl = tk.Label(bottom, text=desc, anchor="w",
+            self.descLabels[ch] = dl = tk.Label(bottom, text=desc, anchor="w",
                           font=("TkDefaultFont", 8))
             dl.pack(side="left", padx=(8, 0))
             Tooltip(dl, "Note count, pitch range, GM instrument family")
@@ -899,19 +969,51 @@ class MidiEditorApp(tk.Tk):
                 usage = (f"peak {figure.peak} | mean {figure.mean:.1f} | "
                          f"plays {figure.fraction:.0%}")
                 ul = tk.Label(row, text=usage, anchor="w", font=("TkDefaultFont", 8),
-                              fg="#555")
-                ul.pack(side="left", padx=(22, 0))
+                              fg="#555", justify="left", wraplength=int(290 * scaling))
+                ul.pack(anchor="w", padx=(22, 0))
+                self.usageLabels[ch] = ul
+                self.usageText[ch] = usage
+                Tooltip(ul, "Voice demand: most notes at once, average while\n"
+                            "sounding, how much of the piece the channel plays,\n"
+                            "and how much of its playing time the pool being\n"
+                            "edited already sounds (low: it could share that pool)")
 
-                # Priority: how hard the reduction tries to keep this channel.
-                var = self.priorityVars.setdefault(ch, tk.DoubleVar(value=1.0))
-                pr = ttk.Spinbox(row, from_=0.5, to=5.0, increment=0.5, width=4,
+                # Reduction: the pool the channel belongs to, its own release
+                # (blank for the tier's) and its priority.
+                prow = tk.Frame(row)
+                prow.pack(fill="x", padx=(20, 0))
+                tk.Label(prow, text="Pool", font=("TkDefaultFont", 8)).pack(side="left")
+                pv = self.poolVars.setdefault(ch, tk.StringVar(value=self._poolNameOf(ch)))
+                pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=8,
+                                  values=self._poolNames())
+                pc.pack(side="left", padx=(2, 6))
+                pc.bind("<<ComboboxSelected>>", lambda e, c=ch: self._channelPoolChanged(c))
+                self.poolCombos.append(pc)
+                Tooltip(pc, "The pool this channel's notes are reduced in;\n"
+                            "(none) leaves the channel out of the reduction")
+                tk.Label(prow, text="Rel", font=("TkDefaultFont", 8)).pack(side="left")
+                release = f"{self.plan.release[ch]:g}" if ch in self.plan.release else ""
+                rv = self.releaseVars.setdefault(ch, tk.StringVar(value=release))
+                rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=5,
+                                 textvariable=rv,
+                                 command=lambda c=ch: self._channelReleaseChanged(c))
+                rs.pack(side="left", padx=(2, 6))
+                rs.bind("<KeyRelease>", lambda e, c=ch: self._channelReleaseChanged(c))
+                Tooltip(rs, "Release in milliseconds: how long a voice stays busy\n"
+                            "after this channel's notes end; blank uses the tier's")
+                tk.Label(prow, text="Pri", font=("TkDefaultFont", 8)).pack(side="left")
+                var = self.priorityVars.setdefault(
+                    ch, tk.DoubleVar(value=self.plan.priorityOf(ch)))
+                pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=4,
                                  textvariable=var, command=self._reductionChanged)
-                pr.pack(side="right", padx=(0, 6))
+                pr.pack(side="left", padx=(2, 0))
                 pr.bind("<KeyRelease>", lambda e: self._reductionChanged())
                 Tooltip(pr, "Reduction priority: 1 is neutral, higher keeps\n"
                             "this channel's notes at the expense of others")
-                Tooltip(ul, "Voice demand: most notes at once, average while\n"
-                            "sounding, and how much of the piece the channel plays")
+                prow.bind("<Button-1>", lambda e, c=ch: self._setActiveChannel(c))
+
+                for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+                    prow.bind(seq, self._onChanWheel)
 
             # A click on any part of the card makes it the active channel,
             # and the wheel scrolls the strip from the card too: X11 delivers
@@ -1117,6 +1219,22 @@ class MidiEditorApp(tk.Tk):
         """
         program = int(var.get().split()[0])
         self.song.setProgram(ch, program)
+
+        # The card's summary line carries the instrument family, which the
+        # new program may have changed.
+        label = self.descLabels.get(ch)
+
+        if label is not None:
+            info = self.song.channels[ch]
+            desc = (f"{info.noteCount} notes | "
+                    f"{gm.noteName(info.lo)}-{gm.noteName(info.hi)} | "
+                    f"{gm.familyName(program)}")
+
+            if info.hasPitchBend:
+                desc += " | bends"
+
+            label.config(text=desc)
+
         self._markDirty()
         self._invalidateReducedSong()
         self._setStatus(f"Ch {ch + 1} {ARROW} {gm.programName(program)}")
@@ -1253,16 +1371,24 @@ class MidiEditorApp(tk.Tk):
             for placed in reduction.placed:
                 segments.setdefault(id(placed.note), []).append(placed)
 
+        # Shading by weight scales to the heaviest note in the song, so a
+        # priority raised on one channel brightens it and dims the rest.
+        weights = self._ensureWeights() if self.shadeVar.get() else None
+        heaviest = max(weights.values(), default=1.0) if weights else 1.0
+
         for note in s.notes:
             y1 = (127 - note.pitch) * self.rowH + 1
             y2 = y1 + self.rowH - 2
             base = CHANNEL_COLORS[note.channel]
 
-            if note.channel in audible:
-                fill = _shade(base, 0.65 + 0.35 * note.velocity / 127)
+            if note.channel not in audible:
+                fill, outline = "#3a3a40", "#2c2c31"
+            elif weights is not None:
+                fill = _shade(base, 0.3 + 0.7 * weights[id(note)] / heaviest)
                 outline = _shade(base, 0.45)
             else:
-                fill, outline = "#3a3a40", "#2c2c31"
+                fill = _shade(base, 0.65 + 0.35 * note.velocity / 127)
+                outline = _shade(base, 0.45)
 
             # With the reduction on, a note is drawn as the segments that
             # sound, over a stippled ghost of its original extent wherever
@@ -1484,17 +1610,36 @@ class MidiEditorApp(tk.Tk):
         """
         if self.demand is None:
             if self.reduceVar.get():
-                self.demand = analysis.sweep(self.song, self._ensureReduction().placed)
+                # Occupancy rather than sound: a voice is busy until its
+                # release has died away.
+                placed = self._ensureReduction().placed
+                spans = [replace(p, end=p.free) if p.release else p for p in placed]
+                self.demand = analysis.sweep(self.song, spans)
             else:
-                self.demand = analysis.sweep(self.song)
+                self.demand = self._ensureSongDemand()
 
         return self.demand
+
+    def _ensureSongDemand(self) -> analysis.Demand:
+        """Return the sweep of the song as written, reduced or not, rebuilding it if needed.
+
+        Returns:
+            analysis.Demand: the sweep the cards' figures and the pool
+            overlap come from.
+        """
+        if self.songDemand is None:
+            self.songDemand = analysis.sweep(self.song)
+
+        return self.songDemand
 
     def _invalidateDemand(self):
         """Forget the sweep, the chords, the reduction and the report after an edit."""
         self.demand = None
+        self.songDemand = None
+        self._scheduleOverlap()
         self.chords = None
         self.reduction = None
+        self.noteWeights = None
         self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
         self._scheduleDemand()
@@ -1528,11 +1673,13 @@ class MidiEditorApp(tk.Tk):
                 self.reports[key] = ("Reduction is off. Tick 'Reduce to the voice budget' in "
                                      "the Reduce panel for a report on the reduced song.\n")
             else:
+                reduction = self._ensureReduction()
                 reduced = self._ensureReducedSong()
                 reduced.path = self.song.path
-                voices = self._ensureReduction().voicesUsed
                 text = analysis.report(reduced, names)
-                self.reports[key] = text.replace("\n", f" (reduced to {voices} voices)\n", 1)
+                head = (f" (reduced to {reduction.voicesUsed} voices)\n"
+                        f"{self._lossText(reduction)}\n")
+                self.reports[key] = text.replace("\n", head, 1)
 
         return self.reports[key]
 
@@ -1652,10 +1799,11 @@ class MidiEditorApp(tk.Tk):
         """Draw the voice-demand strip for the visible part of the roll.
 
         Per column the channels' counts are stacked in the roll's colours,
-        the distinct-pitch and pitch-class counts are drawn as lines over
-        the stack, and the budget is a horizontal line. The vertical scale
-        is whichever is larger of the piece's peak and the budget, so the
-        budget line always fits.
+        ordered by tier and pool so a tier's channels sit together, the
+        distinct-pitch and pitch-class counts are drawn as lines over the
+        stack, and the budget is a horizontal line: with tiers, one at each
+        tier's cumulative voices as well. The vertical scale is whichever is
+        larger of the piece's peak and the budget, so the lines always fit.
         """
         self._demandAfter = None
         c = self.demandCanvas
@@ -1666,25 +1814,29 @@ class MidiEditorApp(tk.Tk):
         if width < 2 or height < 2 or not self.song.notes:
             return
 
-        # The budget cannot usefully exceed the piece's peak, so the spinbox
-        # stops there and the scale is always the peak.
+        # With one pool the budget cannot usefully exceed the piece's peak,
+        # so the spinbox stops there; with several pools the budget is what
+        # they add up to and the spinbox only displays it.
         demand = self._ensureDemand()
         peak = max(demand.peak, 1)
-        self.budgetSpin.configure(to=peak)
+        single = len(self.plan.pools) == 1
+        self.budgetSpin.configure(to=peak if single else 64,
+                                  state="normal" if single else "disabled")
 
-        if self.budgetVar.get() > peak:
+        if single and self.budgetVar.get() > peak:
             self.budgetVar.set(peak)
 
-        budget = max(1, self.budgetVar.get())
-        top = peak
+        self._storePoolControls()
+        budget = max(1, self._totalVoices())
+        top = max(peak, budget)
         scale = (height - 6) / top
         base = height - 2
-        channels = sorted(demand.channels)
+        channels = self._stackOrder(demand.channels)
         runs = self._demandColumns(width)
 
-        # Stacked channel fills, bottom-up in channel order so the same
-        # channel always sits at the same level of the stack. Whatever rises
-        # above the budget is washed red: that is what would have to go.
+        # Stacked channel fills, bottom-up in stack order so the same channel
+        # always sits at the same level. Whatever rises above the budget is
+        # washed red: that is what would have to go.
         yBudget = base - budget * scale
 
         for xa, xb, _, _, perChannel in runs:
@@ -1714,11 +1866,14 @@ class MidiEditorApp(tk.Tk):
             if len(points) >= 4:
                 c.create_line(*points, fill=colour, width=1)
 
-        # Budget line and scale labels.
-        c.create_line(0, yBudget, width, yBudget, fill="#ff5050", dash=(4, 3))
+        # Budget lines, each labelled, and the scale at the top.
+        for label, level in self._budgetLevels():
+            y = base - level * scale
+            c.create_line(0, y, width, y, fill="#ff5050", dash=(4, 3))
+            c.create_text(width - 3, y, text=label, anchor="e", fill="#ff5050",
+                          font=("TkDefaultFont", 7))
+
         c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
-                      font=("TkDefaultFont", 7))
-        c.create_text(width - 3, yBudget, text=str(budget), anchor="e", fill="#ff5050",
                       font=("TkDefaultFont", 7))
 
     def _onDemandMotion(self, event):
@@ -1741,10 +1896,20 @@ class MidiEditorApp(tk.Tk):
         secs = self.song.tickToSeconds(tick)
         busiest = ", ".join(f"ch {ch + 1}: {n}" for ch, n in sorted(perChannel.items(),
                                                                    key=lambda kv: -kv[1])[:4])
-        over = raw - max(1, self.budgetVar.get())
+        over = raw - max(1, self._totalVoices())
         excess = f"   over by {over}" if over > 0 else ""
+
+        # With tiers, each tier's count against its own budget.
+        parts: list[str] = []
+
+        for tier in self.plan.tiers:
+            pools = [p for p in self.plan.pools if p.tier == tier.name]
+            count = sum(perChannel.get(ch, 0) for p in pools for ch in p.channels)
+            parts.append(f"{tier.name} {count}/{sum(p.voices for p in pools)}")
+
+        tiers = "   " + " ".join(parts) if parts else ""
         self._setStatus(f"bar {bar}:{beat}  {secs:6.2f}s   voices {raw} | pitches {pitches} "
-                        f"| classes {classes}{excess}   {busiest}")
+                        f"| classes {classes}{excess}{tiers}   {busiest}")
 
     # ----------------------------------------------------------- reduction
     def _buildReducePanel(self, parent: ttk.Frame):
@@ -1762,8 +1927,72 @@ class MidiEditorApp(tk.Tk):
         cb.pack(side="left")
         Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
                     "Dropped notes are stippled; the file is not changed.")
-        self.lossLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8))
+        sh = ttk.Checkbutton(top, text="Shade by weight", variable=self.shadeVar,
+                             command=self.redraw)
+        sh.pack(side="right")
+        Tooltip(sh, "Colour notes by their reduction weight instead of\n"
+                    "velocity: the brighter a note, the harder the\n"
+                    "reduction tries to keep it")
+        self.lossLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8), wraplength=320,
+                                 justify="left")
         self.lossLbl.pack(fill="x", pady=(2, 0))
+
+        # The pool the controls below edit: pick it, rename it with Return,
+        # add or remove one, and open the tiers.
+        pools = ttk.Frame(panel)
+        pools.pack(fill="x", pady=(2, 0))
+        ttk.Label(pools, text="Pool", font=("TkDefaultFont", 8)).pack(side="left")
+        self.poolCombo = ttk.Combobox(pools, textvariable=self.poolVar, width=10)
+        self.poolCombo.pack(side="left", padx=(2, 4))
+        self.poolCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSelected())
+        self.poolCombo.bind("<Return>", lambda e: self._renamePool())
+        Tooltip(self.poolCombo, "The pool the controls below edit. Type a new name\n"
+                                "and press Return to rename it; channels join a\n"
+                                "pool on their cards")
+        b = ttk.Button(pools, text="Tiers...", width=7, command=self.tiersDialog)
+        b.pack(side="right")
+        Tooltip(b, "The chips the pools' voices come from: channels,\n"
+                   "how many are reserved for effects, and the release\n"
+                   "their patches need")
+        b = ttk.Button(pools, text="-", width=2, command=self.removePool)
+        b.pack(side="right", padx=(2, 2))
+        Tooltip(b, "Remove this pool; its channels leave the reduction\n"
+                   "until they are given another")
+        b = ttk.Button(pools, text="+", width=2, command=self.addPool)
+        b.pack(side="right")
+        Tooltip(b, "Add a pool")
+
+        # The edited pool's voices and tier.
+        budget = ttk.Frame(panel)
+        budget.pack(fill="x", pady=(2, 0))
+        ttk.Label(budget, text="Voices", font=("TkDefaultFont", 8)).pack(side="left")
+        sp = ttk.Spinbox(budget, from_=0, to=64, width=3, textvariable=self.poolVoicesVar,
+                         command=self._reductionChanged)
+        sp.pack(side="left", padx=(2, 8))
+        sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
+        Tooltip(sp, "Voices this pool owns; the strip's budget is every\n"
+                    "pool's voices added up")
+        ttk.Label(budget, text="Tier", font=("TkDefaultFont", 8)).pack(side="left")
+        self.tierCombo = ttk.Combobox(budget, textvariable=self.poolTierVar, state="readonly",
+                                      width=7)
+        self.tierCombo.pack(side="left", padx=(2, 0))
+        self.tierCombo.bind("<<ComboboxSelected>>", lambda e: self._reductionChanged())
+        Tooltip(self.tierCombo, "The chip this pool's voices come from")
+        ttk.Label(budget, text="Sound", font=("TkDefaultFont", 8)).pack(side="left", padx=(8, 0))
+        self.soundCombo = ttk.Combobox(budget, textvariable=self.poolSoundVar, state="readonly",
+                                       width=11)
+        self.soundCombo.pack(side="left", padx=(2, 0))
+        self.soundCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSoundChanged())
+        Tooltip(self.soundCombo, "The sound this pool's voices play on export: a patch\n"
+                                 "or waveform from the target's library, or one chosen\n"
+                                 "for each part from its GM instrument")
+
+        # How much the edited pool's channels play at the same time: low is
+        # what makes sharing its voices work.
+        self.overlapLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8),
+                                    foreground="#555")
+        self.overlapLbl.pack(fill="x")
+        self.overlapTip = Tooltip(self.overlapLbl, "")
 
         # Transform switches, each one a pool setting.
         switches = ttk.Frame(panel)
@@ -1799,36 +2028,57 @@ class MidiEditorApp(tk.Tk):
             Tooltip(sp, tip)
 
     def _currentPlan(self) -> reduce.Plan:
-        """Build the plan from the controls: one pool of every channel with notes.
+        """The plan as the controls have it.
+
+        The edited pool's switches are stored and the priorities read from
+        the cards; pools, tiers and releases are kept up to date as they
+        change.
 
         Returns:
             reduce.Plan: the plan.
         """
-        plan = reduce.Plan.single(self.song, max(1, self.budgetVar.get()),
-                                  dedupUnison=self.dedupUnisonVar.get(),
-                                  dedupOctave=self.dedupOctaveVar.get(),
-                                  tremoloGap=max(0, self.tremoloVar.get()),
-                                  legatoGap=max(0, self.legatoVar.get()),
-                                  monoTop=self.monoTopVar.get(),
-                                  maxChord=max(0, self.maxChordVar.get()))
+        self._storePoolControls()
 
         for ch, var in self.priorityVars.items():
-            plan.priority[ch] = max(0.1, var.get())
+            try:
+                self.plan.priority[ch] = max(0.1, var.get())
+            except tk.TclError:
+                pass                    # half-typed number
 
-        return plan
+        return self.plan
 
     def _ensureReduction(self) -> reduce.Reduction:
         """Return the reduction for the current plan, computing it if needed.
+
+        A plan whose pools no longer fit their tiers is refused by the
+        reducer; that is shown on the panel label and nothing is placed.
 
         Returns:
             reduce.Reduction: the result.
         """
         if self.reduction is None:
-            self.reduction = reduce.reduce(self.song, self._currentPlan())
+            try:
+                self.reduction = reduce.reduce(self.song, self._currentPlan())
+            except ValueError as exc:
+                self.reduction = reduce.Reduction()
+                self.lossLbl.config(text=f"plan refused: {exc}")
+            else:
+                self._showLoss(self.reduction)
+
             self.reducedSong = None
-            self._showLoss(self.reduction)
 
         return self.reduction
+
+    def _ensureWeights(self) -> dict[int, float]:
+        """Return every note's reduction weight under the current plan, computing it if needed.
+
+        Returns:
+            dict[int, float]: keyed by `id(note)`.
+        """
+        if self.noteWeights is None:
+            self.noteWeights = reduce.weights(self.song, self._currentPlan())
+
+        return self.noteWeights
 
     def _invalidateReducedSong(self):
         """Discard the playable copy of the reduction after a channel event edit.
@@ -1851,14 +2101,27 @@ class MidiEditorApp(tk.Tk):
 
         return self.reducedSong
 
+    def _lossText(self, reduction: reduce.Reduction) -> str:
+        """Sum up a reduction in one line: kept, cut, clipped and the loss.
+
+        Args:
+            reduction: the result to describe.
+
+        Returns:
+            str: the line.
+        """
+        total = len(self.song.notes)
+        dropped = len(reduction.dropped)
+        text = (f"kept {total - dropped} of {total} notes, {len(reduction.cut)} cut, "
+                f"{len(reduction.clipped)} tails clipped, loss {reduction.loss:,.0f}")
+        return text
+
     def _showLoss(self, reduction: reduce.Reduction):
-        """Put the reduction's totals on the panel label.
+        """Put the reduction's totals and its drops by reason on the panel label.
 
         Args:
             reduction: the result to describe.
         """
-        total = len(self.song.notes)
-        dropped = len(reduction.dropped)
         reasons: dict[str, int] = {}
 
         for reason in reduction.dropped.values():
@@ -1866,17 +2129,22 @@ class MidiEditorApp(tk.Tk):
 
         detail = ", ".join(f"{n} {reason}" for reason, n in sorted(reasons.items(),
                                                                    key=lambda kv: -kv[1]))
-        self.lossLbl.config(text=(f"kept {total - dropped} of {total} notes, {len(reduction.cut)}"
-                                  f" cut, loss {reduction.loss:,.0f}\n{detail}"))
+        self.lossLbl.config(text=f"{self._lossText(reduction)}\n{detail}")
 
     def _reductionChanged(self):
-        """A reduction control changed: recompute and redraw what depends on it."""
+        """A reduction control changed: store it, recompute and redraw what depends on it."""
+        self._storePoolControls()
+
+        if len(self.plan.pools) != 1:
+            self.budgetVar.set(self._totalVoices())
+
         self.reduction = None
+        self.noteWeights = None
         self.reducedSong = None
         self.demand = None
         self.reports["reduced"] = None
 
-        if self.reduceVar.get():
+        if self.reduceVar.get() or self.shadeVar.get():
             self.redraw()
         else:
             self.lossLbl.config(text="")
@@ -1896,6 +2164,788 @@ class MidiEditorApp(tk.Tk):
         if path:
             smf.write(reduce.toMidiFile(self.song, self._ensureReduction()), path)
             self._setStatus(f"Saved reduced song to {path}")
+
+    def exportTarget(self, key: str):
+        """Write the reduction as a file for one export target.
+
+        The plan's pools must sit on tiers with a chip of the target;
+        otherwise the export is refused with the reason. The toolbar's
+        master volume is the export's level. The written file is verified
+        by the target, and the status bar reports its description and any
+        problems found.
+
+        Args:
+            key: the target's key in `export.TARGETS`.
+        """
+        target = export.TARGETS[key]
+        plan = self._currentPlan()
+        master = self.masterVar.get() / 100
+        bars = self.exportRange
+        start = self.song.barTick(bars["start"]) if "start" in bars else 0
+        end = self.song.barTick(bars["end"] + 1) if "end" in bars else None
+        loop = self.song.barTick(bars["loop"]) if "loop" in bars else None
+
+        try:
+            plan.validate()
+            reduction = self._ensureReduction()
+            data = target.export(self.song, reduction, plan, start=start, end=end, loop=loop,
+                                 master=master, settings=self.planTargets.get(key, {}))
+        except ValueError as exc:
+            messagebox.showerror(f"Export {target.NAME}",
+                                 f"{exc}\n\nGive every pool a tier with a chip of this target "
+                                 f"(Tiers... on the Reduce panel has a preset for it).")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title=f"Export {target.NAME}", defaultextension=target.SUFFIX,
+            filetypes=[(f"{target.NAME} files", f"*{target.SUFFIX}"), ("All files", "*")])
+
+        if not path:
+            return
+
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError as exc:
+            messagebox.showerror("Export failed", f"{path}\n\n{exc}")
+            return
+
+        # The written bytes go back through the target's own checks
+        # before the file is called good.
+        problems = target.verify(data, plan)
+        level = f" at {self.masterVar.get()}% level" if master < 1 else ""
+        span = (f", bars {bars.get('start', 1)} to {bars.get('end', 'the end')}"
+                + (f" looping to {bars['loop']}" if "loop" in bars else "")) if bars else ""
+        summary = (f"Exported {path}: {target.describe(data, plan)}, "
+                   f"{len(reduction.placed)} notes{level}{span}")
+
+        if problems:
+            messagebox.showwarning(f"Export {target.NAME}",
+                                   f"{summary}\n\n{len(problems)} problems:\n"
+                                   + "\n".join(problems[:12]))
+            self._setStatus(f"{summary}, {len(problems)} problems")
+        else:
+            self._setStatus(f"{summary}, no problems")
+
+    def exportRangeDialog(self):
+        """Ask for the export's bars: a start, an end and a loop, each optional.
+
+        Blank means the start of the song, its end, and no loop. The bars
+        are kept with the plan and used by every export.
+        """
+        dlg = tk.Toplevel(self)
+        dlg.title("Export range")
+        dlg.transient(self)
+        grid = ttk.Frame(dlg, padding=8)
+        grid.pack(fill="both", expand=True)
+        last = self.song.barBeat(self.song.maxTick)[0]
+        fields = (("start", "Start bar", "the song's start"), ("end", "End bar", "the song's end"),
+                  ("loop", "Loop back to bar", "no loop"))
+        entries: dict[str, tk.StringVar] = {}
+
+        for row, (key, label, blank) in enumerate(fields):
+            ttk.Label(grid, text=label).grid(row=row, column=0, sticky="w", padx=3, pady=2)
+            var = tk.StringVar(value=str(self.exportRange[key]) if key in self.exportRange else "")
+            ttk.Entry(grid, textvariable=var, width=6).grid(row=row, column=1, padx=3, pady=2)
+            ttk.Label(grid, text=f"blank for {blank}; 1 to {last}").grid(row=row, column=2,
+                                                                          sticky="w", padx=3)
+            entries[key] = var
+
+        def ok():
+            """Read the bars back and keep them, or say what is wrong."""
+            problem = self._applyExportRange({k: v.get() for k, v in entries.items()})
+
+            if problem:
+                messagebox.showerror("Export range", problem, parent=dlg)
+                return
+
+            dlg.destroy()
+
+        buttons = ttk.Frame(dlg, padding=(8, 0, 8, 8))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Cancel", command=dlg.destroy).pack(side="right")
+        ttk.Button(buttons, text="OK", command=ok).pack(side="right", padx=(0, 4))
+        dlg.grab_set()
+
+    def _applyExportRange(self, texts: dict[str, str]) -> str | None:
+        """Set the export's bars from the dialog's text.
+
+        Args:
+            texts: "start", "end" and "loop" as typed, blank for unset.
+
+        Returns:
+            str | None: what is wrong, or None once the bars are kept.
+        """
+        bars: dict[str, int] = {}
+
+        for key, text in texts.items():
+            if text.strip():
+                try:
+                    bars[key] = int(text)
+                except ValueError:
+                    problem = f"{key}: {text!r} is not a bar number"
+                    return problem
+
+                if bars[key] < 1:
+                    problem = f"{key}: bars are counted from 1"
+                    return problem
+
+        if "start" in bars and "end" in bars and bars["end"] < bars["start"]:
+            problem = "the end bar is before the start bar"
+            return problem
+
+        if "loop" in bars and (bars["loop"] < bars.get("start", 1)
+                               or ("end" in bars and bars["loop"] > bars["end"])):
+            problem = "the loop bar is outside the range"
+            return problem
+
+        self.exportRange = bars
+        return None
+
+    # ----------------------------------------------------------------- plan
+    def _defaultPlan(self) -> reduce.Plan:
+        """One pool of every channel with notes, at the strip's budget.
+
+        The pool takes the panel's switches, so they carry over from file
+        to file.
+
+        Returns:
+            reduce.Plan: the plan a file starts with when it has no sidecar.
+        """
+        plan = reduce.Plan.single(self.song, max(1, self.budgetVar.get()),
+                                  dedupUnison=self.dedupUnisonVar.get(),
+                                  dedupOctave=self.dedupOctaveVar.get(),
+                                  tremoloGap=max(0, self.tremoloVar.get()),
+                                  legatoGap=max(0, self.legatoVar.get()),
+                                  monoTop=self.monoTopVar.get(),
+                                  maxChord=max(0, self.maxChordVar.get()))
+        return plan
+
+    def _mirrorBudget(self, source: tk.IntVar, target: tk.IntVar):
+        """Keep the strip's budget and the pool's voices equal while there is one pool.
+
+        Args:
+            source: the variable that changed.
+            target: the one to follow it.
+        """
+        if len(self.plan.pools) != 1:
+            return
+
+        try:
+            value = source.get()
+        except tk.TclError:
+            return                      # half-typed number
+
+        try:
+            same = target.get() == value
+        except tk.TclError:
+            same = False
+
+        if not same:
+            target.set(value)
+
+    def _totalVoices(self) -> int:
+        """The plan's budget: every pool's voices added up.
+
+        Returns:
+            int: the total.
+        """
+        total = sum(p.voices for p in self.plan.pools)
+        return total
+
+    def _poolNames(self) -> list[str]:
+        """The pool names a card can choose from, with "(none)" last.
+
+        Returns:
+            list[str]: the names.
+        """
+        names = [p.name for p in self.plan.pools] + [NO_POOL]
+        return names
+
+    def _poolNameOf(self, ch: int) -> str:
+        """Name the pool a channel belongs to.
+
+        Args:
+            ch: 0-based channel.
+
+        Returns:
+            str: the pool's name, or "(none)".
+        """
+        name = next((p.name for p in self.plan.pools if ch in p.channels), NO_POOL)
+        return name
+
+    def _stackOrder(self, channels: dict[int, list[int]]) -> list[int]:
+        """Order channels for the strip's stack: by tier, then pool, then number.
+
+        Args:
+            channels: the demand's per-channel table.
+
+        Returns:
+            list[int]: the channels, those in no pool last.
+        """
+        tierIndex = {t.name: i for i, t in enumerate(self.plan.tiers)}
+        rank: dict[int, tuple[int, int]] = {}
+
+        for pi, p in enumerate(self.plan.pools):
+            for ch in p.channels:
+                rank[ch] = (tierIndex.get(p.tier, len(tierIndex)), pi)
+
+        last = (len(tierIndex) + 1, len(self.plan.pools))
+        order = sorted(channels, key=lambda ch: (rank.get(ch, last), ch))
+        return order
+
+    def _budgetLevels(self) -> list[tuple[str, int]]:
+        """The strip's budget lines.
+
+        Returns:
+            list[tuple[str, int]]: (label, voices) per line: one per tier
+            with voices, at its cumulative total and named after it, then
+            the plan's total when that differs.
+        """
+        levels: list[tuple[str, int]] = []
+        running = 0
+
+        for tier in self.plan.tiers:
+            voices = sum(p.voices for p in self.plan.pools if p.tier == tier.name)
+
+            if voices:
+                running += voices
+                levels.append((f"{tier.name} {running}", running))
+
+        total = self._totalVoices()
+
+        if not levels or total != running:
+            levels.append((str(total), total))
+
+        return levels
+
+    def _refreshPoolLists(self):
+        """Put the current pool and tier names into every box that lists them."""
+        self.poolCombo.configure(values=[p.name for p in self.plan.pools])
+        names = self._poolNames()
+
+        for combo in self.poolCombos:
+            combo.configure(values=names)
+
+        self.tierCombo.configure(values=[NO_TIER] + [t.name for t in self.plan.tiers])
+
+    def _syncCardsToPlan(self):
+        """Show the plan's pool, priority and release on every channel card."""
+        self._refreshPoolLists()
+
+        for ch, var in self.poolVars.items():
+            var.set(self._poolNameOf(ch))
+
+        for ch, var in self.priorityVars.items():
+            var.set(self.plan.priorityOf(ch))
+
+        for ch, var in self.releaseVars.items():
+            var.set(f"{self.plan.release[ch]:g}" if ch in self.plan.release else "")
+
+    def _loadPoolControls(self):
+        """Show the edited pool's voices, tier and transforms in the panel."""
+        self._refreshPoolLists()
+
+        if self.editPool not in self.plan.pools:
+            self.editPool = self.plan.pools[0] if self.plan.pools else None
+
+        pool = self.editPool
+
+        if pool is None:
+            self.poolVar.set("")
+            return
+
+        self.poolVar.set(pool.name)
+        self.poolVoicesVar.set(pool.voices)
+        self.poolTierVar.set(pool.tier or NO_TIER)
+        self._loadSoundBox(pool)
+        self.dedupUnisonVar.set(pool.dedupUnison)
+        self.dedupOctaveVar.set(pool.dedupOctave)
+        self.monoTopVar.set(pool.monoTop)
+        self.tremoloVar.set(pool.tremoloGap)
+        self.legatoVar.set(pool.legatoGap)
+        self.maxChordVar.set(pool.maxChord)
+        self._refreshOverlap()
+
+    def _scheduleOverlap(self):
+        """Refresh the overlap figures once the current burst of edits is over."""
+        if self._overlapAfter is None:
+            self._overlapAfter = self.after_idle(self._refreshOverlap)
+
+    def _refreshOverlap(self):
+        """Show how much the edited pool's channels coincide, on its label and every card.
+
+        A card's figure is the share of that channel's playing time during
+        which the rest of the edited pool already sounds, so a low figure
+        marks a channel that could share the pool's voices; the panel's line
+        is the worst of the pool's own members.
+        """
+        self._overlapAfter = None
+        pool = self.editPool
+
+        if pool is None or not self.song.notes:
+            self.overlapLbl.config(text="")
+            self.overlapTip.text = ""
+
+            for ch, lbl in self.usageLabels.items():
+                lbl.config(text=self.usageText[ch])
+
+            return
+
+        shares = analysis.poolOverlap(self._ensureSongDemand(), pool.channels)
+
+        for ch, lbl in self.usageLabels.items():
+            lbl.config(text=f"{self.usageText[ch]} | overlaps {pool.name} {shares.get(ch, 0):.0%}")
+
+        members = [ch for ch in pool.channels if ch in shares]
+
+        if len(members) < 2:
+            text = f"{pool.name}: {'one channel' if members else 'no channels'}"
+            self.overlapTip.text = "A pool of one channel has nothing to share"
+        else:
+            worst = max(shares[ch] for ch in members)
+            text = f"{pool.name}: its channels overlap {worst:.0%} at most"
+            lines = "\n".join(f"ch {ch + 1}: {shares[ch]:.0%}" for ch in members)
+            self.overlapTip.text = ("Share of each channel's playing time during which\n"
+                                    "the rest of the pool already sounds:\n" + lines)
+
+        self.overlapLbl.config(text=text)
+
+    def _targetFor(self, pool: reduce.Pool) -> str | None:
+        """The export target whose chip a pool's tier names.
+
+        Args:
+            pool: the pool.
+
+        Returns:
+            str | None: the target's key, or None when the pool has no chip.
+        """
+        tier = self.plan.tierOf(pool.tier)
+        chip = tier.chip if tier is not None else ""
+        key = next((k for k, t in export.TARGETS.items()
+                    if any(c.name == chip for c in t.CHIPS)), None) if chip else None
+        return key
+
+    def _loadSoundBox(self, pool: reduce.Pool):
+        """Fill the Sound box with a pool's target's sounds and show its choice.
+
+        Args:
+            pool: the edited pool.
+        """
+        key = self._targetFor(pool)
+
+        if key is None:
+            self.soundCombo.configure(values=[BY_INSTRUMENT], state="disabled")
+            self.poolSoundVar.set(BY_INSTRUMENT)
+            return
+
+        names = [BY_INSTRUMENT] + list(export.TARGETS[key].SOUNDS)
+        chosen = self.planTargets.get(key, {}).get("sounds", {}).get(pool.name, BY_INSTRUMENT)
+        self.soundCombo.configure(values=names, state="readonly")
+        self.poolSoundVar.set(chosen if chosen in names else BY_INSTRUMENT)
+
+    def _poolSoundChanged(self):
+        """The Sound box chose: record it for the pool in its target's section."""
+        pool = self.editPool
+        key = self._targetFor(pool) if pool is not None else None
+
+        if key is None:
+            return
+
+        sounds = self.planTargets.setdefault(key, {}).setdefault("sounds", {})
+        name = self.poolSoundVar.get()
+
+        if name == BY_INSTRUMENT:
+            sounds.pop(pool.name, None)
+        else:
+            sounds[pool.name] = name
+
+    def _storePoolControls(self):
+        """Write the panel's controls into the edited pool.
+
+        A control mid-edit (an emptied spinbox) is skipped rather than
+        clearing the pool's value.
+        """
+        pool = self.editPool
+
+        if pool is None:
+            return
+
+        tier = self.poolTierVar.get()
+
+        if pool.tier != ("" if tier == NO_TIER else tier):
+            pool.tier = "" if tier == NO_TIER else tier
+            self._loadSoundBox(pool)
+
+        pool.dedupUnison = self.dedupUnisonVar.get()
+        pool.dedupOctave = self.dedupOctaveVar.get()
+        pool.monoTop = self.monoTopVar.get()
+
+        for var, name in ((self.poolVoicesVar, "voices"), (self.tremoloVar, "tremoloGap"),
+                          (self.legatoVar, "legatoGap"), (self.maxChordVar, "maxChord")):
+            try:
+                setattr(pool, name, max(0, var.get()))
+            except tk.TclError:
+                pass
+
+    def _poolSelected(self):
+        """The panel's pool box chose a pool: edit that one."""
+        pool = next((p for p in self.plan.pools if p.name == self.poolVar.get()), None)
+
+        if pool is not None:
+            self.editPool = pool
+            self._loadPoolControls()
+
+    def _renamePool(self):
+        """Return in the pool box renames the edited pool to what was typed.
+
+        An empty name or one another pool has is put back.
+        """
+        name = self.poolVar.get().strip()
+        pool = self.editPool
+        taken = any(p.name == name for p in self.plan.pools if p is not pool)
+
+        if pool is None or not name or taken:
+            self._loadPoolControls()
+            return
+
+        for section in self.planTargets.values():
+            sounds = section.get("sounds", {})
+
+            if pool.name in sounds:
+                sounds[name] = sounds.pop(pool.name)
+
+        pool.name = name
+        self._syncCardsToPlan()
+        self._loadPoolControls()
+
+    def addPool(self):
+        """Add an empty pool of one voice, in the edited pool's tier, and edit it."""
+        names = {p.name for p in self.plan.pools}
+        n = len(self.plan.pools) + 1
+
+        while f"pool {n}" in names:
+            n += 1
+
+        tier = self.editPool.tier if self.editPool is not None else ""
+        pool = reduce.Pool(f"pool {n}", [], 1, tier=tier)
+        self.plan.pools.append(pool)
+        self.editPool = pool
+        self._syncCardsToPlan()
+        self._loadPoolControls()
+        self._reductionChanged()
+
+    def removePool(self):
+        """Remove the edited pool; its channels leave the reduction until reassigned.
+
+        The last pool stays.
+        """
+        pool = self.editPool
+
+        if pool is None or len(self.plan.pools) == 1:
+            return
+
+        self.plan.pools.remove(pool)
+        self.editPool = self.plan.pools[0]
+        self._syncCardsToPlan()
+        self._loadPoolControls()
+        self._reductionChanged()
+
+    def _channelPoolChanged(self, ch: int):
+        """A card chose a pool: move the channel there, or out of every pool.
+
+        Args:
+            ch: 0-based channel.
+        """
+        name = self.poolVars[ch].get()
+
+        for p in self.plan.pools:
+            if ch in p.channels:
+                p.channels.remove(ch)
+
+        pool = next((p for p in self.plan.pools if p.name == name), None)
+
+        if pool is not None:
+            pool.channels.append(ch)
+            pool.channels.sort()
+
+        self._refreshOverlap()
+        self._reductionChanged()
+
+    def _channelReleaseChanged(self, ch: int):
+        """A card's release changed: the channel's own release, or none when blank.
+
+        Args:
+            ch: 0-based channel.
+        """
+        text = self.releaseVars[ch].get().strip()
+
+        if not text:
+            self.plan.release.pop(ch, None)
+        else:
+            try:
+                self.plan.release[ch] = max(0.0, float(text))
+            except ValueError:
+                return                  # half-typed number
+
+        self._reductionChanged()
+
+    def _applyTiers(self, tiers: list[reduce.Tier]) -> str | None:
+        """Replace the plan's tiers, if the pools still fit.
+
+        A pool whose tier is gone becomes a plain pool.
+
+        Args:
+            tiers: the new tiers.
+
+        Returns:
+            str | None: why the tiers were refused, or None once applied.
+        """
+        names = {t.name for t in tiers}
+        trial = reduce.Plan([replace(p, tier=p.tier if p.tier in names else "")
+                             for p in self.plan.pools],
+                            dict(self.plan.priority), list(tiers), dict(self.plan.release))
+
+        try:
+            trial.validate()
+        except ValueError as exc:
+            problem = str(exc)
+            return problem
+
+        for p in self.plan.pools:
+            if p.tier not in names:
+                p.tier = ""
+
+        self.plan.tiers = list(tiers)
+        self._loadPoolControls()
+        self._reductionChanged()
+        return None
+
+    def tiersDialog(self):
+        """Edit the tiers in a dialog: a row of name, channels, reserved, release and chip each."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Tiers")
+        dlg.transient(self)
+        grid = ttk.Frame(dlg, padding=8)
+        grid.pack(fill="both", expand=True)
+        rows: list[list[tk.StringVar]] = []
+
+        def rebuild():
+            """Lay the rows out again after one is added or removed."""
+            for w in grid.winfo_children():
+                w.destroy()
+
+            for col, text in enumerate(("Tier", "Channels", "Reserved", "Release ms", "Chip")):
+                ttk.Label(grid, text=text).grid(row=0, column=col, padx=3)
+
+            for r, cells in enumerate(rows, start=1):
+                for col, var in enumerate(cells):
+                    ttk.Entry(grid, textvariable=var, width=10 if col == 0 else 7).grid(
+                        row=r, column=col, padx=3, pady=2)
+
+                ttk.Button(grid, text="-", width=2, command=lambda c=cells: drop(c)).grid(
+                    row=r, column=5, padx=(6, 0))
+
+        def drop(cells: list[tk.StringVar]):
+            """Remove one row."""
+            rows.remove(cells)
+            rebuild()
+
+        def add(tier: reduce.Tier | None = None):
+            """Append a row, filled from a tier or blank."""
+            values = ((tier.name, tier.capacity, tier.reserved, f"{tier.release:g}", tier.chip)
+                      if tier is not None else ("", 0, 0, 0, ""))
+            rows.append([tk.StringVar(value=str(v)) for v in values])
+            rebuild()
+
+        def preset(target):
+            """Replace the rows with a target's chips."""
+            rows.clear()
+
+            for tier in export.presetTiers(target):
+                add(tier)
+
+        def ok():
+            """Read the rows back, apply them, and close unless they are refused."""
+            try:
+                tiers = [reduce.Tier(cells[0].get().strip(), int(cells[1].get()),
+                                     int(cells[2].get()), float(cells[3].get()),
+                                     cells[4].get().strip())
+                         for cells in rows]
+            except ValueError:
+                messagebox.showerror("Tiers", "Channels and reserved are whole numbers and "
+                                     "the release is in milliseconds.", parent=dlg)
+                return
+
+            if any(not t.name for t in tiers):
+                messagebox.showerror("Tiers", "Every tier needs a name.", parent=dlg)
+                return
+
+            problem = self._applyTiers(tiers)
+
+            if problem:
+                messagebox.showerror("Tiers", problem, parent=dlg)
+                return
+
+            dlg.destroy()
+
+        for tier in self.plan.tiers:
+            add(tier)
+
+        rebuild()
+        buttons = ttk.Frame(dlg, padding=(8, 0, 8, 8))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Add tier", command=add).pack(side="left")
+
+        for target in export.TARGETS.values():
+            ttk.Button(buttons, text=target.NAME.split(" (")[0],
+                       command=lambda t=target: preset(t)).pack(side="left", padx=(4, 0))
+
+        ttk.Button(buttons, text="Cancel", command=dlg.destroy).pack(side="right")
+        ttk.Button(buttons, text="OK", command=ok).pack(side="right", padx=(0, 4))
+        dlg.grab_set()
+
+    def _applyPlan(self, plan: reduce.Plan, targets: dict[str, Any] | None = None,
+                   exportRange: dict[str, int] | None = None):
+        """Make a plan the one the controls edit and the reduction uses.
+
+        Args:
+            plan: the plan; given a pool of every channel if it has none.
+            targets: the export targets' sections that came with it.
+            exportRange: the export's bars that came with it.
+        """
+        if not plan.pools:
+            channels = sorted({n.channel for n in self.song.notes})
+            plan.pools.append(reduce.Pool("all", channels, max(1, self.budgetVar.get())))
+
+        self.plan = plan
+        self.planTargets = targets or {}
+        self.exportRange = dict(exportRange or {})
+        self.editPool = plan.pools[0]
+        self._syncCardsToPlan()
+        self._loadPoolControls()
+        self._reductionChanged()
+
+    def _loadPlanFile(self, path: str, withSong: bool = True):
+        """Load a plan file, and the MIDI file it names or embeds.
+
+        A MIDI embedded in the plan is opened from it, after the
+        unsaved-changes check, since it is the song the plan was saved
+        with; failing that, a MIDI file the plan names that exists is
+        opened, and its own sidecar with it; failing both the plan applies
+        to the song already open. A bad plan file is reported and nothing
+        changes.
+
+        Args:
+            path: the plan file.
+            withSong: open the MIDI the plan names or embeds; False applies
+                the plan to the current song whatever the file says.
+        """
+        try:
+            read = reduce.readPlanFile(path)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Plan not loaded", str(exc))
+            return
+
+        opened = ""
+
+        if withSong:
+            current = os.path.abspath(self.song.path) if self.song.path else ""
+            named = read.midiFile if read.midiFile and os.path.exists(read.midiFile) else None
+
+            if read.midiData is not None:
+                if not self._confirmDiscard():
+                    return
+
+                try:
+                    self.song = model.Song.fromBytes(read.midiData, read.midiFile)
+                except ValueError as exc:
+                    messagebox.showerror("Plan not loaded", f"{path}: embedded MIDI: {exc}")
+                    return
+
+                self._refreshAll()
+                opened = "opened the embedded MIDI and "
+            elif named and os.path.abspath(named) != current:
+                if not self._confirmDiscard():
+                    return
+
+                self.openFile(named)
+                opened = f"opened {named} and "
+
+        self._applyPlan(read.plan, read.targets, read.range)
+        self._setStatus(f"Loaded plan {path}" if not opened else f"Loaded plan {path}: {opened}"
+                        "applied it")
+
+    def loadPlanDialog(self):
+        """Ask for a plan file and load it with the MIDI it belongs to."""
+        path = filedialog.askopenfilename(
+            title="Load plan", filetypes=[("MontyRoll plans", "*.monty"), ("All files", "*")])
+
+        if path:
+            self._loadPlanFile(path)
+
+    def savePlan(self):
+        """Write the plan beside the song, naming the song, or ask where when it has no path."""
+        if not self.song.path:
+            self.savePlanAs()
+            return
+
+        self._writePlan(reduce.sidecarPath(self.song.path), os.path.basename(self.song.path))
+
+    def savePlanAs(self):
+        """Ask for a destination and write the plan there, naming the song relative to it."""
+        path = filedialog.asksaveasfilename(
+            title="Save plan", defaultextension=reduce.PLAN_SUFFIX,
+            filetypes=[("MontyRoll plans", "*.monty"), ("All files", "*")])
+
+        if path:
+            self._writePlan(path, self._songRelativeTo(path))
+
+    def savePlanBundleAs(self):
+        """Ask for a destination and write the plan with the song embedded in it.
+
+        The song goes in as it is in memory, edits included, with its
+        checksum, so the bundle needs no file beside it.
+        """
+        path = filedialog.asksaveasfilename(
+            title="Save plan bundle", defaultextension=reduce.PLAN_SUFFIX,
+            filetypes=[("MontyRoll plans", "*.monty"), ("All files", "*")])
+
+        if path:
+            self._writePlan(path, self._songRelativeTo(path), smf.toBytes(self.song.mf))
+
+    def _songRelativeTo(self, path: str) -> str:
+        """The song's path as a plan file at `path` should name it.
+
+        Args:
+            path: the plan file's path.
+
+        Returns:
+            str: the song's path relative to the plan file's directory, or
+            empty when the song has no path.
+        """
+        if not self.song.path:
+            return ""
+
+        relative = os.path.relpath(self.song.path, os.path.dirname(os.path.abspath(path)))
+        return relative
+
+    def _writePlan(self, path: str, midiFile: str = "", midiData: bytes | None = None):
+        """Write the plan as the controls have it.
+
+        Args:
+            path: where to write it.
+            midiFile: the song's path or name to record in the file.
+            midiData: the song's bytes to embed, None to embed none.
+        """
+        try:
+            reduce.savePlan(self._currentPlan(), path, midiFile, midiData, self.planTargets,
+                            self.exportRange)
+        except OSError as exc:
+            messagebox.showerror("Save failed", f"{path}\n\n{exc}")
+            return
+
+        self._setStatus(f"Saved plan to {path}")
 
     # -------------------------------------------------------------- tempo
     def _barStart(self, tick: float) -> tuple[int, int]:
@@ -2300,9 +3350,11 @@ class MidiEditorApp(tk.Tk):
                  else gm.noteName(note.pitch))
         info = self.song.channels.get(note.channel)
         inst = info.instrument if info else "?"
+        weight = (f" | weight {self._ensureWeights()[id(note)]:.2f}"
+                  if self.shadeVar.get() else "")
         self._setStatus(
             f"{prefix}{pname} vel {note.velocity} | ch {note.channel + 1} ({inst}) | "
-            f"tick {note.start}-{note.end} ({note.length}) | track {note.track}")
+            f"tick {note.start}-{note.end} ({note.length}) | track {note.track}{weight}")
 
     def onWheel(self, event):
         """Mouse wheel over the roll: scroll, Shift-scroll sideways or
@@ -2354,6 +3406,85 @@ class MidiEditorApp(tk.Tk):
         self._invalidateDemand()
         self.redraw()
         self._setStatus(f"Deleted {n} note{'s' if n != 1 else ''}")
+
+    def _replaceSong(self, mf: smf.MidiFile, message: str):
+        """Swap the song for a rebuilt file, keeping the path and marking it dirty.
+
+        Args:
+            mf: the new file.
+            message: shown in the status bar.
+        """
+        path = self.song.path
+        self.song = model.Song(mf, path)
+        self.song.dirty = True
+        self._refreshAll()
+        self._setStatus(message)
+
+    def splitChannelDialog(self):
+        """Ask for a part count and split the active channel into parts.
+
+        The active channel's polyphony spreads over that many channels,
+        the top voice keeping the channel and the rest taking the lowest
+        free ones.
+        """
+        ch = self.activeChannel
+        peak = max((analysis.sweep(self.song,
+                                   [n for n in self.song.notes if n.channel == ch]).peak, 2))
+        parts = simpledialog.askinteger(
+            "Split channel", f"Split Ch {ch + 1} into how many parts (2-{arrange.MAX_PARTS})?",
+            initialvalue=min(peak, arrange.MAX_PARTS), minvalue=2,
+            maxvalue=arrange.MAX_PARTS, parent=self)
+
+        if parts is None:
+            return
+
+        try:
+            mf = arrange.splitChannel(self.song, ch, parts)
+        except ValueError as exc:
+            messagebox.showerror("Split channel", str(exc))
+            return
+
+        self._replaceSong(mf, f"Split Ch {ch + 1} into {parts} parts")
+
+    def doubleChannelDialog(self):
+        """Ask for a transposition and copy the active channel onto a free one."""
+        ch = self.activeChannel
+        semitones = simpledialog.askinteger(
+            "Double channel", f"Double Ch {ch + 1} at how many semitones (+12 octave up)?",
+            initialvalue=12, minvalue=-24, maxvalue=24, parent=self)
+
+        if semitones is None:
+            return
+
+        try:
+            target = arrange.freeChannels(self.song, 2, ch)[1]
+            mf = arrange.double(self.song, ch, semitones, target)
+        except ValueError as exc:
+            messagebox.showerror("Double channel", str(exc))
+            return
+
+        self._replaceSong(mf, f"Doubled Ch {ch + 1} onto Ch {target + 1} "
+                              f"at {semitones:+d} semitones")
+
+    def echoChannelDialog(self):
+        """Ask for a delay in ticks and echo the active channel onto a free one."""
+        ch = self.activeChannel
+        delay = simpledialog.askinteger(
+            "Echo channel", f"Echo Ch {ch + 1} after how many ticks "
+                            f"({self.song.mf.division} is a beat)?",
+            initialvalue=self.song.mf.division // 2, minvalue=1, parent=self)
+
+        if delay is None:
+            return
+
+        try:
+            target = arrange.freeChannels(self.song, 2, ch)[1]
+            mf = arrange.echo(self.song, ch, delay, target)
+        except ValueError as exc:
+            messagebox.showerror("Echo channel", str(exc))
+            return
+
+        self._replaceSong(mf, f"Echoed Ch {ch + 1} onto Ch {target + 1} after {delay} ticks")
 
     def setVelocityDialog(self):
         """Ask for a velocity and apply it to every selected note."""

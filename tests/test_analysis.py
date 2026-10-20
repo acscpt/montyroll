@@ -180,6 +180,28 @@ class TestFigures:
         assert together[(0, 9)] == pytest.approx(0.375)
         assert together[(1, 9)] == pytest.approx(0.25)
 
+    def testPoolOverlap(self) -> None:
+        """Each channel's share of its own time spent while the pool (or the rest of it) sounds."""
+        track = [smf.Event(0, smf.META, bytearray((500_000).to_bytes(3, "big")), smf.META_TEMPO)]
+
+        for ch, start, end in ((0, 0, 100), (1, 50, 150), (2, 120, 200)):
+            track.append(smf.Event(start, 0x90 | ch, bytearray([60, 100])))
+            track.append(smf.Event(end, 0x80 | ch, bytearray([60, 64])))
+
+        demand = analysis.sweep(model.Song(smf.MidiFile(0, 480, [track])))
+
+        # Outside the pool, against every member; inside, against the rest.
+        shares = analysis.poolOverlap(demand, [1, 2])
+        assert shares[0] == pytest.approx(0.5)      # 50 of its 100 ticks under ch 1
+        assert shares[1] == pytest.approx(0.3)      # 120 to 150 under ch 2
+        assert shares[2] == pytest.approx(0.375)    # 120 to 150 of its 80 under ch 1
+
+        # A pool of one has no rest to overlap; a channel the song lacks is ignored.
+        shares = analysis.poolOverlap(demand, [1, 5])
+        assert shares[1] == 0.0
+        assert shares[0] == pytest.approx(0.5)
+        assert analysis.poolOverlap(demand, []) == {0: 0.0, 1: 0.0, 2: 0.0}
+
 
 class TestLocalFiles:
     """The figures the voice plan was sized against, when the files are present."""

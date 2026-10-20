@@ -397,6 +397,47 @@ def coActivity(demand: Demand) -> dict[tuple[int, int], float]:
     return together
 
 
+def poolOverlap(demand: Demand, pool: list[int]) -> dict[int, float]:
+    """For every channel, the share of its sounding time during which a pool sounds.
+
+    A channel in the pool is measured against the pool's other members and
+    a channel outside it against them all, so a low figure marks a channel
+    that could share the pool's voices. This is the figure the pool editor
+    shows.
+
+    Args:
+        demand: a sweep of the whole song.
+        pool: the pool's channels; any the demand does not know are ignored.
+
+    Returns:
+        dict[int, float]: 0.0 to 1.0 per channel of the demand; 0.0 when the
+        channel never sounds or nothing else of the pool ever does.
+    """
+    members = [ch for ch in pool if ch in demand.channels]
+    columns = [demand.channels[ch] for ch in members]
+
+    # How many of the pool's members sound in each segment; a member itself
+    # needs a second one sounding, a channel outside the pool needs one.
+    count = [sum(1 for col in columns if col[i] > 0) for i in range(len(demand.seconds))]
+    result: dict[int, float] = {}
+
+    for ch, mine in demand.channels.items():
+        needed = 2 if ch in members else 1
+        sounding = 0.0
+        together = 0.0
+
+        for d, m, c in zip(demand.seconds, mine, count):
+            if m:
+                sounding += d
+
+                if c >= needed:
+                    together += d
+
+        result[ch] = together / sounding if sounding else 0.0
+
+    return result
+
+
 # ------------------------------------------------------------------ tonal
 PITCH_CLASS_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 

@@ -6,6 +6,50 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
+### Added
+
+- **Splitting a channel into parts.** Edit > Split Channel into Parts gives each part of a flattened channel a channel of its own, following each part from note to note without letting two parts cross. The top part keeps the source channel with its program and controllers.
+
+- **Doubling and echo.** Edit > Double Channel and Edit > Echo Channel copy a channel onto a free channel, transposed or delayed, at a lower velocity. New module `arrange.py`.
+
+- **Detuned doubles and downbeats.** `arrange.double` takes a detune in cents, written as a pitch bend at tick 0, so a unison copy sounds as a second desk beside its source, and `arrange.downbeats` copies the lowest note that starts each bar onto a new channel, for timpani under a bass line. The Commander X16 export plays a channel's tick-0 pitch bend as a static detune: the key fraction on the YM2151, the frequency word on the PSG.
+
+- **Tiers.** Pools now belong to tiers, one per chip, each with a channel count, a reserve kept for sound effects, and a default release for its patches. A plan whose pools ask a tier for more voices than it has is refused.
+
+- **Release tails.** A voice stays busy until the release of its note has died away, with the release set in milliseconds for each tier or channel. A voice taken during its release costs a fraction of the note's weight, the clipped tail counts towards the loss, and a channel that strikes the same pitch again retriggers its releasing voice.
+
+- **Pool editing.** Each channel card names the pool its notes are reduced in, beside its release override and priority. The Reduce panel edits one pool at a time (voices, tier and transforms), with buttons to add, remove and rename pools and a Tiers dialog that has a Commander X16 preset.
+
+- **Overlap.** Each card shows how much of the channel's playing time falls while the pool being edited is already sounding: a low figure marks a channel that could share that pool's voices. The panel shows the worst figure among the pool's own members.
+
+- **Demand strip with tiers.** The strip stacks channels by tier and pool and draws a budget line for each tier. While the reduction is on it shows occupancy, notes plus their releases, and hovering reports each tier's count against its budget.
+
+- **Shade by weight.** A switch on the Reduce panel colours notes by their reduction weight instead of velocity, scaled to the heaviest note in the song, so raising a channel's priority visibly brightens it and dims the rest. Hovering a note then reports its weight in the status bar.
+
+- **ZSM export for the Commander X16.** File > Export Commander X16 (ZSM) writes the reduction as a ZSM file for ZSMKit, with each pool on the YM2151 or the VERA PSG according to its tier. The written file is decoded, checked, and replayed through a model of both chips before the status bar reports its size and the voices it uses.
+
+- **Sounds and export range.** An FM part plays a patch chosen by its GM program, and a PSG part plays a waveform, with a decay for plucked instruments. A Sound box on the Reduce panel picks one sound for a whole pool, File > Export Range sets the bars to export and a bar to loop back to, and both are saved with the plan.
+
+- **Pluggable export targets.** Each export target is a module in the new `montyroll.export` package that implements one protocol, and the File menu has an export item for each target.
+
+- **Plan files.** File > Save Plan writes the tiers, pools, priorities, and releases as a `.monty` JSON file beside the MIDI file, and opening the MIDI file loads the plan with it. Load Plan opens a plan together with the MIDI file it names, and Save Plan Bundle As embeds the MIDI file in the plan with a checksum, so a bundle carries everything in one file.
+
+- **Documentation.** A `docs/` section with a quick start on the demo file, installation, an overview of how a reduction works, usage, a reference for every control and the plan file, troubleshooting, the architecture, and a worked example that exports the demo for the Commander X16.
+
+### Changed
+
+- **README.** Rewritten for the current features: reduction with pools and tiers, plan files, the arrange commands, and the ZSM export, with a link to the documentation and current screenshots.
+
+### Fixed
+
+- **Notes beyond the YM2151's range.** The Commander X16 export now folds a note outside MIDI 13 to 108 by octaves instead of stopping, so a C0 bass plays as C1.
+
+- **Stale instrument family on the cards.** Picking an instrument now updates the family on the card's summary line as well as the picker. The line kept the family of the old program before.
+
+- **Drum unison.** A drum hit is no longer dropped as a unison when a pitched note on another channel shares its key number and start tick. The unison transform now passes the drum channel through, as the octave transform already did.
+
 ## [0.2.0] - 2026-08-23
 
 ### Added

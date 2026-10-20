@@ -19,16 +19,20 @@ from typing import Any
 import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
-from montyroll import analysis, model, player, smf
+from montyroll import analysis, model, player, reduce, smf
 from montyroll.app import (
+    CHANNEL_COLORS,
     DEMAND_MAX_H,
     DEMAND_MIN_H,
     MAX_EVENT_ROWS,
+    NO_POOL,
     PLAY_GLYPH,
     STOP_GLYPH,
+    X16_TIERS,
     MidiEditorApp,
     _shade,
 )
+from montyroll.export import zsm, zsmcheck, zsmdecode
 
 pytestmark = needsDisplay
 
@@ -314,6 +318,14 @@ class TestChannelStrip:
         assert programs == {40}
         assert app.song.dirty
         assert "Violin" in app.status.cget("text")
+
+    def testProgramChangeRefreshesTheFamily(self, app: MidiEditorApp) -> None:
+        """Picking an instrument updates the card's family text, not just the picker."""
+        assert "Piano" in app.descLabels[0].cget("text")
+        var = tk.StringVar(value=" 56  Trumpet")
+        app._programChanged(0, var)
+        assert "Brass" in app.descLabels[0].cget("text")
+        assert "Piano" not in app.descLabels[0].cget("text")
 
     def testVolumeChangeWritesCc7(self, app: MidiEditorApp) -> None:
         """Moving the volume slider rewrites the channel's CC7 events."""
@@ -698,6 +710,456 @@ class TestReduction:
         assert len(saved.notes) < len(app.song.notes)
         assert not app.song.dirty
         assert "Saved reduced song" in app.status.cget("text")
+
+    def testExportZsm(self, app: MidiEditorApp, tmp_path: Path,
+                      monkeypatch: pytest.MonkeyPatch) -> None:
+        """Export through the ZSM target writes a file that verifies clean and is described."""
+        out = tmp_path / "song.zsm"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        errors: list[str] = []
+        monkeypatch.setattr("montyroll.app.messagebox.showerror",
+                            lambda title, text, **k: errors.append(text))
+
+        # With no tiers the export is refused and explains itself.
+        app.exportTarget("zsm")
+        assert not out.exists()
+        assert errors and "no tier" in errors[0] and "preset" in errors[0]
+
+        app._applyTiers(list(X16_TIERS))
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        app.exportTarget("zsm")
+        assert out.exists()
+        decoded = zsmdecode.decode(out.read_bytes())
+        assert zsmcheck.check(decoded) == []
+        assert decoded.header.fmMask and not decoded.header.psgMask
+        status = app.status.cget("text")
+        assert status.startswith("Exported ") and "no problems" in status
+        assert f"{len(app.reduction.placed)} notes, no problems" in status
+
+        # The toolbar's master volume is the export's level.
+        app.masterVar.set(60)
+        app.exportTarget("zsm")
+        assert "at 60% level" in app.status.cget("text")
+        assert zsmcheck.check(zsmdecode.decode(out.read_bytes())) == []
+
+
+class TestWeightShading:
+    """The Shade by weight switch on the Reduce panel."""
+
+    def _brightness(self, colour: str) -> int:
+        """Sum of the RGB components of a #rrggbb colour."""
+        total = sum(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+        return total
+
+    def testShadingFollowsTheWeights(self, app: MidiEditorApp) -> None:
+        """A quieter note that carries more weight is darker by velocity and brighter by weight."""
+        assert not app.shadeVar.get()
+        weights = app._ensureWeights()
+        louder, heavier = next((a, b) for a in app.song.notes for b in app.song.notes
+                               if a.channel == b.channel and a.velocity > b.velocity
+                               and weights[id(a)] < weights[id(b)])
+        fill = lambda n: app.canvas.itemcget(app.noteToItem[id(n)], "fill")   # noqa: E731
+        assert self._brightness(fill(louder)) > self._brightness(fill(heavier))
+        assert fill(louder) == _shade(CHANNEL_COLORS[louder.channel],
+                                      0.65 + 0.35 * louder.velocity / 127)
+        app.shadeVar.set(True)
+        app.redraw()
+        assert self._brightness(fill(louder)) < self._brightness(fill(heavier))
+        heaviest = max(weights.values())
+        assert fill(heavier) == _shade(CHANNEL_COLORS[heavier.channel],
+                                       0.3 + 0.7 * weights[id(heavier)] / heaviest)
+        app.shadeVar.set(False)
+        app.redraw()
+        assert self._brightness(fill(louder)) > self._brightness(fill(heavier))
+
+    def testPriorityBrightensItsChannel(self, app: MidiEditorApp) -> None:
+        """Raising a channel's priority recomputes the weights and lifts its notes."""
+        app.shadeVar.set(True)
+        app.redraw()
+        note = next(n for n in app.song.notes if n.channel == 1)
+        before = self._brightness(app.canvas.itemcget(app.noteToItem[id(note)], "fill"))
+        first = app._ensureWeights()
+        app.priorityVars[1].set(5.0)
+        app._reductionChanged()
+        assert app._ensureWeights() is not first
+        after = self._brightness(app.canvas.itemcget(app.noteToItem[id(note)], "fill"))
+        assert after > before
+
+    def testHoverNamesTheWeight(self, app: MidiEditorApp) -> None:
+        """The status bar carries the weight only while shading by it."""
+        note = app.song.notes[0]
+        app._describeNote(note)
+        assert "weight" not in app.status.cget("text")
+        app.shadeVar.set(True)
+        app._describeNote(note)
+        assert f"weight {app._ensureWeights()[id(note)]:.2f}" in app.status.cget("text")
+
+
+class TestPlanControls:
+    """Pools, tiers and releases on the panel and the cards, and the plan sidecar."""
+
+    def testDefaultPlanIsOnePoolOfEveryChannel(self, app: MidiEditorApp) -> None:
+        """A file with no sidecar starts with one pool, on every card, at the strip's budget."""
+        assert [p.name for p in app.plan.pools] == ["all"]
+        assert app.plan.pools[0].channels == [0, 1, 9]
+        assert app.plan.pools[0].voices == app.budgetVar.get()
+        assert all(v.get() == "all" for v in app.poolVars.values())
+        assert app.poolVar.get() == "all"
+        assert app.editPool is app.plan.pools[0]
+        assert str(app.budgetSpin.cget("state")) == "normal"
+
+    def testBudgetAndPoolVoicesAreOneNumber(self, app: MidiEditorApp) -> None:
+        """With one pool the strip's spinbox and the panel's Voices mirror each other."""
+        app.budgetVar.set(3)
+        assert app.poolVoicesVar.get() == 3
+        app.poolVoicesVar.set(5)
+        assert app.budgetVar.get() == 5
+        app._reductionChanged()
+        assert app.plan.pools[0].voices == 5
+
+    def testAddPoolAndMoveAChannel(self, app: MidiEditorApp) -> None:
+        """A second pool takes a channel from the first; the strip shows the total, read-only."""
+        app.addPool()
+        assert [p.name for p in app.plan.pools] == ["all", "pool 2"]
+        assert app.editPool is app.plan.pools[1]
+        assert NO_POOL in app.poolCombos[0].cget("values")
+        app.poolVars[1].set("pool 2")
+        app._channelPoolChanged(1)
+        assert app.plan.pools[0].channels == [0, 9]
+        assert app.plan.pools[1].channels == [1]
+        app._drawDemand()
+        assert str(app.budgetSpin.cget("state")) == "disabled"
+        assert app.budgetVar.get() == app._totalVoices()
+        app.poolVars[1].set(NO_POOL)
+        app._channelPoolChanged(1)
+        assert all(1 not in p.channels for p in app.plan.pools)
+        app.removePool()
+        assert [p.name for p in app.plan.pools] == ["all"]
+        assert app._currentPlan().pools[0].channels == [0, 9]
+        app.removePool()
+        assert len(app.plan.pools) == 1
+
+    def testPanelEditsTheChosenPool(self, app: MidiEditorApp) -> None:
+        """The switches and Voices go to the edited pool and leave the other alone."""
+        app.addPool()
+        app.poolVar.set("all")
+        app._poolSelected()
+        assert app.editPool is app.plan.pools[0]
+        app.monoTopVar.set(True)
+        app.poolVoicesVar.set(4)
+        app._reductionChanged()
+        assert app.plan.pools[0].monoTop and app.plan.pools[0].voices == 4
+        assert not app.plan.pools[1].monoTop and app.plan.pools[1].voices == 1
+        app.poolVar.set("pool 2")
+        app._poolSelected()
+        assert not app.monoTopVar.get() and app.poolVoicesVar.get() == 1
+
+    def testRenamePool(self, app: MidiEditorApp) -> None:
+        """A name typed into the pool box and Return renames the pool everywhere."""
+        app.poolVar.set("strings")
+        app._renamePool()
+        assert app.plan.pools[0].name == "strings"
+        assert all(v.get() == "strings" for v in app.poolVars.values())
+        assert "strings" in app.poolCombos[0].cget("values")
+        app.addPool()
+        app.poolVar.set("strings")
+        app._renamePool()
+        assert [p.name for p in app.plan.pools] == ["strings", "pool 2"]
+        assert app.poolVar.get() == "pool 2"
+
+    def testTiersDrawALinePerTier(self, app: MidiEditorApp) -> None:
+        """Tiers applied and pools assigned: one labelled budget line per tier."""
+        assert app._applyTiers(list(X16_TIERS)) is None
+        assert app.tierCombo.cget("values") == ("(none)", "opm", "psg")
+        app.addPool()
+        app.poolVars[9].set("pool 2")
+        app._channelPoolChanged(9)
+        app.poolVar.set("all")
+        app._poolSelected()
+        app.poolTierVar.set("opm")
+        app.poolVoicesVar.set(6)
+        app._reductionChanged()
+        app.poolVar.set("pool 2")
+        app._poolSelected()
+        app.poolTierVar.set("psg")
+        app.poolVoicesVar.set(2)
+        app._reductionChanged()
+        app._drawDemand()
+        c = app.demandCanvas
+        labels = [c.itemcget(i, "text") for i in c.find_all() if c.type(i) == "text"]
+        assert "opm 6" in labels and "psg 8" in labels
+        dashed = [i for i in c.find_all() if c.type(i) == "line" and c.itemcget(i, "dash")]
+        assert len(dashed) == 2
+        app._onDemandMotion(FakeEvent(x=int(100 * app.ppt)))
+        assert "opm " in app.status.cget("text") and "/6" in app.status.cget("text")
+        assert app._stackOrder(app._ensureDemand().channels) == [0, 1, 9]
+
+    def testOverfullTiersAreRefused(self, app: MidiEditorApp) -> None:
+        """Tiers the pools no longer fit are refused with a reason and nothing changes."""
+        assert app._applyTiers([reduce.Tier("tiny", 2)]) is None
+        app.poolTierVar.set("tiny")
+        app.poolVoicesVar.set(2)
+        app._reductionChanged()
+        assert app.plan.pools[0].tier == "tiny"
+        problem = app._applyTiers([reduce.Tier("tiny", 1)])
+        assert problem and "tiny" in problem
+        assert app.plan.tiers == [reduce.Tier("tiny", 2)]
+        assert app._applyTiers([]) is None
+        assert app.plan.pools[0].tier == ""
+
+    def testRefusedPlanIsReported(self, app: MidiEditorApp) -> None:
+        """A pool pushed past its tier shows up on the label, not as a crash."""
+        app._applyTiers([reduce.Tier("tiny", 2)])
+        app.poolTierVar.set("tiny")
+        app.poolVoicesVar.set(3)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        assert app.lossLbl.cget("text").startswith("plan refused")
+        assert app.reduction.placed == []
+
+    def testReleaseOnACard(self, app: MidiEditorApp) -> None:
+        """A release typed on a card reaches the plan and stretches the strip's occupancy."""
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        before = analysis.channelDemand(app._ensureDemand())[0].fraction
+        app.releaseVars[0].set("500")
+        app._channelReleaseChanged(0)
+        assert app.plan.release == {0: 500.0}
+        assert analysis.channelDemand(app._ensureDemand())[0].fraction > before
+        assert "tails clipped" in app.lossLbl.cget("text")
+        app.releaseVars[0].set("")
+        app._channelReleaseChanged(0)
+        assert app.plan.release == {}
+
+    def testSidecarRoundTrip(self, app: MidiEditorApp, songPath: Path) -> None:
+        """Save Plan writes beside the song and opening the song again loads it back."""
+        app._applyTiers(list(X16_TIERS))
+        app.addPool()
+        app.poolVars[9].set("pool 2")
+        app._channelPoolChanged(9)
+        app.poolTierVar.set("psg")
+        app._reductionChanged()
+        app.priorityVars[0].set(2.5)
+        app.releaseVars[1].set("40")
+        app._channelReleaseChanged(1)
+        app.savePlan()
+        sidecar = Path(reduce.sidecarPath(str(songPath)))
+        assert sidecar.exists()
+        assert "Saved plan" in app.status.cget("text")
+        saved = app._currentPlan()
+        app.openFile(str(songPath))
+        assert "Loaded plan" in app.status.cget("text")
+        assert app.plan is not saved
+        assert app.plan.tiers == saved.tiers
+        assert app.plan.pools == saved.pools
+        assert app.plan.priority[0] == 2.5 and app.plan.release == {1: 40.0}
+        assert app.poolVars[9].get() == "pool 2"
+        assert app.priorityVars[0].get() == 2.5
+        assert app.releaseVars[1].get() == "40"
+        assert app.budgetVar.get() == app._totalVoices()
+
+    def testLoadPlanOpensTheSongItNames(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        """Load Plan on a .monty that names a MIDI file opens that file, then applies the plan."""
+        app.priorityVars[0].set(3.0)
+        app.savePlan()
+        sidecar = Path(reduce.sidecarPath(str(songPath)))
+        assert sidecar.suffix == ".monty"
+        assert '"midiFile": "song.mid"' in sidecar.read_text()
+
+        # Another song is open; loading the plan brings the named one back.
+        other = tmp_path / "other.mid"
+        smf.write(app.song.mf, str(other))
+        app.openFile(str(other))
+        assert Path(app.song.path).name == "other.mid"
+        monkeypatch.setattr("montyroll.app.filedialog.askopenfilename", lambda **k: str(sidecar))
+        app.loadPlanDialog()
+        assert Path(app.song.path).name == "song.mid"
+        assert app.plan.priority[0] == 3.0
+        assert "opened" in app.status.cget("text")
+
+    def testBundleOpensWithoutItsFile(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bundle carries the song: it loads from an empty directory and keeps the edits."""
+        app.selectAll()
+        app.deleteSelection()
+        notes = len(app.song.notes)
+        bundle = tmp_path / "away" / "bundle.monty"
+        bundle.parent.mkdir()
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(bundle))
+        app.savePlanBundleAs()
+        assert '"midiBlob"' in bundle.read_text()
+        monkeypatch.setattr("montyroll.app.messagebox.askyesno", lambda *a, **k: True)
+        app.newFile()
+        assert not app.song.notes
+        monkeypatch.setattr("montyroll.app.filedialog.askopenfilename", lambda **k: str(bundle))
+        app.loadPlanDialog()
+        assert len(app.song.notes) == notes
+        assert "embedded" in app.status.cget("text")
+
+    def testSoundBoxIsSavedAndUsed(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pool's sound goes into the plan's target section, is saved, and reaches the export."""
+        assert str(app.soundCombo.cget("state")) == "disabled"      # no chip, no sounds
+        app._applyTiers(list(X16_TIERS))
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        assert "strings" in app.soundCombo.cget("values")
+        app.poolSoundVar.set("brass")
+        app._poolSoundChanged()
+        assert app.planTargets == {"zsm": {"sounds": {"all": "brass"}}}
+        app.poolVar.set("core")
+        app._renamePool()
+        assert app.planTargets["zsm"]["sounds"] == {"core": "brass"}
+        app.savePlan()
+        assert '"brass"' in Path(reduce.sidecarPath(str(songPath))).read_text()
+        app.openFile(str(songPath))
+        assert app.planTargets["zsm"]["sounds"] == {"core": "brass"}
+        assert app.poolSoundVar.get() == "brass"
+        out = tmp_path / "brass.zsm"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        app.exportTarget("zsm")
+        decoded = zsmdecode.decode(out.read_bytes())
+        setup = {w.register: w.value for w in decoded.frames[0].items
+                 if isinstance(w, zsmdecode.Write) and w.chip == "opm"}
+        # Every operator register but the carriers' levels, which the first
+        # note's velocity sets, matches the brass patch.
+        brass = dict(zsm.patchWrites(0, zsm.PATCHES["brass"]))
+        assert all(setup[r] == v for r, v in brass.items() if 0x40 <= r and not 0x60 <= r < 0x80)
+        assert setup[0x40] == brass[0x40]
+
+    def testExportRangeIsKeptAndUsed(self, app: MidiEditorApp, songPath: Path, tmp_path: Path,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """The range dialog's bars are checked, saved with the plan and cut the export."""
+        assert app._applyExportRange({"start": "2", "end": "1", "loop": ""}) is not None
+        assert app._applyExportRange({"start": "x", "end": "", "loop": ""}) is not None
+        assert app._applyExportRange({"start": "2", "end": "3", "loop": "4"}) is not None
+        assert app._applyExportRange({"start": "0", "end": "", "loop": ""}) is not None
+        assert app._applyExportRange({"start": "2", "end": "3", "loop": " 2 "}) is None
+        assert app.exportRange == {"start": 2, "end": 3, "loop": 2}
+        app.savePlan()
+        assert '"range"' in Path(reduce.sidecarPath(str(songPath))).read_text()
+        app.openFile(str(songPath))
+        assert app.exportRange == {"start": 2, "end": 3, "loop": 2}
+
+        app._applyTiers(list(X16_TIERS))
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        out = tmp_path / "cut.zsm"
+        monkeypatch.setattr("montyroll.app.filedialog.asksaveasfilename", lambda **k: str(out))
+        app.exportTarget("zsm")
+        decoded = zsmdecode.decode(out.read_bytes())
+        whole = (zsm.frameOf(app.song, app.song.barTick(4))
+                 - zsm.frameOf(app.song, app.song.barTick(2)))
+        assert decoded.length <= whole
+        assert decoded.header.loopOffset == 16     # bar 2 is the start, so the loop is frame 0
+        assert "bars 2 to 3 looping to 2" in app.status.cget("text")
+
+    def testBadSidecarIsReported(self, app: MidiEditorApp, songPath: Path,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """A broken plan file beside the song is reported and the default plan stands."""
+        Path(reduce.sidecarPath(str(songPath))).write_text("{oops")
+        errors: list[tuple[Any, ...]] = []
+        monkeypatch.setattr("montyroll.app.messagebox.showerror",
+                            lambda *a, **k: errors.append(a))
+        app.openFile(str(songPath))
+        assert errors and errors[0][0] == "Plan not loaded"
+        assert [p.name for p in app.plan.pools] == ["all"]
+
+    def testOverlapFollowsTheEditedPool(self, app: MidiEditorApp) -> None:
+        """Cards show their overlap with the edited pool; the panel shows the pool's worst."""
+        shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 1, 9])
+        worst = max(shares[ch] for ch in (0, 1, 9))
+        assert app.overlapLbl.cget("text") == f"all: its channels overlap {worst:.0%} at most"
+
+        for ch in (0, 1, 9):
+            assert app.usageLabels[ch].cget("text").endswith(f"| overlaps all {shares[ch]:.0%}")
+
+        # Move channel 1 out: the pool "all" is now measured without it and
+        # channel 1 against all of it.
+        app.poolVars[1].set(NO_POOL)
+        app._channelPoolChanged(1)
+        shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 9])
+        assert app.usageLabels[1].cget("text").endswith(f"| overlaps all {shares[1]:.0%}")
+        assert f"{max(shares[0], shares[9]):.0%}" in app.overlapLbl.cget("text")
+
+        # An empty new pool, then one channel in it.
+        app.addPool()
+        assert app.overlapLbl.cget("text") == "pool 2: no channels"
+        app.poolVars[1].set("pool 2")
+        app._channelPoolChanged(1)
+        assert app.overlapLbl.cget("text") == "pool 2: one channel"
+        against = analysis.poolOverlap(app._ensureSongDemand(), [1])
+        assert app.usageLabels[0].cget("text").endswith(f"| overlaps pool 2 {against[0]:.0%}")
+
+        # Editing the notes refreshes the figures at idle.
+        app.selectAll()
+        app.deleteSelection()
+        app.update()
+        assert app.overlapLbl.cget("text") == ""
+        assert app.usageLabels[0].cget("text") == app.usageText[0]
+
+    def testReducedReportCarriesTheTotals(self, app: MidiEditorApp) -> None:
+        """The reduced report's second line is the kept, cut, clipped and loss line."""
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        text = app._ensureReport("reduced")
+        assert text.splitlines()[1].startswith("kept ")
+        assert "tails clipped" in text.splitlines()[1]
+
+
+class TestArrangeMenu:
+    """Split, double and echo from the Edit menu."""
+
+    def testSplitReplacesTheSong(self, app: MidiEditorApp,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """The active channel's polyphony spreads over new channels; the song is dirty."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 2)
+        app._setActiveChannel(0)
+        path = app.song.path
+        before = len(app.song.notes)
+        app.splitChannelDialog()
+        assert len(app.song.notes) == before
+        assert app.song.dirty and app.song.path == path
+        assert any(n.channel == 3 for n in app.song.notes)   # the first note-free channel
+        assert "Split Ch 1 into 2 parts" in app.status.cget("text")
+
+    def testDoubleAddsAChannel(self, app: MidiEditorApp,
+                               monkeypatch: pytest.MonkeyPatch) -> None:
+        """The copy lands an octave up on the lowest free channel."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 12)
+        app._setActiveChannel(0)
+        originals = [n.pitch for n in app.song.notes if n.channel == 0]
+        app.doubleChannelDialog()
+        copies = [n.pitch for n in app.song.notes if n.channel == 3]
+        assert sorted(copies) == sorted(p + 12 for p in originals if p + 12 <= 127)
+
+    def testEchoDelaysOntoAFreeChannel(self, app: MidiEditorApp,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """The copy lags by the asked delay at lower velocity."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 240)
+        app._setActiveChannel(0)
+        starts = sorted(n.start for n in app.song.notes if n.channel == 0)
+        app.echoChannelDialog()
+        copies = sorted(n.start for n in app.song.notes if n.channel == 3)
+        assert copies == [t + 240 for t in starts]
+
+    def testRefusalIsReported(self, app: MidiEditorApp,
+                              monkeypatch: pytest.MonkeyPatch) -> None:
+        """A channel with no notes reports the error and the song stands."""
+        monkeypatch.setattr("montyroll.app.simpledialog.askinteger", lambda *a, **k: 3)
+        errors: list[str] = []
+        monkeypatch.setattr("montyroll.app.messagebox.showerror",
+                            lambda title, text, **k: errors.append(text))
+        app._setActiveChannel(5)
+        song = app.song
+        app.splitChannelDialog()
+        assert errors and "no notes" in errors[0]
+        assert app.song is song
+
+
 class TestTempoEditing:
     """Tempo changes from the Edit menu and the ruler."""
 

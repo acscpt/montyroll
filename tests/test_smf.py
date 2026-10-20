@@ -260,3 +260,23 @@ def testBuildSongFileIsParseable(tmp_path: Path) -> None:
     """The fixture file itself parses to the expected number of tracks."""
     path = buildSongFile(tmp_path / "fixture.mid")
     assert len(smf.parse(str(path)).tracks) == len(TRACK_NAMES)
+
+
+class TestBytes:
+    """Parsing from and serialising to memory."""
+
+    def testBytesMatchTheFile(self, songPath: Path) -> None:
+        """parseBytes reads what parse reads, and toBytes is what write writes."""
+        raw = songPath.read_bytes()
+        fromBytes = smf.parseBytes(raw, "in memory")
+        fromFile = smf.parse(str(songPath))
+        assert [(e.tick, e.status, bytes(e.data)) for t in fromBytes.tracks for e in t] == \
+            [(e.tick, e.status, bytes(e.data)) for t in fromFile.tracks for e in t]
+        out = songPath.parent / "again.mid"
+        smf.write(fromFile, str(out))
+        assert smf.toBytes(fromFile) == out.read_bytes()
+
+    def testBadBytesNameTheData(self) -> None:
+        """An error names the data as the caller called it."""
+        with pytest.raises(ValueError, match="clipboard: not a Standard MIDI File"):
+            smf.parseBytes(b"nothing", "clipboard")

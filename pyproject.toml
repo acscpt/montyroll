@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "montyroll"
-version = "0.2.0"
+version = "0.3.0"
 description = "A lightweight MIDI visualiser, piano-roll editor and player, stdlib-only Python with tkinter"
 readme = "README.md"
 license = { text = "MIT" }
@@ -41,7 +41,7 @@ Repository = "https://github.com/acscpt/montyroll"
 Issues = "https://github.com/acscpt/montyroll/issues"
 
 [tool.setuptools]
-packages = ["montyroll"]
+packages = ["montyroll", "montyroll.export"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
