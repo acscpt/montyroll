@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Heisenberg (acscpt)
 # SPDX-License-Identifier: MIT
 
-"""MontyRoll: tkinter MIDI visualiser/editor.
+"""MontyRoll: the tkinter window, `MidiEditorApp`.
 
-Layout: channel strip on the left (colour, instrument, mute/solo), a
-zoomable piano-roll in the middle tab, a raw event list in the second tab,
-transport + grid controls in the toolbar and a status bar that tracks the
-mouse in musical time.
+Layout: the toolbar with the transport and its readout, the file summary on
+a header line, channel rows on the left with the Reduce panel under them,
+the piano roll in the middle with its lane switch and strip and a drawer of
+Events and Report under it, the inspector on the right, and a status bar
+that tracks the mouse in musical time.
 
-This is the only module that knows about tkinter. Musical state lives in
-`model.Song`, and sound comes from an external synth process managed by
-`player.Player`; nothing can be pushed into a running synth, so every live
-change during playback (mute, solo, volume, speed) respawns it from the
-cursor position rather than talking to the running process.
+The window takes a `model.Song`, draws it with the colours and fonts of
+`theme.py`, and runs the analysis, reduction, arrangement and export
+functions on it. Sound comes from an external synth process managed by
+`player.Player`. A running synth takes no changes, so every live change
+during playback (mute, solo, volume, speed) respawns it from the cursor
+position.
 """
 
 from __future__ import annotations
