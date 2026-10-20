@@ -11,17 +11,19 @@
 
 MontyRoll reads a Standard MIDI File and shows it as a piano roll, with a voice-demand strip underneath that counts how many voices sound at each instant. Its main purpose is to reduce that demand to a voice *budget*, usually the number of channels on a target platform. The reduced arrangement plays through a [synth](#synths) such as `timidity`, and exports as a sequence of register writes for the sound chips of the platform, currently as a ZSM file for the Commander X16.
 
-MontyRoll is written in Python and uses the standard library alone, with tkinter for the window.
+MontyRoll is written in Python and uses the standard library alone, with tkinter for the window. The Sun Valley theme shown here is an optional extra. Without it, the window takes a dark theme with the same layout.
 
 The [documentation](https://github.com/acscpt/montyroll/blob/develop/docs/README.md) starts with a quick start on the demo file and goes on to every control, the plan file, and the Commander X16 export.
 
-<a href="docs/images/demo-reduced.png"><img src="docs/images/demo-reduced.png" width="600" alt="The demo file reduced to four voices: dropped notes stippled on the roll, and the strip level with the budget line"></a> <a href="docs/images/events-tab.png"><img src="docs/images/events-tab.png" width="600" alt="The Events tab listing every event in the demo file, decoded"></a>
+<a href="docs/images/demo-reduced.png"><img src="docs/images/demo-reduced.png" width="600" alt="The demo file reduced to four voices: dropped notes stippled on the roll, and the strip level with the budget line"></a> <a href="docs/images/events-tab.png"><img src="docs/images/events-tab.png" width="600" alt="The drawer under the roll open on the Events page, listing every event in the demo file, decoded"></a>
 
 ## Requirements
 
 - Python 3.10+ with tkinter (`sudo apt install python3-tk` on Debian or Ubuntu)
 
 - Optional, for sound: a software synth on `PATH`, `timidity` recommended. See [Synths](#synths) for the alternatives and install commands.
+
+- Optional, for the Sun Valley look: the `sv-ttk` package, which the `theme` extra installs.
 
 Without a synth, everything except audio playback still works.
 
@@ -30,10 +32,11 @@ Without a synth, everything except audio playback still works.
 From PyPI, for the application alone:
 
 ```bash
-pip install montyroll          # or: pipx install montyroll
+pip install montyroll                  # or: pipx install montyroll
+pip install "montyroll[theme]"         # with the Sun Valley theme
 ```
 
-`pipx` suits systems where pip will not install into the system Python. The package has no dependencies. The only things pip cannot provide are tkinter itself (`sudo apt install python3-tk` if `import tkinter` fails) and a synth for sound.
+`pipx` suits systems where pip will not install into the system Python. The package has no dependencies, and the `theme` extra adds `sv-ttk` alone. The only things pip cannot provide are tkinter itself (`sudo apt install python3-tk` if `import tkinter` fails) and a synth for sound.
 
 From the repository, which also carries the demo file and the documentation:
 
@@ -58,13 +61,13 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 
 **Reading a file**
 
-The piano roll draws every note in the colour of its channel, shaded by velocity, against a bar and beat grid with a piano keyboard down the side. Above the roll, a four-row ruler gives the time in seconds, the bar numbers, the tempo changes and markers of the file, and the chord in each beat, merged into runs. A file can hold any number of tempo changes, and the seconds row stretches and compresses against the bars to follow them. Beside the roll, a card for each channel gives its instrument, its note count, its pitch range, its instrument family, and whether it uses pitch bend. The status bar follows the pointer in musical time and names the chord and the note or drum sound under it.
+The piano roll draws every note in the colour of its channel, shaded by velocity, against a bar and beat grid with a piano keyboard down the side. Above the roll, a four-row ruler gives the time in seconds, the bar numbers, the tempo changes and markers of the file, and the chord in each beat, merged into runs. A file can hold any number of tempo changes, and the seconds row stretches and compresses against the bars to follow them. Beside the roll, a row for each channel gives its instrument, its mute and solo, and its volume, and the active row adds its note count, its pitch range, its instrument family, and whether it uses pitch bend. The inspector on the right describes the active channel and the selected note, and folds away to give the roll its width. The status bar follows the pointer in musical time and names the chord and the note or drum sound under it.
 
-Under the roll, the voice-demand strip stacks the sounding notes of each channel in the colours of the roll. Two lines over the stack count the distinct pitches, so that a unison counts once, and the distinct pitch classes, so that an octave doubling counts once too. The **Events** tab lists every event decoded, with its tick, its time, and its bar and beat. The **Report** tab gives the analysis as text, including the key, how many instruments play at once, and which channels rarely play together.
+Under the roll, the voice-demand strip stacks the sounding notes of each channel in the colours of the roll. Two lines over the stack count the distinct pitches, so that a unison counts once, and the distinct pitch classes, so that an octave doubling counts once too. The strip can show each note's velocity or reduction weight in place of the demand. A drawer under the roll holds two more pages: **Events** lists every event decoded, with its tick, its time, and its bar and beat, and **Report** gives the analysis as text, including the key, how many instruments play at once, and which channels rarely play together.
 
 **Editing**
 
-Notes are added, moved, resized, and deleted with the mouse, on a grid from whole notes down to 1/32 or with no grid at all. A selection can be given one velocity. Each channel card changes the instrument and the volume of its channel. The tempo can be set from any bar, a tempo change removed, or every tempo in the file scaled by a percentage. A save writes the original tracks back, so any event the editor does not understand is written back unchanged.
+Notes are added, moved, resized, and deleted with the mouse, on a grid from whole notes down to 1/32 or with no grid at all. A selection can be given one velocity. The inspector changes the instrument of the active channel, and each row changes the volume of its own. The tempo can be set from any bar, a tempo change removed, or every tempo in the file scaled by a percentage. A save writes the original tracks back, so any event the editor does not understand is written back unchanged.
 
 **Playing**
 

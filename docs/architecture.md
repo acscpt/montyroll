@@ -11,7 +11,7 @@ Playback plays the arrangement through the installed synth engine (see [Installa
 MontyRoll is organised into four main layers.
 
 - **Window and program**
-  - `app.py` draws the screen and takes the mouse and the keyboard. Beside it sit the two ways out of the program:
+  - `app.py` draws the screen and takes the mouse and the keyboard, in the colours and fonts that `theme.py` holds. Beside it sit the two ways out of the program:
     - `player.py` hands a copy of the song to a synth
     - `export/` writes a reduction for a sound chip (pluggable)
 
@@ -30,7 +30,7 @@ MontyRoll is organised into four main layers.
 
 ```mermaid
 flowchart TD
-	A["Window and program<br>app.py, player.py, export/"]
+	A["Window and program<br>app.py, theme.py, player.py, export/"]
 	B["Arrangement functions<br>analysis.py, reduce.py, arrange.py"]
 	C["The song model<br>model.py, gm.py"]
 	D["File<br>smf.py"]
@@ -91,7 +91,7 @@ sequenceDiagram
 
 5. The window asks `analysis.sweep` for the voice demand of the song.
 
-6. The sweep returns a `Demand`, the count of sounding notes for each stretch between two note boundaries. The window draws the piano roll, the channel cards, and the strip.
+6. The sweep returns a `Demand`, the count of sounding notes for each stretch between two note boundaries. The window draws the piano roll, the channel rows, and the strip.
 
 **Reducing**
 
@@ -119,7 +119,7 @@ sequenceDiagram
 
 ## Modules
 
-The four layers map onto eight modules and the `export/` subpackage. An arrow runs from a module to each module that imports it.
+The four layers map onto nine modules and the `export/` subpackage. An arrow runs from a module to each module that imports it.
 
 ```mermaid
 flowchart LR
@@ -134,6 +134,7 @@ flowchart LR
 	arrange --> app
 	export --> app
 	player[player.py] --> app
+	theme[theme.py] --> app
 ```
 
 | Module | Role |
@@ -146,7 +147,8 @@ flowchart LR
 | `arrange.py` | Builds a new `MidiFile` from a `Song` with one channel split into parts, doubled, or echoed. |
 | `export/` | Holds one module for each export target. `zsm.py` writes a ZSM file for the Commander X16. |
 | `player.py` | Finds a synth on `PATH` and runs it on a temporary copy of the song. |
-| `app.py` | The tkinter window: the piano roll, the channel cards, the demand strip, the Reduce panel, and the menus. |
+| `app.py` | The tkinter window: the piano roll, the channel rows, the lanes under the roll, the Reduce panel, the inspector, the drawer, and the menus. |
+| `theme.py` | Holds the colours, the fonts, and the compact Sun Valley sizes that `app.py` applies. |
 
 ## Design considerations
 
@@ -190,7 +192,7 @@ Two kinds of decision run through the code. Constraints hold everywhere and limi
   - `timidity` skips silence at the start of a file, and the retained notes keep its clock in step with the cursor.
 
 - **Channels count from 1 on the screen.**
-  - The code uses 0 to 15. The cards, the status bar, and the plan file use 1 to 16.
+  - The code uses 0 to 15. The rows, the inspector, the status bar, and the plan file use 1 to 16.
   - Ch 10 is the General MIDI drum channel, and the unison and octave merges pass its notes through.
 
 - **An error carries its source.**

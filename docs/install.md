@@ -39,7 +39,7 @@ cd montyroll
 python3 -m montyroll resources/chopsticks.mid
 ```
 
-The window opens on the demo file, with four channel cards on the left and the piano roll filling the rest. Any other MIDI file opens the same way, with its path in place of the demo. Given no path at all, MontyRoll starts on an empty song.
+The window opens on the demo file, with four channel rows on the left, the piano roll in the middle, and the inspector on the right. Any other MIDI file opens the same way, with its path in place of the demo. Given no path at all, MontyRoll starts on an empty song.
 
 ## Install the release from PyPI
 
@@ -48,6 +48,12 @@ The release on PyPI installs a `montyroll` command that runs from any directory,
 ```bash
 pip install montyroll
 montyroll path/to/file.mid
+```
+
+The `theme` extra adds the Sun Valley theme, the one the screenshots show, through the `sv-ttk` package. Without it the window takes a dark ttk theme with the same layout:
+
+```bash
+pip install "montyroll[theme]"
 ```
 
 The package contains the program alone, so the demo file does not come with it. It can be downloaded from the repository, or any MIDI file will serve instead.

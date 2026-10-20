@@ -34,7 +34,7 @@ cp resources/chopsticks.mid ~/x16-demo/
 python3 -m montyroll ~/x16-demo/chopsticks.mid
 ```
 
-The window opens with four channel cards: Acoustic Grand Piano on Ch 1, Vibraphone on Ch 2, Acoustic Bass on Ch 3, and the drum kit on Ch 10. The right end of the toolbar reads:
+The window opens with four channel rows: Acoustic Grand Piano on Ch 1, Vibraphone on Ch 2, Acoustic Bass on Ch 3, and the drum kit on Ch 10. The right end of the toolbar reads:
 
 ```text
 chopsticks.mid   fmt 1 | 5 trk | 480 tpq | 3/4 | 150 bpm | 371 notes | 38.6s | C major
@@ -64,7 +64,7 @@ A pool is a set of channels that share voices, and each pool draws its voices fr
 
 4. Set **Tier** to `psg`.
 
-5. On the `Ch 3` card, set **Pool** to `bass`.
+5. Click the `Ch 3` row and set **Pool** under it to `bass`.
 
 The line under **Voices** now reads `bass: one channel`.
 
@@ -76,13 +76,13 @@ The first pool, `all`, still holds the piano and the vibraphone, and it takes th
 
 2. Set **Tier** to `opm`.
 
-3. On the `Ch 10` card, set **Pool** to `(none)`.
+3. Click the `Ch 10` row and set **Pool** under it to `(none)`.
 
 Two red dashed lines now cross the strip, one for each tier, labelled `opm 8` and `psg 10`.
 
 ## Check the reduction
 
-Tick **Reduce to the voice budget**. The result label under the tick box reads:
+Switch on **Reduce to the voice budget**. The result label under the switch reads:
 
 ```text
 kept 340 of 371 notes, 0 cut, 0 tails clipped, loss 673

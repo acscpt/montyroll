@@ -1,6 +1,6 @@
 # Usage
 
-MontyRoll works on one MIDI file at a time. The channel strip on the left holds a card for each channel, and the Reduce panel sits under the cards. The right side holds three tabs, **Piano Roll**, **Events**, and **Report**, with the voice-demand strip under the roll. The status bar along the bottom describes whatever is under the pointer and reports the result of each command.
+MontyRoll works on one MIDI file at a time. The channel strip on the left holds a row for each channel, and the Reduce panel sits under the rows. The piano roll fills the middle with the voice-demand strip under it, and the inspector on the right describes the active channel and the selected note. The status bar along the bottom describes whatever is under the pointer and reports the result of each command.
 
 ## Open a file
 
@@ -12,7 +12,7 @@ python3 -m montyroll path/to/file.mid
 
 Inside the program, **File > Open...** brings up a file dialog, and `Ctrl+O` does the same from the keyboard.
 
-Once the file is loaded, the channel strip fills with one card for each channel that has notes. The **Piano Roll** tab shows the notes themselves, and the strip under the roll shows how many of them sound at once.
+Once the file is loaded, the channel strip fills with one row for each channel that has notes. The piano roll shows the notes themselves, scrolled to the middle of their range, and the strip under the roll shows how many of them sound at once.
 
 ## Read the file
 
@@ -20,15 +20,19 @@ The roll and the ruler above it display the musical detail of the MIDI file. The
 
 Move the mouse over any note to get more information about that note. The pitch of the note, its velocity, its channel and instrument, and its ticks are shown on the status bar, after the bar, the time, and the chord at that point.
 
-The two tabs beside the roll show the same file in other forms. The **Events** tab lists every event in the file, decoded into a table. The **Report** tab gives the analysis as text, and **Save report...** on that tab writes the text to a file.
+A click selects a note, and the inspector on the right then describes it in full: its pitch, velocity, start, ticks, and track, whether the reduction keeps it, and its weight as a bar. Above the note the inspector describes the active channel: its instrument, pool, release, priority, and figures. The burger button at the top of the inspector folds it to a narrow strip, and the roll takes the width. A second click opens it again.
+
+Two buttons along the bottom of the window, **Events** and **Report**, open a drawer under the roll that shows the same file in other forms. The **Events** page lists every event in the file, decoded into a table. The **Report** page gives the analysis as text, and **Save report...** on that page writes the text to a file. The same button again closes the drawer, and the sash above it sets its height.
+
+The strip under the roll has three lanes, chosen with the switch above it. **Demand** shows the voices sounding over time against the budget. **Velocity** draws a bar for each note at its start, as tall as its velocity, and **Weight** draws each note's reduction weight in the same way. Pointing at a bar names its note on the status bar.
 
 The mouse wheel moves the view around the roll. On its own the wheel scrolls up and down through the pitches. With `Shift` held it scrolls sideways through the bars, and with `Ctrl` held it zooms in and out around the pointer.
 
 ## Edit notes
 
-Notes are edited directly on the roll with the mouse. A new note always goes onto the active channel, which is the channel of the card that was clicked last.
+Notes are edited directly on the roll with the mouse. A new note always goes onto the active channel, which is the channel of the row that was clicked last.
 
-Click the card of a channel to make it active, then double-click an empty part of the roll at the pitch and time where the note belongs. The note appears one grid step long, and is selected ready for the next change. **Snap** on the toolbar sets the grid, and with **Snap** at `off` a note can start on any tick.
+Click the row of a channel to make it active, then double-click an empty part of the roll at the pitch and time where the note belongs. The note appears one grid step long, and is selected ready for the next change. **Snap** on the toolbar sets the grid, and with **Snap** at `off` a note can start on any tick.
 
 Existing notes are changed by dragging. Drag the body of a note to move it in time or to another pitch, and drag its right edge to make it longer or shorter. Both movements follow the same grid.
 
@@ -38,9 +42,9 @@ Several notes can be changed together. Hold `Shift` and click each note to build
 
 ## Change an instrument or a volume
 
-Each channel card has an instrument list, which holds the 128 General MIDI instruments, and a volume slider.
+The inspector has an instrument list for the active channel, which holds the 128 General MIDI instruments, and each channel's row has a volume slider.
 
-The instrument for a channel can be set from the predefined list. The instrument can be previewed by pressing the note button beside the list and it plays a short sample of the instrument. The slider sets the volume of the channel in the same direct way.
+The instrument for a channel can be set from the predefined list. The instrument can be previewed by pressing the note button beside the list and it plays a short sample of the instrument. The slider on a row sets the volume of its channel in the same direct way.
 
 Three buttons at the head of the strip work on every channel at once. **Change All** sets all the channels to one instrument, apart from Ch 10, which keeps its drum kit. **Mute All** mutes every channel. **Clear** puts things back: it clears every mute and solo and restores the instruments that the file opened with.
 
@@ -60,7 +64,7 @@ Playback goes through [a synth](install.md#add-a-synth-for-sound), and a cursor 
 
 **Play** on the toolbar starts the music from the first bar, and the same button stops it. `Space` does both from the keyboard. Playback can also start part way through. A right-click on the roll opens a menu with **Play from bar N** and **Play from beat N:B**, for the bar and the beat under the pointer.
 
-Each channel card has two tick boxes for listening to part of the arrangement. **M** mutes the channel, and its notes are dimmed on the roll. **S** solos the channel, so that the soloed channels are heard alone.
+Each channel row has two toggle buttons for listening to part of the arrangement. **M** mutes the channel, and its notes are dimmed on the roll. **S** solos the channel, so that the soloed channels are heard alone.
 
 **Vol** and **Speed** on the toolbar set the loudness and the speed of playback. Both change what is heard, and the file is left as it is.
 
@@ -72,13 +76,13 @@ A voice is one note that sounds, and the voice budget is the number of voices th
 
 Start with **Voices**, in the gutter to the left of the strip, and set it to the number of voices that the target has. The budget line moves to that level, and a red wash marks each stretch where the demand is above it.
 
-Then tick **Reduce to the voice budget** on the Reduce panel. From this point the roll, the strip, and playback all show the reduced arrangement. The roll stipples every note that the reduction drops or cuts short, so the loss can be seen bar by bar.
+Then switch on **Reduce to the voice budget** on the Reduce panel. From this point the roll, the strip, and playback all show the reduced arrangement. The roll stipples every note that the reduction drops or cuts short, so the loss can be seen bar by bar.
 
-The result label under the tick box sums up the reduction. Its first line counts the notes kept, the notes cut short, and the tails clipped. Its second line counts the dropped notes by reason. The figure to bring down is `no voice`: each of those notes found every voice busy with a note that weighs more.
+The result label under the switch sums up the reduction. Its first line counts the notes kept, the notes cut short, and the tails clipped. Its second line counts the dropped notes by reason. The figure to bring down is `no voice`: each of those notes found every voice busy with a note that weighs more.
 
-**Play** now plays the reduction. Untick the box and **Play** plays the original again, so the two can be compared by ear.
+**Play** now plays the reduction. Switch it off and **Play** plays the original again, so the two can be compared by ear.
 
-When a channel loses notes that matter to the music, raise **Pri** on its card. The notes of that channel then weigh more, and the other channels give way first.
+When a channel loses notes that matter to the music, click its row and raise **Pri** under it. The notes of that channel then weigh more, and the other channels give way first. The **Weight** lane under the roll shows the effect as bars, and **Shade** at the foot of the Reduce panel colours the notes on the roll by their weight in place of their velocity.
 
 Once the reduction sounds right, **File > Save Reduced As...** writes it out as a MIDI file of its own.
 
@@ -92,11 +96,11 @@ A pool is a set of channels that share a number of voices. A new file has one po
 
 3. Set **Voices** on the panel to the number of voices that the pool owns.
 
-4. Go to the card of each channel that belongs in the pool, and pick the pool in the **Pool** box on that card.
+4. Click the row of each channel that belongs in the pool, and pick the pool in the **Pool** box that opens under it.
 
-A melody is the usual case for a pool of its own. Its channels then keep their voices however busy the accompaniment becomes. A channel can also be left out of the reduction altogether, by setting **Pool** on its card to `(none)`.
+A melody is the usual case for a pool of its own. Its channels then keep their voices however busy the accompaniment becomes. A channel can also be left out of the reduction altogether, by setting **Pool** under its row to `(none)`.
 
-The demand line on each card helps to decide which channels can share a pool. The line ends with `overlaps`, the share of the playing time of that channel during which the edited pool already sounds. A low figure marks a channel that rarely plays at the same time as the pool, so it can use the same voices at little cost.
+The figures under the active row help to decide which channels can share a pool. Their line ends with `overlaps`, the share of the playing time of that channel during which the edited pool already sounds. A low figure marks a channel that rarely plays at the same time as the pool, so it can use the same voices at little cost. The inspector shows the same figure as **Overlap**.
 
 ## Describe the hardware with tiers
 
@@ -114,11 +118,11 @@ The strip then draws one budget line for each tier, and the reducer holds each v
 
 ## Smooth or thin a pool
 
-The switches at the foot of the Reduce panel belong to the pool in the **Pool** box. Each one removes demand before any note competes for a voice, at a different cost to the music.
+The toggle buttons and the three gaps at the foot of the Reduce panel belong to the pool in the **Pool** box. Each one removes demand before any note competes for a voice, at a different cost to the music.
 
-- **Merge unisons** is ticked in a new pool. Two channels that start the same pitch together then share one voice. With the box unticked, every doubling plays for as long as there are voices free.
+- **Unisons**, merging unisons, is on in a new pool. Two channels that start the same pitch together then share one voice. With it off, every doubling plays for as long as there are voices free.
 
-- **Fold octaves** goes a step further and drops a note that doubles another channel an octave away.
+- **Octaves**, folding octaves, goes a step further and drops a note that doubles another channel an octave away.
 
 - **Tremolo** holds a fast repeated note as one long note. Its value is the widest gap, in ticks, between two strikes that still count as a repeat.
 
@@ -132,21 +136,21 @@ The switches at the foot of the Reduce panel belong to the pool in the **Pool** 
 
 A file can carry several musical lines on one channel, as a piano transcription does. A split gives each line, or part, a channel of its own, and each part can then take its own instrument, pool, and priority.
 
-1. Click the card of the channel that holds the lines. This makes it the active channel.
+1. Click the row of the channel that holds the lines. This makes it the active channel.
 
 2. Choose **Edit > Split Channel into Parts...**.
 
 3. Enter the number of parts, from 2 to 8.
 
-The top part stays on the original channel. Each other part moves to the lowest free channel and gets a card of its own, where its instrument can be picked.
+The top part stays on the original channel. Each other part moves to the lowest free channel and gets a row of its own. A click on that row makes it active, and the inspector then picks its instrument.
 
 ## Double or echo a channel
 
-Where the budget has voices to spare, a copy of a channel adds weight or space to an arrangement. Both commands work on the active channel, so the first step is a click on its card.
+Where the budget has voices to spare, a copy of a channel adds weight or space to an arrangement. Both commands work on the active channel, so the first step is a click on its row.
 
 **Edit > Double Channel...** asks for an interval in semitones and copies the channel at that distance, so 12 gives a doubling an octave up. **Edit > Echo Channel...** asks for a delay in ticks and copies the channel that much later.
 
-In both cases the copy lands on the lowest free channel, at a lower velocity than the original. It gets a card of its own, where its instrument can be picked.
+In both cases the copy lands on the lowest free channel, at a lower velocity than the original. It gets a row of its own, and the inspector picks its instrument once the row is active.
 
 ## Save and load a plan
 

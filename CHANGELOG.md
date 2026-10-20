@@ -6,6 +6,28 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+### Added
+
+- **A new look.** The window takes the Sun Valley dark theme at compact sizes when the `sv-ttk` package is installed, which the new `theme` extra brings in, and a dark ttk clam theme when it is not. The colours, fonts and sizes live in the new module `theme.py`.
+
+- **The inspector.** A right-hand pane describes the active channel, with its instrument picker and preview, and the selected note, with its reduction verdict and its weight. Its burger button folds it to a narrow strip and gives the roll the width.
+
+- **Lanes under the roll.** A switch above the strip chooses Demand, as before, Velocity, with a bar for each note, or Weight, with each note's reduction weight and the notes the reduction drops drawn as outlines.
+
+- **A transport readout.** The toolbar shows the time, the bar and beat, and the tempo in a large readout, which shows the opening position while stopped.
+
+### Changed
+
+- **Compact channel rows.** Each channel is one line of colour, number, instrument, mute, solo and volume, and the active channel's row also shows its figures and its pool, release and priority. The instrument picker and the preview button moved to the inspector.
+
+- **Events and Report in a drawer.** The two pages open under the roll from buttons along the bottom, beside the count of events, so the roll stays in view.
+
+- **The file summary on a line of its own.** The summary moved from the end of the toolbar to a header line under it, so it shows in full on a narrow window.
+
+- **The Reduce panel.** The reduction is a switch, and the transforms and the weight shading are toggle buttons: **Unisons**, **Octaves**, **Top line** and **Shade**.
+
+- **The roll.** A file opens scrolled to the middle of its pitches, notes have an edge a little lighter than their fill, and the playback cursor is drawn in the theme's accent colour.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

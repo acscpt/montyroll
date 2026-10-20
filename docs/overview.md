@@ -1,6 +1,6 @@
 # Overview
 
-MontyRoll is a desktop program for Standard MIDI Files. It opens a file as a piano roll, with a card for each channel beside the roll and a voice-demand strip underneath that shows how many voices play at any instant.
+MontyRoll is a desktop program for Standard MIDI Files. It opens a file as a piano roll, with a row for each channel beside the roll, a voice-demand strip underneath that shows how many voices play at any instant, and an inspector for the active channel and the selected note.
 
 The main purpose of MontyRoll is to reduce those voices to a *budget* targeting a platform that has a limited number of channels. The reduction keeps as much of the music as that budget allows.
 
@@ -12,15 +12,15 @@ The following sections detail the main workflow steps.
 
 ### Reading a file
 
-On loading a MIDI file the piano roll draws each note in the colour of its channel, brighter at a higher velocity. The ruler above the roll carries four rows: seconds, bar numbers, tempo changes, and the chord in each beat. Each channel is displayed as a card on the left, with its colour, its instrument, its note count, and its range.
+On loading a MIDI file the piano roll draws each note in the colour of its channel, brighter at a higher velocity. The ruler above the roll carries four rows: seconds, bar numbers, tempo changes, and the chord in each beat. Each channel is displayed as a row on the left, with its colour, its instrument, its mute and solo, and its volume. The active row also shows its note count, its range, and its figures.
 
-Two more tabs are displayed. The **Events** tab decodes every event of the file and the **Report** tab gives an analysis, covering the key, the voice demand, the doubling between channels, and the busiest bars.
+Two more pages open in a drawer under the roll. The **Events** page decodes every event of the file and the **Report** page gives an analysis, covering the key, the voice demand, the doubling between channels, and the busiest bars. The strip under the roll can also show the velocity or the reduction weight of every note in place of the demand.
 
 ### Editing
 
 Notes are edited on the roll with the mouse. A note can be dragged or a double-click will add a note for the active channel. Dragging on a note's right edge changes its length.
 
-The channel cards change the instrument and the volume of a channel, with the instrument picked from the General MIDI list, and the tempo row of the ruler sets and removes tempo changes.
+The inspector changes the instrument of the active channel, picked from the General MIDI list, and each channel's row changes its volume. The tempo row of the ruler sets and removes tempo changes.
 
 Edits are added directly as events of the loaded file and only persisted if saved.
 
@@ -32,7 +32,7 @@ Pressing play plays the file from the first bar via the configured software synt
 
 The Reduce panel fits the file to the voice budget. The reducer gives every note a weight, merges notes that double each other, and the note with the least weight gives way when the budget is full.
 
-With **Reduce to the voice budget** ticked, the roll, the strip, and playback all show the reduced arrangement.
+With **Reduce to the voice budget** switched on, the roll, the strip, and playback all show the reduced arrangement.
 
 ### Arranging
 
@@ -56,7 +56,7 @@ The budget is the number of voices that the reduction may use. Wherever the dema
 
 Every note has a weight, the product of four factors:
 
-- **The priority of its channel.** This is **Pri** on the channel card, where 1.0 is neutral.
+- **The priority of its channel.** This is **Pri** under the channel's row, where 1.0 is neutral.
 
 - **Its velocity.** A loud note weighs more than a quiet one.
 
