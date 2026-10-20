@@ -45,6 +45,8 @@ DEMAND_H = 90        # initial height of the voice-demand strip under the roll
 DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
+INSPECTOR_W = 290    # the inspector's width when open
+INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
 NO_TIER = "(none)"   # a pool with no tier: plain voices, no chip
 BY_INSTRUMENT = "(by instrument)"   # a pool's sound left to each part's GM program
@@ -60,6 +62,7 @@ TEMPO_GLYPH = "\u2669"      # quarter note before a bpm figure in the ruler and 
 MINUS = "\u2212"            # true minus sign, the same width as "+" on the zoom buttons
 ARROW = "\u2192"            # rightwards arrow in the "Ch 1 -> Flute" status text
 NEWLINE_GLYPH = "\u23ce"    # return symbol standing in for newlines in event text
+BURGER_GLYPH = "\u2630"     # trigram for heaven, on the inspector's fold button
 
 
 def _shade(color: str, factor: float) -> str:
@@ -253,6 +256,8 @@ class MidiEditorApp(tk.Tk):
         self.usageLabels: dict[int, tk.Label] = {}       # per channel: the demand figures
         self.descLabels: dict[int, tk.Label] = {}        # per channel: notes, range, family
         self.usageText: dict[int, str] = {}              # those figures without the overlap
+        self.channelFigures: dict[int, analysis.ChannelDemand] = {}   # per channel, as on the cards
+        self.overlapShares: dict[int, float] = {}        # per channel: overlap with the edited pool
         self._overlapAfter: str | None = None
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
@@ -613,6 +618,15 @@ class MidiEditorApp(tk.Tk):
         # -- notebook: piano roll + events
         self.nb = ttk.Notebook(paned)
         paned.add(self.nb, weight=1)
+
+        # -- inspector: the active channel and the selected note, folding to
+        # a narrow strip from its burger button. Its pane keeps the width it
+        # is given rather than the width its contents ask for.
+        self.paned = paned
+        self.inspectorPane = ttk.Frame(paned, width=INSPECTOR_W, padding=(8, 4))
+        self.inspectorPane.pack_propagate(False)
+        paned.add(self.inspectorPane, weight=0)
+        self._buildInspector(self.inspectorPane)
 
         # The roll is a 3x3 grid: ruler above the note canvas, keyboard gutter
         # to its left, scrollbars to the right and below. Row 1 / column 1
@@ -999,6 +1013,7 @@ class MidiEditorApp(tk.Tk):
 
         self.channelRows.clear()
         figures = analysis.channelDemand(self._ensureSongDemand())
+        self.channelFigures = figures
         scaling = float(self.tk.call("tk", "scaling"))   # the figures line wraps at high DPI
 
         for ch in sorted(self.song.channels):
@@ -1321,6 +1336,7 @@ class MidiEditorApp(tk.Tk):
         """
         self.activeChannel = ch
         self._highlightActiveRow()
+        self._refreshInspector()
         self._setStatus(f"Active channel: {ch + 1} - double-click the roll to add notes")
 
     def _highlightActiveRow(self):
@@ -1357,6 +1373,7 @@ class MidiEditorApp(tk.Tk):
 
         self._markDirty()
         self._invalidateReducedSong()
+        self._refreshInspector()
         self._setStatus(f"Ch {ch + 1} {ARROW} {gm.programName(program)}")
         self._liveUpdate()
 
@@ -1395,6 +1412,276 @@ class MidiEditorApp(tk.Tk):
             return solos
 
         return {c for c, v in self.muteVars.items() if not v.get()}
+
+    # ----------------------------------------------------------- inspector
+    def _buildInspector(self, parent: ttk.Frame):
+        """Create the inspector and the strip it folds to.
+
+        Open, the inspector is a header with the burger button and two
+        cards: the active channel, with its instrument picker and preview
+        button, and the selected note. Folded, it is a strip holding the
+        burger button and the panel's name written upwards.
+
+        Args:
+            parent: the inspector's pane.
+        """
+        p = self.palette
+        self.inspectorFolded = False
+        ttk.Style(self).configure("Burger.Toolbutton", font=(self.uiFamily, 14),
+                                  padding=(6, 0, 6, 2))
+
+        # The open panel: header, then the channel card.
+        self.inspectorBody = ttk.Frame(parent)
+        self.inspectorBody.pack(fill="both", expand=True)
+        head = ttk.Frame(self.inspectorBody)
+        head.pack(fill="x", pady=(0, 6))
+        b = ttk.Button(head, text=BURGER_GLYPH, style="Burger.Toolbutton",
+                       command=self.toggleInspector)
+        b.pack(side="left")
+        Tooltip(b, "Fold the inspector away; the roll takes its width")
+        ttk.Label(head, text="Inspector", font=(self.uiFamily, 11, "bold")).pack(
+            side="left", padx=(4, 0))
+
+        card = self._inspectorCard("CHANNEL")
+        top = tk.Frame(card, bg=p["raised"])
+        top.pack(fill="x", pady=(4, 6))
+        self.inspSwatch = tk.Canvas(top, width=12, height=12, bg=p["raised"],
+                                    highlightthickness=0)
+        self.inspSwatch.pack(side="left")
+        self.inspTitle = tk.Label(top, text="", anchor="w", bg=p["raised"], fg=p["text"],
+                                  font=(self.uiFamily, 11, "bold"))
+        self.inspTitle.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        # The instrument picker and the preview button act on the active
+        # channel. Picker entries are "nnn  Name", as on the cards.
+        pick = tk.Frame(card, bg=p["raised"])
+        pick.pack(fill="x", pady=(0, 6))
+        self.inspProgramVar = tk.StringVar()
+        self.inspProgram = ttk.Combobox(
+            pick, textvariable=self.inspProgramVar, state="readonly",
+            values=[f"{i:3d}  {n}" for i, n in enumerate(gm.GM_PROGRAMS)])
+        self.inspProgram.pack(side="left", fill="x", expand=True)
+        self.inspProgram.bind("<<ComboboxSelected>>", lambda e: self._programChanged(
+            self.activeChannel, self.inspProgramVar))
+        Tooltip(self.inspProgram, "GM instrument for the active channel.\n"
+                "Picking one writes a program-change event\n"
+                "into the file (saved on Ctrl+S).")
+        pb = ttk.Button(pick, text=PREVIEW_GLYPH, width=2,
+                        command=lambda: self._previewChannel(self.activeChannel))
+        pb.pack(side="left", padx=(4, 0))
+        Tooltip(pb, "Play a short sample of the active channel's instrument\n"
+                "(in the channel's own pitch range)")
+        self.inspChannelFields = {name: self._inspectorField(card, name) for name in (
+            "Pool", "Release", "Priority", "Notes", "Range", "Family", "Peak", "Mean",
+            "Plays", "Overlap")}
+
+        # The note card: the pitch large, then the note's details and its
+        # weight as a bar against the heaviest note in the song.
+        card = self._inspectorCard("NOTE")
+        self.inspPitch = tk.Label(card, text="", anchor="w", bg=p["raised"], fg=p["text"],
+                                  font=(self.uiFamily, 16, "bold"))
+        self.inspPitch.pack(fill="x")
+        self.inspNoteFields = {name: self._inspectorField(card, name) for name in (
+            "Velocity", "Starts", "Ticks", "Track", "Reduction", "Weight")}
+        self.inspWeightBar = tk.Canvas(card, height=8, bg=p["raised"], highlightthickness=0)
+        self.inspWeightBar.pack(fill="x", pady=(3, 0))
+
+        # The folded strip.
+        self.inspectorStrip = ttk.Frame(parent)
+        b = ttk.Button(self.inspectorStrip, text=BURGER_GLYPH, style="Burger.Toolbutton",
+                       command=self.toggleInspector)
+        b.pack(side="top")
+        Tooltip(b, "Open the inspector")
+        name = tk.Canvas(self.inspectorStrip, width=24, height=110, bg=p["panel"],
+                         highlightthickness=0)
+        name.create_text(12, 55, text="Inspector", angle=90, fill=p["muted"],
+                         font=(self.uiFamily, 10, "bold"))
+        name.pack(side="top", pady=(10, 0))
+        name.bind("<Button-1>", lambda e: self.toggleInspector())
+
+    def _inspectorCard(self, title: str) -> tk.Frame:
+        """Add a titled card to the open inspector.
+
+        Args:
+            title: the card's heading.
+
+        Returns:
+            tk.Frame: the card, for its contents.
+        """
+        p = self.palette
+        card = tk.Frame(self.inspectorBody, bg=p["raised"], padx=10, pady=8)
+        card.pack(fill="x", pady=(0, 10))
+        tk.Label(card, text=title, anchor="w", bg=p["raised"], fg=p["muted"],
+                 font=(self.uiFamily, 9, "bold")).pack(fill="x")
+        return card
+
+    def _inspectorField(self, card: tk.Frame, name: str) -> tk.Label:
+        """Add a line with a name on the left and a value on the right.
+
+        Args:
+            card: the card to add it to.
+            name: the field's name.
+
+        Returns:
+            tk.Label: the value label, for `_refreshInspector` to fill.
+        """
+        p = self.palette
+        line = tk.Frame(card, bg=p["raised"])
+        line.pack(fill="x", pady=1)
+        tk.Label(line, text=name, bg=p["raised"], fg=p["muted"],
+                 font=(self.uiFamily, 10)).pack(side="left")
+        value = tk.Label(line, text="", bg=p["raised"], fg=p["text"], font=(self.uiFamily, 10))
+        value.pack(side="right")
+        return value
+
+    def toggleInspector(self):
+        """Fold the inspector to its strip, or open it again.
+
+        The pane's sash moves to the new width, so the roll, the ruler and
+        the strip take the width the panel gives up, or give it back.
+        """
+        self.inspectorFolded = not self.inspectorFolded
+
+        if self.inspectorFolded:
+            self.inspectorBody.pack_forget()
+            self.inspectorStrip.pack(fill="y", expand=True)
+            width = INSPECTOR_FOLDED_W
+        else:
+            self.inspectorStrip.pack_forget()
+            self.inspectorBody.pack(fill="both", expand=True)
+            width = INSPECTOR_W
+            self._refreshInspector()
+
+        self.inspectorPane.configure(width=width, padding=(2, 4) if self.inspectorFolded
+                                     else (8, 4))
+        self.update_idletasks()
+        total = self.paned.winfo_width()
+
+        if total > width:
+            self.paned.sashpos(1, total - width)
+
+    def _refreshInspector(self):
+        """Show the active channel and the selected note in the inspector.
+
+        Nothing is drawn while it is folded; opening it refreshes it.
+        """
+        if self.inspectorFolded:
+            return
+
+        self._showInspectorChannel()
+        self._showInspectorNote()
+
+    def _showInspectorChannel(self):
+        """Fill the inspector's channel card from the active channel."""
+        ch = self.activeChannel
+        info = self.song.channels.get(ch)
+        fields = self.inspChannelFields
+        self.inspSwatch.delete("all")
+
+        if info is None:
+            self.inspTitle.config(text="No channel")
+            self.inspProgramVar.set("")
+            self.inspProgram.configure(state="disabled")
+
+            for label in fields.values():
+                label.config(text="")
+
+            return
+
+        # Title, swatch and the picker; the drum channel's kit is fixed.
+        self.inspSwatch.create_rectangle(0, 0, 12, 12, fill=CHANNEL_COLORS[ch], outline="")
+        self.inspTitle.config(text=f"Ch {ch + 1}  {info.instrument}")
+
+        if info.isDrums:
+            self.inspProgramVar.set("Drum Kit (GM percussion)")
+            self.inspProgram.configure(state="disabled")
+        else:
+            self.inspProgramVar.set(f"{info.program:3d}  {gm.programName(info.program)}")
+            self.inspProgram.configure(state="readonly")
+
+        # The reduction settings as the cards have them, then the figures.
+        release = self.plan.release.get(ch)
+
+        try:
+            priority = self.priorityVars[ch].get() if ch in self.priorityVars \
+                else self.plan.priorityOf(ch)
+        except tk.TclError:
+            priority = self.plan.priorityOf(ch)    # half-typed number
+
+        figure = self.channelFigures.get(ch)
+        share = self.overlapShares.get(ch)
+        values = {
+            "Pool": self._poolNameOf(ch),
+            "Release": f"{release:g} ms" if release is not None else "tier default",
+            "Priority": f"{priority:g}",
+            "Notes": f"{info.noteCount:,}",
+            "Range": f"{gm.noteName(info.lo)}-{gm.noteName(info.hi)}",
+            "Family": "Percussion" if info.isDrums else gm.familyName(info.program),
+            "Peak": str(figure.peak) if figure else "",
+            "Mean": f"{figure.mean:.1f}" if figure else "",
+            "Plays": f"{figure.fraction:.0%}" if figure else "",
+            "Overlap": f"{share:.0%} with {self.editPool.name}" if share is not None
+                       and self.editPool is not None else "",
+        }
+
+        for name, label in fields.items():
+            label.config(text=values[name])
+
+    def _showInspectorNote(self):
+        """Fill the inspector's note card from the selection.
+
+        One selected note is described in full; with none or several the
+        card says so and the fields are left empty.
+        """
+        fields = self.inspNoteFields
+        self.inspWeightBar.delete("all")
+        note = next(iter(self.selection)) if len(self.selection) == 1 else None
+
+        if note is None:
+            count = len(self.selection)
+            self.inspPitch.config(text=f"{count} notes selected" if count else "No note selected",
+                                  font=(self.uiFamily, 10))
+
+            for label in fields.values():
+                label.config(text="")
+
+            return
+
+        # The note's verdict comes from the reduction while it is on; the
+        # weight is the plan's either way.
+        name = (gm.drumName(note.pitch) if note.channel == model.DRUM_CHANNEL
+                else gm.noteName(note.pitch))
+        self.inspPitch.config(text=name, font=(self.uiFamily, 16, "bold"))
+        bar, beat = self.song.barBeat(note.start)
+
+        if self.reduceVar.get():
+            reduction = self._ensureReduction()
+            verdict = reduction.dropped.get(id(note)) or (
+                "cut short" if id(note) in reduction.cut else "kept")
+        else:
+            verdict = "reduction off"
+
+        weights = self._ensureWeights()
+        weight = weights.get(id(note), 0.0)
+        heaviest = max(weights.values(), default=1.0) or 1.0
+        values = {
+            "Velocity": str(note.velocity),
+            "Starts": f"bar {bar}:{beat}",
+            "Ticks": f"{note.start}-{note.end} ({note.length})",
+            "Track": str(note.track),
+            "Reduction": verdict,
+            "Weight": f"{weight:.2f}",
+        }
+
+        for key, label in fields.items():
+            label.config(text=values[key])
+
+        # The weight bar across the card's width.
+        width = max(self.inspWeightBar.winfo_width(), 200)
+        self.inspWeightBar.create_rectangle(0, 0, width, 8, fill=self.palette["field"],
+                                            outline="")
+        self.inspWeightBar.create_rectangle(0, 0, width * weight / heaviest, 8,
+                                            fill=CHANNEL_COLORS[note.channel], outline="")
 
     # ------------------------------------------------------------- drawing
     @property
@@ -1677,13 +1964,15 @@ class MidiEditorApp(tk.Tk):
                               fill="#333", font=(self.uiFamily, 7))
 
     def _applySelectionStyle(self):
-        """Outline selected notes in white and restore the others' outlines."""
+        """Outline the selected notes in white, the rest in their colour; refresh the inspector."""
         for item, note in self.itemToNote.items():
             if note in self.selection:
                 self.canvas.itemconfigure(item, outline="#ffffff", width=2)
             else:
                 base = CHANNEL_COLORS[note.channel]
                 self.canvas.itemconfigure(item, outline=_shade(base, 0.5), width=1)
+
+        self._refreshInspector()
 
     def zoom(self, factor: float, anchor_x: float | None = None):
         """Zoom horizontally, keeping the tick under `anchor_x` still on screen.
@@ -2270,6 +2559,7 @@ class MidiEditorApp(tk.Tk):
             self.lossLbl.config(text="")
             self._scheduleDemand()
 
+        self._refreshInspector()
         self._showReportIfSelected()
 
         if self.playStart is not None:
@@ -2606,13 +2896,16 @@ class MidiEditorApp(tk.Tk):
         if pool is None or not self.song.notes:
             self.overlapLbl.config(text="")
             self.overlapTip.text = ""
+            self.overlapShares = {}
 
             for ch, lbl in self.usageLabels.items():
                 lbl.config(text=self.usageText[ch])
 
+            self._refreshInspector()
             return
 
         shares = analysis.poolOverlap(self._ensureSongDemand(), pool.channels)
+        self.overlapShares = shares
 
         for ch, lbl in self.usageLabels.items():
             lbl.config(text=f"{self.usageText[ch]} | overlaps {pool.name} {shares.get(ch, 0):.0%}")
@@ -2630,6 +2923,7 @@ class MidiEditorApp(tk.Tk):
                                     "the rest of the pool already sounds:\n" + lines)
 
         self.overlapLbl.config(text=text)
+        self._refreshInspector()
 
     def _targetFor(self, pool: reduce.Pool) -> str | None:
         """The export target whose chip a pool's tier names.
@@ -3369,6 +3663,7 @@ class MidiEditorApp(tk.Tk):
             self._invalidateDemand()
             self.song.maxTick = max(self.song.maxTick,
                                      max((n.end for n in self.selection), default=0))
+            self._refreshInspector()
             n = len(self.selection)
             verb = "Resized" if self.drag["mode"] == "resize" else "Moved"
             self._setStatus(f"{verb} {n} note{'s' if n != 1 else ''}")

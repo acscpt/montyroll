@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
-from montyroll import analysis, model, player, reduce, smf, theme
+from montyroll import analysis, gm, model, player, reduce, smf, theme
 from montyroll import app as appModule
 from montyroll.app import (
     CHANNEL_COLORS,
@@ -168,6 +168,68 @@ class TestTheme:
         """The named default font uses the interface family the theme chose."""
         family = tkfont.nametofont("TkDefaultFont", root=app).actual("family")
         assert family == app.uiFamily
+
+
+class TestInspector:
+    """The inspector: the active channel, the selected note, and the fold."""
+
+    def testShowsTheActiveChannel(self, app: MidiEditorApp) -> None:
+        """The channel card follows the active channel."""
+        ch = sorted(app.song.channels)[1]
+        app._setActiveChannel(ch)
+        info = app.song.channels[ch]
+        assert app.inspTitle.cget("text") == f"Ch {ch + 1}  {info.instrument}"
+        assert app.inspChannelFields["Notes"].cget("text") == f"{info.noteCount:,}"
+        assert app.inspChannelFields["Pool"].cget("text") == app._poolNameOf(ch)
+
+    def testShowsOneSelectedNote(self, app: MidiEditorApp) -> None:
+        """One selected note is described; none or several are counted."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        app.selection = {note}
+        app._applySelectionStyle()
+        assert app.inspPitch.cget("text") == gm.noteName(note.pitch)
+        assert app.inspNoteFields["Velocity"].cget("text") == str(note.velocity)
+        assert app.inspNoteFields["Reduction"].cget("text") == "reduction off"
+        app.selectAll()
+        assert app.inspPitch.cget("text") == f"{len(app.song.notes)} notes selected"
+        app._clearSelection()
+        assert app.inspPitch.cget("text") == "No note selected"
+
+    def testVerdictFollowsTheReduction(self, app: MidiEditorApp) -> None:
+        """With the reduction on, a dropped note shows its reason."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        reduction = app._ensureReduction()
+        dropped = next(n for n in app.song.notes if id(n) in reduction.dropped)
+        app.selection = {dropped}
+        app._applySelectionStyle()
+        assert app.inspNoteFields["Reduction"].cget("text") == reduction.dropped[id(dropped)]
+
+    def testPickerChangesTheActiveChannel(self, app: MidiEditorApp) -> None:
+        """The inspector's instrument picker writes a program change on the active channel."""
+        ch = next(c for c in sorted(app.song.channels) if c != model.DRUM_CHANNEL)
+        app._setActiveChannel(ch)
+        app.inspProgramVar.set(" 40  Violin")
+        app._programChanged(app.activeChannel, app.inspProgramVar)
+        assert app.song.channels[ch].program == 40
+        assert app.inspTitle.cget("text").endswith("Violin")
+
+    def testFoldGivesTheRollTheWidth(self, app: MidiEditorApp) -> None:
+        """Folding shows the strip, hides the cards, and widens the roll; opening reverses it."""
+        app.update()
+        before = app.canvas.winfo_width()
+        app.toggleInspector()
+        app.update()
+        assert app.inspectorFolded
+        assert app.inspectorStrip.winfo_ismapped()
+        assert not app.inspectorBody.winfo_ismapped()
+        assert app.canvas.winfo_width() > before
+        app.toggleInspector()
+        app.update()
+        assert not app.inspectorFolded
+        assert app.inspectorBody.winfo_ismapped()
+        assert app.canvas.winfo_width() == pytest.approx(before, abs=4)
 
 
 class TestSelection:
