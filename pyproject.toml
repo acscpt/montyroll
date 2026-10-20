@@ -31,7 +31,9 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.6"]
+# The Sun Valley theme; without it the window uses a dark ttk clam theme.
+theme = ["sv-ttk>=2.6"]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.6", "sv-ttk>=2.6"]
 
 [project.scripts]
 montyroll = "montyroll.app:main"

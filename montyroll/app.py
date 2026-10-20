@@ -26,7 +26,12 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from typing import Any
 
-from . import analysis, arrange, export, gm, model, player, reduce, smf
+from . import analysis, arrange, export, gm, model, player, reduce, smf, theme
+
+try:
+    import sv_ttk
+except ImportError:              # the theme extra is not installed: ttk clam is used
+    sv_ttk = None
 
 CHANNEL_COLORS = [
     "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
@@ -129,12 +134,15 @@ class Tooltip:
         # screen coordinates since the Toplevel is not managed by any parent.
         x = self.widget.winfo_rootx() + 12
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        top = self.widget.winfo_toplevel()
+        palette = getattr(top, "palette", theme.CLAM_DARK)
+        family = getattr(top, "uiFamily", "TkDefaultFont")
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.text, justify="left", bg="#ffffe0",
-                 fg="#000", relief="solid", bd=1, padx=6, pady=3,
-                 font=("TkDefaultFont", 9)).pack()
+        tk.Label(self.tip, text=self.text, justify="left", bg=palette["raised"],
+                 fg=palette["text"], relief="solid", bd=1, padx=6, pady=3,
+                 font=(family, 9)).pack()
 
     def _hide(self, _event=None):
         """Cancel any pending timer and take down the popup.
@@ -175,7 +183,8 @@ class MidiEditorApp(tk.Tk):
                 song.
         """
         super().__init__()
-        self.geometry("1280x760")
+        self.geometry("1400x860")
+        self._applyTheme()
 
         # The model and two synth processes: one for playback and a separate
         # one for instrument previews, so auditioning never stops the music.
@@ -273,6 +282,102 @@ class MidiEditorApp(tk.Tk):
             self.openFile(path)
         else:
             self._refreshAll()
+
+    # --------------------------------------------------------------- theme
+    def _applyTheme(self):
+        """Theme the window before any widget is built.
+
+        With the sv-ttk package installed the ttk widgets take the Sun Valley
+        dark theme at the compact sizes of `theme.COMPACT_TCL`; without it
+        they take the clam theme coloured from `theme.CLAM_DARK`. Either way
+        the option database gives the classic tk widgets the same palette,
+        and the named fonts take the first interface font that is installed.
+        """
+        # The ttk theme, and the palette that goes with it.
+        if sv_ttk is not None:
+            sv_ttk.set_theme("dark", root=self)
+            self.tk.eval(theme.COMPACT_TCL)
+            self.palette = theme.SUN_VALLEY
+        else:
+            self.palette = theme.CLAM_DARK
+            self._styleClam()
+
+        p = self.palette
+        self.configure(background=p["window"])
+
+        # Classic tk widgets read their colours from the option database as
+        # they are created, so these reach every one built after this.
+        for name, value in (("*Background", p["panel"]), ("*Foreground", p["text"]),
+                            ("*activeBackground", p["raised"]),
+                            ("*activeForeground", p["text"]),
+                            ("*selectColor", p["field"]), ("*troughColor", p["field"]),
+                            ("*highlightBackground", p["panel"]),
+                            ("*highlightColor", p["accent"]),
+                            ("*insertBackground", p["text"]),
+                            ("*selectBackground", p["accent"]),
+                            ("*selectForeground", "#ffffff"),
+                            ("*disabledForeground", p["muted"])):
+            self.option_add(name, value)
+
+        # The named fonts, and Sun Valley's own, take the interface family.
+        # Widgets given a size of their own use the same family by name.
+        family = theme.pickFont(tkfont.families(self))
+        self.uiFamily = family or tkfont.nametofont("TkDefaultFont").actual("family")
+
+        if family is not None:
+            names = ["TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                     "TkCaptionFont", "TkTooltipFont"]
+
+            if sv_ttk is not None:
+                names += theme.SUN_VALLEY_FONTS
+
+            for name in names:
+                size = theme.UI_CAPTION_PT if "Caption" in name else theme.UI_FONT_PT
+                tkfont.nametofont(name, root=self).configure(family=family, size=size)
+
+    def _styleClam(self):
+        """Colour the ttk clam theme from the palette, for when sv-ttk is absent."""
+        p = self.palette
+        s = ttk.Style(self)
+        s.theme_use("clam")
+
+        # Every ttk widget inherits from "."; the styles after it adjust it.
+        s.configure(".", background=p["panel"], foreground=p["text"],
+                    fieldbackground=p["field"], bordercolor=p["border"],
+                    lightcolor=p["raised"], darkcolor=p["panel"], troughcolor=p["window"],
+                    focuscolor=p["accent"], selectbackground=p["accent"],
+                    selectforeground="#ffffff", insertcolor=p["text"], arrowcolor=p["text"])
+        s.map(".", foreground=[("disabled", p["muted"])],
+              background=[("disabled", p["panel"])])
+        s.configure("TButton", background=p["raised"], padding=(8, 2), borderwidth=1)
+        s.map("TButton", background=[("pressed", p["active"]), ("active", p["border"])])
+        s.configure("TNotebook", background=p["panel"], borderwidth=0)
+        s.configure("TNotebook.Tab", background=p["window"], foreground=p["muted"],
+                    padding=(12, 4))
+        s.map("TNotebook.Tab", background=[("selected", p["raised"])],
+              foreground=[("selected", p["text"])])
+        s.map("TCombobox", fieldbackground=[("readonly", p["field"])],
+              foreground=[("readonly", p["text"])],
+              selectbackground=[("readonly", p["field"])],
+              selectforeground=[("readonly", p["text"])])
+        s.configure("TCheckbutton", indicatorbackground=p["field"],
+                    indicatorforeground="#ffffff")
+        s.map("TCheckbutton", indicatorbackground=[("selected", p["accent"])],
+              background=[("active", p["panel"])])
+        s.configure("TLabelframe", background=p["panel"], bordercolor=p["border"])
+        s.configure("TLabelframe.Label", background=p["panel"], foreground=p["muted"])
+        s.configure("Treeview", background=p["field"], fieldbackground=p["field"],
+                    foreground=p["text"], bordercolor=p["border"])
+        s.configure("Treeview.Heading", background=p["raised"], foreground=p["text"],
+                    relief="flat")
+        s.map("Treeview.Heading", background=[("active", p["border"])])
+        s.configure("TScrollbar", background=p["raised"], troughcolor=p["window"],
+                    bordercolor=p["window"], arrowcolor=p["muted"])
+        s.configure("TPanedwindow", background=p["window"])
+
+        # The combobox drop-down is a classic listbox inside the ttk widget.
+        self.option_add("*TCombobox*Listbox.background", p["field"])
+        self.option_add("*TCombobox*Listbox.foreground", p["text"])
 
     # ------------------------------------------------------------------ UI
     def _buildMenu(self):
@@ -437,7 +542,7 @@ class MidiEditorApp(tk.Tk):
         head = ttk.Frame(left, padding=(6, 4))
         head.pack(fill="x")
         ttk.Label(head, text="Channels",
-                  font=("TkDefaultFont", 10, "bold")).pack(side="left")
+                  font=(self.uiFamily, 10, "bold")).pack(side="left")
         b = ttk.Button(head, text="Mute All", width=8, command=self.muteAll)
         b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Mute every channel")
@@ -500,7 +605,7 @@ class MidiEditorApp(tk.Tk):
         # Ruler rows are sized from their fonts, so the text fits at any
         # display scaling; rulerRows holds the five boundaries of the four
         # rows, top to bottom.
-        self.rulerFonts = [tkfont.Font(font=("TkDefaultFont", size))
+        self.rulerFonts = [tkfont.Font(font=(self.uiFamily, size))
                            for size in RULER_FONT_SIZES]
         self.rulerRows = [0]
 
@@ -531,7 +636,7 @@ class MidiEditorApp(tk.Tk):
         # A sash between the roll and the demand strip: dragging it changes
         # the strip's height, and the roll, which owns the grid's spare
         # space, gives way.
-        sash = tk.Frame(roll, height=5, bg="#3a3a44", cursor="sb_v_double_arrow")
+        sash = tk.Frame(roll, height=5, bg=theme.ROLL["sash"], cursor="sb_v_double_arrow")
         sash.grid(row=2, column=0, columnspan=2, sticky="ew")
         sash.bind("<ButtonPress-1>", self._onSashPress)
         sash.bind("<B1-Motion>", self._onSashDrag)
@@ -544,7 +649,7 @@ class MidiEditorApp(tk.Tk):
         gutter = ttk.Frame(roll, width=KEYS_W)
         gutter.grid(row=3, column=0, sticky="nsew")
         gutter.grid_propagate(False)
-        ttk.Label(gutter, text="Voices", font=("TkDefaultFont", 7)).pack(pady=(4, 0))
+        ttk.Label(gutter, text="Voices", font=(self.uiFamily, 7)).pack(pady=(4, 0))
         self.budgetSpin = ttk.Spinbox(gutter, from_=1, to=64, width=3,
                                       textvariable=self.budgetVar,
                                       command=self._reductionChanged)
@@ -891,7 +996,7 @@ class MidiEditorApp(tk.Tk):
             sw.create_rectangle(0, 0, 14, 14, fill=color, outline="")
             sw.pack(side="left")
             tk.Label(top, text=f"Ch {ch + 1}", width=5, anchor="w",
-                     font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(4, 0))
+                     font=(self.uiFamily, 9, "bold")).pack(side="left", padx=(4, 0))
             pb = ttk.Button(top, text=PREVIEW_GLYPH, width=2,
                             command=lambda c=ch: self._previewChannel(c))
             pb.pack(side="left", padx=(0, 2))
@@ -957,7 +1062,7 @@ class MidiEditorApp(tk.Tk):
                 desc += " | bends"
 
             self.descLabels[ch] = dl = tk.Label(bottom, text=desc, anchor="w",
-                          font=("TkDefaultFont", 8))
+                          font=(self.uiFamily, 8))
             dl.pack(side="left", padx=(8, 0))
             Tooltip(dl, "Note count, pitch range, GM instrument family")
 
@@ -968,8 +1073,9 @@ class MidiEditorApp(tk.Tk):
             if figure is not None:
                 usage = (f"peak {figure.peak} | mean {figure.mean:.1f} | "
                          f"plays {figure.fraction:.0%}")
-                ul = tk.Label(row, text=usage, anchor="w", font=("TkDefaultFont", 8),
-                              fg="#555", justify="left", wraplength=int(290 * scaling))
+                ul = tk.Label(row, text=usage, anchor="w", font=(self.uiFamily, 8),
+                              fg=self.palette["muted"], justify="left",
+                              wraplength=int(290 * scaling))
                 ul.pack(anchor="w", padx=(22, 0))
                 self.usageLabels[ch] = ul
                 self.usageText[ch] = usage
@@ -982,7 +1088,7 @@ class MidiEditorApp(tk.Tk):
                 # (blank for the tier's) and its priority.
                 prow = tk.Frame(row)
                 prow.pack(fill="x", padx=(20, 0))
-                tk.Label(prow, text="Pool", font=("TkDefaultFont", 8)).pack(side="left")
+                tk.Label(prow, text="Pool", font=(self.uiFamily, 8)).pack(side="left")
                 pv = self.poolVars.setdefault(ch, tk.StringVar(value=self._poolNameOf(ch)))
                 pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=8,
                                   values=self._poolNames())
@@ -991,7 +1097,7 @@ class MidiEditorApp(tk.Tk):
                 self.poolCombos.append(pc)
                 Tooltip(pc, "The pool this channel's notes are reduced in;\n"
                             "(none) leaves the channel out of the reduction")
-                tk.Label(prow, text="Rel", font=("TkDefaultFont", 8)).pack(side="left")
+                tk.Label(prow, text="Rel", font=(self.uiFamily, 8)).pack(side="left")
                 release = f"{self.plan.release[ch]:g}" if ch in self.plan.release else ""
                 rv = self.releaseVars.setdefault(ch, tk.StringVar(value=release))
                 rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=5,
@@ -1001,7 +1107,7 @@ class MidiEditorApp(tk.Tk):
                 rs.bind("<KeyRelease>", lambda e, c=ch: self._channelReleaseChanged(c))
                 Tooltip(rs, "Release in milliseconds: how long a voice stays busy\n"
                             "after this channel's notes end; blank uses the tier's")
-                tk.Label(prow, text="Pri", font=("TkDefaultFont", 8)).pack(side="left")
+                tk.Label(prow, text="Pri", font=(self.uiFamily, 8)).pack(side="left")
                 var = self.priorityVars.setdefault(
                     ch, tk.DoubleVar(value=self.plan.priorityOf(ch)))
                 pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=4,
@@ -1201,13 +1307,7 @@ class MidiEditorApp(tk.Tk):
         """Tint the active channel's card and reset every other card."""
         for ch, row in self.channelRows.items():
             active = ch == self.activeChannel
-
-            # SystemButtonFace is the platform button colour where Tk knows
-            # the name; elsewhere the default Tk grey stands in for it.
-            try:
-                row.config(bg="#d0e0ff" if active else "SystemButtonFace")
-            except tk.TclError:
-                row.config(bg="#d0e0ff" if active else "#d9d9d9")
+            row.config(bg=self.palette["active"] if active else self.palette["panel"])
 
     def _programChanged(self, ch: int, var: tk.StringVar):
         """Instrument picked in a card: write the program change into the song.
@@ -1554,7 +1654,7 @@ class MidiEditorApp(tk.Tk):
             if pitch % 12 == 0 and self.rowH >= 7:
                 k.create_text(KEYS_W - 4, y + self.rowH / 2,
                               text=gm.noteName(pitch), anchor="e",
-                              fill="#333", font=("TkDefaultFont", 7))
+                              fill="#333", font=(self.uiFamily, 7))
 
     def _applySelectionStyle(self):
         """Outline selected notes in white and restore the others' outlines."""
@@ -1871,10 +1971,10 @@ class MidiEditorApp(tk.Tk):
             y = base - level * scale
             c.create_line(0, y, width, y, fill="#ff5050", dash=(4, 3))
             c.create_text(width - 3, y, text=label, anchor="e", fill="#ff5050",
-                          font=("TkDefaultFont", 7))
+                          font=(self.uiFamily, 7))
 
         c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
-                      font=("TkDefaultFont", 7))
+                      font=(self.uiFamily, 7))
 
     def _onDemandMotion(self, event):
         """Pointer over the demand strip: report the counts at that column.
@@ -1933,7 +2033,7 @@ class MidiEditorApp(tk.Tk):
         Tooltip(sh, "Colour notes by their reduction weight instead of\n"
                     "velocity: the brighter a note, the harder the\n"
                     "reduction tries to keep it")
-        self.lossLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8), wraplength=320,
+        self.lossLbl = ttk.Label(panel, text="", font=(self.uiFamily, 8), wraplength=320,
                                  justify="left")
         self.lossLbl.pack(fill="x", pady=(2, 0))
 
@@ -1941,7 +2041,7 @@ class MidiEditorApp(tk.Tk):
         # add or remove one, and open the tiers.
         pools = ttk.Frame(panel)
         pools.pack(fill="x", pady=(2, 0))
-        ttk.Label(pools, text="Pool", font=("TkDefaultFont", 8)).pack(side="left")
+        ttk.Label(pools, text="Pool", font=(self.uiFamily, 8)).pack(side="left")
         self.poolCombo = ttk.Combobox(pools, textvariable=self.poolVar, width=10)
         self.poolCombo.pack(side="left", padx=(2, 4))
         self.poolCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSelected())
@@ -1965,20 +2065,20 @@ class MidiEditorApp(tk.Tk):
         # The edited pool's voices and tier.
         budget = ttk.Frame(panel)
         budget.pack(fill="x", pady=(2, 0))
-        ttk.Label(budget, text="Voices", font=("TkDefaultFont", 8)).pack(side="left")
+        ttk.Label(budget, text="Voices", font=(self.uiFamily, 8)).pack(side="left")
         sp = ttk.Spinbox(budget, from_=0, to=64, width=3, textvariable=self.poolVoicesVar,
                          command=self._reductionChanged)
         sp.pack(side="left", padx=(2, 8))
         sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
         Tooltip(sp, "Voices this pool owns; the strip's budget is every\n"
                     "pool's voices added up")
-        ttk.Label(budget, text="Tier", font=("TkDefaultFont", 8)).pack(side="left")
+        ttk.Label(budget, text="Tier", font=(self.uiFamily, 8)).pack(side="left")
         self.tierCombo = ttk.Combobox(budget, textvariable=self.poolTierVar, state="readonly",
                                       width=7)
         self.tierCombo.pack(side="left", padx=(2, 0))
         self.tierCombo.bind("<<ComboboxSelected>>", lambda e: self._reductionChanged())
         Tooltip(self.tierCombo, "The chip this pool's voices come from")
-        ttk.Label(budget, text="Sound", font=("TkDefaultFont", 8)).pack(side="left", padx=(8, 0))
+        ttk.Label(budget, text="Sound", font=(self.uiFamily, 8)).pack(side="left", padx=(8, 0))
         self.soundCombo = ttk.Combobox(budget, textvariable=self.poolSoundVar, state="readonly",
                                        width=11)
         self.soundCombo.pack(side="left", padx=(2, 0))
@@ -1989,8 +2089,8 @@ class MidiEditorApp(tk.Tk):
 
         # How much the edited pool's channels play at the same time: low is
         # what makes sharing its voices work.
-        self.overlapLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8),
-                                    foreground="#555")
+        self.overlapLbl = ttk.Label(panel, text="", font=(self.uiFamily, 8),
+                                    foreground=self.palette["muted"])
         self.overlapLbl.pack(fill="x")
         self.overlapTip = Tooltip(self.overlapLbl, "")
 
@@ -2020,7 +2120,7 @@ class MidiEditorApp(tk.Tk):
                  "Ticks: a note reaches the next onset within this gap; 0 is off"),
                 ("Chord", self.maxChordVar, 8,
                  "Notes kept per chord on a channel, outer voices first; 0 is all")):
-            ttk.Label(gaps, text=text, font=("TkDefaultFont", 8)).pack(side="left")
+            ttk.Label(gaps, text=text, font=(self.uiFamily, 8)).pack(side="left")
             sp = ttk.Spinbox(gaps, from_=0, to=limit, width=4, textvariable=var,
                              command=self._reductionChanged)
             sp.pack(side="left", padx=(2, 8))

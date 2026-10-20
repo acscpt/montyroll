@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Any
 
 import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
-from montyroll import analysis, model, player, reduce, smf
+from montyroll import analysis, model, player, reduce, smf, theme
+from montyroll import app as appModule
 from montyroll.app import (
     CHANNEL_COLORS,
     DEMAND_MAX_H,
@@ -128,6 +130,43 @@ class TestStartup:
         app.openFile(str(bad))
         assert shown and shown[0][0] == "Open failed"
         assert app.song is before
+
+
+class TestTheme:
+    """The window's theme, with and without the sv-ttk package."""
+
+    @pytest.mark.skipif(appModule.sv_ttk is None, reason="sv-ttk is not installed")
+    def testSunValleyWhenInstalled(self, app: MidiEditorApp) -> None:
+        """With sv-ttk the ttk theme is Sun Valley dark and the palette is its own."""
+        assert app.tk.call("ttk::style", "theme", "use") == "sun-valley-dark"
+        assert app.palette is theme.SUN_VALLEY
+
+    def testClamWithoutSunValley(self, songPath: Path,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without sv-ttk the window falls back to clam with the dark palette."""
+        monkeypatch.setattr(player, "findPlayer", lambda: None)
+        monkeypatch.setattr(appModule, "sv_ttk", None)
+        window = MidiEditorApp(str(songPath))
+        window.update()
+
+        try:
+            assert window.tk.call("ttk::style", "theme", "use") == "clam"
+            assert window.palette is theme.CLAM_DARK
+            assert window.cget("background") == theme.CLAM_DARK["window"]
+        finally:
+            window.destroy()
+
+    def testActiveRowTint(self, app: MidiEditorApp) -> None:
+        """The active channel's row takes the palette's tint and the others the panel."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        assert app.channelRows[second].cget("background") == app.palette["active"]
+        assert app.channelRows[first].cget("background") == app.palette["panel"]
+
+    def testInterfaceFont(self, app: MidiEditorApp) -> None:
+        """The named default font uses the interface family the theme chose."""
+        family = tkfont.nametofont("TkDefaultFont", root=app).actual("family")
+        assert family == app.uiFamily
 
 
 class TestSelection:
