@@ -175,6 +175,18 @@ class TestTheme:
         finally:
             window.destroy()
 
+    def testFileDialogPaneIsDark(self, app: MidiEditorApp) -> None:
+        """The file dialog's folder pane takes the field colour in place of its white."""
+        dialog = tk.Toplevel(app, name="__tk_filedialog")
+        pane = tk.Canvas(dialog, background="white")
+        pane.pack()
+        app.update()
+
+        try:
+            assert pane.cget("background") == app.palette["field"]
+        finally:
+            dialog.destroy()
+
     def testActiveRowTint(self, app: MidiEditorApp) -> None:
         """The active channel's row takes the palette's tint and the others the panel."""
         first, second = sorted(app.song.channels)[:2]

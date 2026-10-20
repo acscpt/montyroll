@@ -338,6 +338,13 @@ class MidiEditorApp(tk.Tk):
                             ("*disabledForeground", p["muted"])):
             self.option_add(name, value)
 
+        # Tk's file dialog on X11 draws its folder pane on a canvas with a
+        # white background of its own, and its text takes the light colour
+        # above. A class binding gives that canvas the field colour as the
+        # dialog maps it.
+        self.tk.eval("bind Canvas <Map> {+if {[string match .__tk_filedialog.* %W]} "
+                     f"{{%W configure -background {p['field']}}}}}")
+
         # The named fonts, and Sun Valley's own, take the interface family.
         # Widgets given a size of their own use the same family by name.
         family = theme.pickFont(tkfont.families(self))
