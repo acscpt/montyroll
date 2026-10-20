@@ -641,6 +641,7 @@ class MidiEditorApp(tk.Tk):
         # a narrow strip from its burger button. Its pane keeps the width it
         # is given rather than the width its contents ask for.
         self.paned = paned
+        self._inspectorOpenW = INSPECTOR_W
         self.inspectorPane = ttk.Frame(paned, width=INSPECTOR_W, padding=(8, 4))
         self.inspectorPane.pack_propagate(False)
         paned.add(self.inspectorPane, weight=0)
@@ -1661,21 +1662,25 @@ class MidiEditorApp(tk.Tk):
         return value
 
     def toggleInspector(self):
-        """Fold the inspector to its strip, or open it again.
+        """Fold the inspector to its strip, or open it again at the width it had.
 
         The pane's sash moves to the new width, so the roll, the ruler and
         the strip take the width the panel gives up, or give it back.
         """
         self.inspectorFolded = not self.inspectorFolded
 
+        # Folding remembers the open width, which a dragged sash may have
+        # changed, and opening puts it back.
         if self.inspectorFolded:
+            self.update_idletasks()
+            self._inspectorOpenW = self.paned.winfo_width() - self.paned.sashpos(1)
             self.inspectorBody.pack_forget()
             self.inspectorStrip.pack(fill="y", expand=True)
             width = INSPECTOR_FOLDED_W
         else:
             self.inspectorStrip.pack_forget()
             self.inspectorBody.pack(fill="both", expand=True)
-            width = INSPECTOR_W
+            width = self._inspectorOpenW
             self._refreshInspector()
 
         self.inspectorPane.configure(width=width, padding=(2, 4) if self.inspectorFolded
