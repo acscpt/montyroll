@@ -45,6 +45,7 @@ DEMAND_H = 90        # initial height of the voice-demand strip under the roll
 DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
+LANES = ("Demand", "Velocity", "Weight")   # what the strip under the roll can show
 INSPECTOR_W = 290    # the inspector's width when open
 INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
@@ -267,6 +268,8 @@ class MidiEditorApp(tk.Tk):
         self.noteWeights: dict[int, float] | None = None  # id(note) -> weight, cached with the plan
         self.reports: dict[str, str | None] = {"original": None, "reduced": None}
         self._demandAfter: str | None = None
+        self.laneVar = tk.StringVar(value=LANES[0])     # what the strip under the roll shows
+        self.laneBars: list[tuple[float, float, model.Note]] = []   # x extents drawn in a note lane
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
 
         # With one pool the strip's budget and the pool's voices are one
@@ -664,7 +667,7 @@ class MidiEditorApp(tk.Tk):
         vbar = ttk.Scrollbar(roll, orient="vertical", command=self._yview)
         vbar.grid(row=1, column=2, sticky="ns")
         hbar = ttk.Scrollbar(roll, orient="horizontal", command=self._xview)
-        hbar.grid(row=4, column=1, sticky="ew")
+        hbar.grid(row=5, column=1, sticky="ew")
         self.canvas.configure(
             xscrollcommand=lambda a, b: (hbar.set(a, b), self.ruler.xview_moveto(a),
                                          self._scheduleDemand()),
@@ -684,7 +687,19 @@ class MidiEditorApp(tk.Tk):
         # cost is the window width and not the length of the piece. The
         # gutter beside it holds the voice budget.
         gutter = ttk.Frame(roll, width=KEYS_W)
-        gutter.grid(row=3, column=0, sticky="nsew")
+        switch = ttk.Frame(roll, padding=(KEYS_W, 3, 0, 2))
+        switch.grid(row=3, column=0, columnspan=2, sticky="ew")
+
+        for lane, tip in (("Demand", "Voices sounding over time, against the budget"),
+                          ("Velocity", "A bar for each note at its start, as tall as its velocity"),
+                          ("Weight", "A bar for each note, as tall as its reduction weight;\n"
+                                     "outlines are the notes the reduction drops")):
+            b = ttk.Radiobutton(switch, text=lane, value=lane, variable=self.laneVar,
+                                style="Toggle.TButton", command=self._laneChanged)
+            b.pack(side="left", padx=(0, 4))
+            Tooltip(b, tip)
+
+        gutter.grid(row=4, column=0, sticky="nsew")
         gutter.grid_propagate(False)
         ttk.Label(gutter, text="Voices", font=(self.uiFamily, 7)).pack(pady=(4, 0))
         self.budgetSpin = ttk.Spinbox(gutter, from_=1, to=64, width=3,
@@ -696,7 +711,7 @@ class MidiEditorApp(tk.Tk):
                 "Where the stack crosses it, notes would have to go.")
         self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg="#202026",
                                       highlightthickness=0)
-        self.demandCanvas.grid(row=3, column=1, sticky="ew")
+        self.demandCanvas.grid(row=4, column=1, sticky="ew")
         self.demandCanvas.bind("<Configure>", lambda e: self._scheduleDemand())
         self.demandCanvas.bind("<Motion>", self._onDemandMotion)
         Tooltip(self.demandCanvas,
@@ -2259,6 +2274,11 @@ class MidiEditorApp(tk.Tk):
             self.budgetVar.set(peak)
 
         self._storePoolControls()
+
+        if self.laneVar.get() != "Demand":
+            self._drawNoteLane(self.laneVar.get())
+            return
+
         budget = max(1, self._totalVoices())
         top = max(peak, budget)
         scale = (height - 6) / top
@@ -2308,6 +2328,79 @@ class MidiEditorApp(tk.Tk):
         c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
                       font=(self.uiFamily, 7))
 
+    def _drawNoteLane(self, lane: str):
+        """Draw the Velocity or Weight lane for the visible part of the roll.
+
+        Each note whose start is in view is a bar at its start, as tall as
+        its velocity out of 127 or its weight against the heaviest note in
+        the song. Quiet bars are drawn first so tall ones stay visible, and
+        with the reduction on, the notes it drops are drawn as outlines on
+        top. `laneBars` keeps each bar's extent for the hover report.
+
+        Args:
+            lane: "Velocity" or "Weight".
+        """
+        c = self.demandCanvas
+        width = c.winfo_width()
+        height = c.winfo_height()
+        x0 = self.canvas.canvasx(0)
+        t0, t1 = x0 / self.ppt, (x0 + width) / self.ppt
+        audible = self._audibleChannels()
+        reduction = self._ensureReduction() if self.reduceVar.get() else None
+
+        # The value of each note in view, and the top of the scale.
+        if lane == "Weight":
+            weights = self._ensureWeights()
+            top = max(weights.values(), default=1.0) or 1.0
+
+            def value(n: model.Note) -> float:
+                return weights.get(id(n), 0.0)
+        else:
+            top = 127.0
+
+            def value(n: model.Note) -> float:
+                return float(n.velocity)
+
+        visible = [n for n in self.song.notes if t0 - 1 <= n.start <= t1]
+        dropped = {id(n) for n in visible if reduction is not None and reduction.isDropped(n)}
+        visible.sort(key=lambda n: (id(n) in dropped, value(n)))
+        scale = (height - 8) / top
+        base = height - 2
+        self.laneBars = []
+
+        for note in visible:
+            xa = note.start * self.ppt - x0
+            xb = xa + 4
+            y = base - value(note) * scale
+            colour = CHANNEL_COLORS[note.channel] if note.channel in audible else "#4a4a50"
+
+            if id(note) in dropped:
+                c.create_rectangle(xa, y, xb, base, outline=colour, fill="")
+            else:
+                c.create_rectangle(xa, y, xb, base, outline="", fill=_shade(colour, 0.9))
+
+            self.laneBars.append((xa, xb, note))
+
+        label = f"{top:.2f}" if lane == "Weight" else "127"
+        c.create_text(width - 3, 2, text=label, anchor="ne", fill=self.palette["muted"],
+                      font=(self.uiFamily, 7))
+
+    def _describeLaneBar(self, x: float):
+        """Report the tallest bar under the pointer in a note lane.
+
+        Args:
+            x: the pointer's x on the strip.
+        """
+        hits = [note for xa, xb, note in self.laneBars if xa - 1 <= x <= xb + 1]
+
+        if hits:
+            self._describeNote(hits[-1])
+
+    def _laneChanged(self):
+        """The lane switch moved: redraw the strip for the lane chosen."""
+        self.laneBars = []
+        self._scheduleDemand()
+
     def _onDemandMotion(self, event):
         """Pointer over the demand strip: report the counts at that column.
 
@@ -2315,6 +2408,10 @@ class MidiEditorApp(tk.Tk):
             event: `x`, the column under the pointer.
         """
         if not self.song.notes:
+            return
+
+        if self.laneVar.get() != "Demand":
+            self._describeLaneBar(event.x)
             return
 
         demand = self._ensureDemand()

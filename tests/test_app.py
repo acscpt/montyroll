@@ -669,6 +669,66 @@ class TestDemandStrip:
         assert app.canvas.xview()[0] > before
 
 
+class TestLanes:
+    """The lane switch under the roll: Demand, Velocity and Weight."""
+
+    def _visible(self, app: MidiEditorApp) -> list[model.Note]:
+        """The notes whose start is in view, as a note lane draws them."""
+        x0 = app.canvas.canvasx(0)
+        t0, t1 = x0 / app.ppt, (x0 + app.demandCanvas.winfo_width()) / app.ppt
+        notes = [n for n in app.song.notes if t0 - 1 <= n.start <= t1]
+        return notes
+
+    def testVelocityLaneDrawsABarPerNote(self, app: MidiEditorApp) -> None:
+        """Every note in view has a bar, and the loudest reaches the top of the scale."""
+        app.laneVar.set("Velocity")
+        app._laneChanged()
+        app._drawDemand()
+        visible = self._visible(app)
+        assert len(app.laneBars) == len(visible)
+        loudest = max(visible, key=lambda n: n.velocity)
+        x = loudest.start * app.ppt - app.canvas.canvasx(0)
+        top = min(app.demandCanvas.coords(i)[1] for i in app.demandCanvas.find_all()
+                  if app.demandCanvas.type(i) == "rectangle"
+                  and app.demandCanvas.coords(i)[0] == pytest.approx(x))
+        height = app.demandCanvas.winfo_height()
+        expected = height - 2 - loudest.velocity * (height - 8) / 127
+        assert top <= expected + 0.5
+
+    def testWeightLaneOutlinesDroppedNotes(self, app: MidiEditorApp) -> None:
+        """With the reduction on, dropped notes are outlines and kept notes are filled."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app.laneVar.set("Weight")
+        app._laneChanged()
+        app._drawDemand()
+        rects = [i for i in app.demandCanvas.find_all() if app.demandCanvas.type(i) == "rectangle"]
+        fills = {app.demandCanvas.itemcget(i, "fill") for i in rects}
+        assert "" in fills
+        assert len(fills) > 1
+
+    def testHoverInALaneDescribesTheNote(self, app: MidiEditorApp) -> None:
+        """Pointing at a bar in a note lane names its note on the status bar."""
+        app.laneVar.set("Velocity")
+        app._laneChanged()
+        app._drawDemand()
+        xa, xb, note = app.laneBars[-1]
+        app._onDemandMotion(FakeEvent((xa + xb) / 2, 10))
+        assert f"vel {note.velocity}" in app.status.cget("text")
+
+    def testBackToDemand(self, app: MidiEditorApp) -> None:
+        """Switching back to Demand draws the stack and the budget again."""
+        app.laneVar.set("Weight")
+        app._laneChanged()
+        app._drawDemand()
+        app.laneVar.set("Demand")
+        app._laneChanged()
+        app._drawDemand()
+        kinds = {app.demandCanvas.type(i) for i in app.demandCanvas.find_all()}
+        assert kinds == {"rectangle", "line", "text"}
+
+
 class TestTonal:
     """The chord row on the ruler, the chord under the pointer and the key."""
 
