@@ -360,6 +360,8 @@ class MidiEditorApp(tk.Tk):
                     width=-6)
         s.map("TButton", background=[("pressed", p["active"]), ("active", p["border"])])
         s.configure("Accent.TButton", background=p["accent"], foreground="#ffffff")
+        s.map("Toggle.TButton", background=[("selected", p["accent"]), ("active", p["border"])],
+              foreground=[("selected", "#ffffff")])
         s.map("Accent.TButton", background=[("pressed", p["active"]),
                                             ("active", theme.mix(p["accent"], "#ffffff", 0.2))])
         s.configure("TNotebook", background=p["panel"], borderwidth=0)
@@ -2345,73 +2347,74 @@ class MidiEditorApp(tk.Tk):
     def _buildReducePanel(self, parent: ttk.Frame):
         """Create the reduction controls under the channel strip.
 
+        Top to bottom: the switch that turns the reduction on and the
+        result label; the pool the panel edits, with its add, remove and
+        tiers buttons; the pool's voices, tier and sound; how much its
+        channels overlap; the transforms as toggle buttons; and the three
+        gaps.
+
         Args:
             parent: the left column frame.
         """
-        panel = ttk.LabelFrame(parent, text="Reduce", padding=(6, 2))
-        panel.pack(side="bottom", fill="x", padx=4, pady=(0, 4))
-        top = ttk.Frame(panel)
-        top.pack(fill="x")
-        cb = ttk.Checkbutton(top, text="Reduce to the voice budget", variable=self.reduceVar,
-                             command=self._reductionChanged)
-        cb.pack(side="left")
+        panel = ttk.LabelFrame(parent, text="Reduce", padding=(8, 4))
+        panel.pack(side="bottom", fill="x", padx=4, pady=(6, 4))
+        cb = ttk.Checkbutton(panel, text="Reduce to the voice budget", variable=self.reduceVar,
+                             style="Switch.TCheckbutton", command=self._reductionChanged)
+        cb.pack(anchor="w")
         Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
                     "Dropped notes are stippled; the file is not changed.")
-        sh = ttk.Checkbutton(top, text="Shade by weight", variable=self.shadeVar,
-                             command=self.redraw)
-        sh.pack(side="right")
-        Tooltip(sh, "Colour notes by their reduction weight instead of\n"
-                    "velocity: the brighter a note, the harder the\n"
-                    "reduction tries to keep it")
-        self.lossLbl = ttk.Label(panel, text="", font=(self.uiFamily, 8), wraplength=320,
-                                 justify="left")
-        self.lossLbl.pack(fill="x", pady=(2, 0))
+        self.lossLbl = ttk.Label(panel, text="", font=(self.uiFamily, 9), wraplength=320,
+                                 justify="left", foreground=self.palette["muted"])
+        self.lossLbl.pack(fill="x", pady=(2, 4))
 
         # The pool the controls below edit: pick it, rename it with Return,
         # add or remove one, and open the tiers.
         pools = ttk.Frame(panel)
-        pools.pack(fill="x", pady=(2, 0))
-        ttk.Label(pools, text="Pool", font=(self.uiFamily, 8)).pack(side="left")
-        self.poolCombo = ttk.Combobox(pools, textvariable=self.poolVar, width=10)
-        self.poolCombo.pack(side="left", padx=(2, 4))
+        pools.pack(fill="x", pady=(0, 3))
+        ttk.Label(pools, text="Pool", font=(self.uiFamily, 9)).pack(side="left")
+        self.poolCombo = ttk.Combobox(pools, textvariable=self.poolVar, width=9)
+        self.poolCombo.pack(side="left", padx=(3, 4))
         self.poolCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSelected())
         self.poolCombo.bind("<Return>", lambda e: self._renamePool())
         Tooltip(self.poolCombo, "The pool the controls below edit. Type a new name\n"
                                 "and press Return to rename it; channels join a\n"
-                                "pool on their cards")
+                                "pool on their rows")
         b = ttk.Button(pools, text="Tiers...", width=7, command=self.tiersDialog)
         b.pack(side="right")
         Tooltip(b, "The chips the pools' voices come from: channels,\n"
                    "how many are reserved for effects, and the release\n"
                    "their patches need")
         b = ttk.Button(pools, text="-", width=2, command=self.removePool)
-        b.pack(side="right", padx=(2, 2))
+        b.pack(side="right", padx=(2, 4))
         Tooltip(b, "Remove this pool; its channels leave the reduction\n"
                    "until they are given another")
         b = ttk.Button(pools, text="+", width=2, command=self.addPool)
         b.pack(side="right")
         Tooltip(b, "Add a pool")
 
-        # The edited pool's voices and tier.
+        # The edited pool's voices and tier, then its sound on a line of its
+        # own, as the sound names are long.
         budget = ttk.Frame(panel)
-        budget.pack(fill="x", pady=(2, 0))
-        ttk.Label(budget, text="Voices", font=(self.uiFamily, 8)).pack(side="left")
+        budget.pack(fill="x", pady=(0, 3))
+        ttk.Label(budget, text="Voices", font=(self.uiFamily, 9)).pack(side="left")
         sp = ttk.Spinbox(budget, from_=0, to=64, width=3, textvariable=self.poolVoicesVar,
                          command=self._reductionChanged)
-        sp.pack(side="left", padx=(2, 8))
+        sp.pack(side="left", padx=(3, 10))
         sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
         Tooltip(sp, "Voices this pool owns; the strip's budget is every\n"
                     "pool's voices added up")
-        ttk.Label(budget, text="Tier", font=(self.uiFamily, 8)).pack(side="left")
+        ttk.Label(budget, text="Tier", font=(self.uiFamily, 9)).pack(side="left")
         self.tierCombo = ttk.Combobox(budget, textvariable=self.poolTierVar, state="readonly",
-                                      width=7)
-        self.tierCombo.pack(side="left", padx=(2, 0))
+                                      width=8)
+        self.tierCombo.pack(side="left", padx=(3, 0))
         self.tierCombo.bind("<<ComboboxSelected>>", lambda e: self._reductionChanged())
         Tooltip(self.tierCombo, "The chip this pool's voices come from")
-        ttk.Label(budget, text="Sound", font=(self.uiFamily, 8)).pack(side="left", padx=(8, 0))
-        self.soundCombo = ttk.Combobox(budget, textvariable=self.poolSoundVar, state="readonly",
-                                       width=11)
-        self.soundCombo.pack(side="left", padx=(2, 0))
+        sound = ttk.Frame(panel)
+        sound.pack(fill="x", pady=(0, 3))
+        ttk.Label(sound, text="Sound", font=(self.uiFamily, 9)).pack(side="left")
+        self.soundCombo = ttk.Combobox(sound, textvariable=self.poolSoundVar, state="readonly",
+                                       width=18)
+        self.soundCombo.pack(side="left", padx=(3, 0))
         self.soundCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSoundChanged())
         Tooltip(self.soundCombo, "The sound this pool's voices play on export: a patch\n"
                                  "or waveform from the target's library, or one chosen\n"
@@ -2419,29 +2422,36 @@ class MidiEditorApp(tk.Tk):
 
         # How much the edited pool's channels play at the same time: low is
         # what makes sharing its voices work.
-        self.overlapLbl = ttk.Label(panel, text="", font=(self.uiFamily, 8),
+        self.overlapLbl = ttk.Label(panel, text="", font=(self.uiFamily, 9),
                                     foreground=self.palette["muted"])
         self.overlapLbl.pack(fill="x")
         self.overlapTip = Tooltip(self.overlapLbl, "")
 
-        # Transform switches, each one a pool setting.
+        # Transform switches as toggle buttons, each one a pool setting, and
+        # the weight shading of the roll beside them.
         switches = ttk.Frame(panel)
-        switches.pack(fill="x")
+        switches.pack(fill="x", pady=(4, 3))
 
-        for text, var, tip in (
-                ("Merge unisons", self.dedupUnisonVar,
-                 "The same pitch struck together on two parts costs one voice"),
-                ("Fold octaves", self.dedupOctaveVar,
-                 "An octave doubling struck together with its note is dropped"),
-                ("Top line", self.monoTopVar,
-                 "Each channel keeps only its highest sounding note")):
-            w = ttk.Checkbutton(switches, text=text, variable=var,
-                                command=self._reductionChanged)
-            w.pack(side="left", padx=(0, 6))
+        for text, var, command, tip in (
+                ("Unisons", self.dedupUnisonVar, self._reductionChanged,
+                 "Merge unisons: the same pitch struck together on two\n"
+                 "parts costs one voice"),
+                ("Octaves", self.dedupOctaveVar, self._reductionChanged,
+                 "Fold octaves: an octave doubling struck together with\n"
+                 "its note is dropped"),
+                ("Top line", self.monoTopVar, self._reductionChanged,
+                 "Each channel keeps only its highest sounding note"),
+                ("Shade", self.shadeVar, self.redraw,
+                 "Shade by weight: colour notes by their reduction weight\n"
+                 "instead of velocity; the brighter a note, the harder\n"
+                 "the reduction tries to keep it")):
+            w = ttk.Checkbutton(switches, text=text, variable=var, style="Toggle.TButton",
+                                command=command)
+            w.pack(side="left", padx=(0, 4))
             Tooltip(w, tip)
 
         gaps = ttk.Frame(panel)
-        gaps.pack(fill="x", pady=(2, 0))
+        gaps.pack(fill="x", pady=(0, 2))
 
         for text, var, limit, tip in (
                 ("Tremolo", self.tremoloVar, 480,
@@ -2450,10 +2460,10 @@ class MidiEditorApp(tk.Tk):
                  "Ticks: a note reaches the next onset within this gap; 0 is off"),
                 ("Chord", self.maxChordVar, 8,
                  "Notes kept per chord on a channel, outer voices first; 0 is all")):
-            ttk.Label(gaps, text=text, font=(self.uiFamily, 8)).pack(side="left")
-            sp = ttk.Spinbox(gaps, from_=0, to=limit, width=4, textvariable=var,
+            ttk.Label(gaps, text=text, font=(self.uiFamily, 9)).pack(side="left")
+            sp = ttk.Spinbox(gaps, from_=0, to=limit, width=3, textvariable=var,
                              command=self._reductionChanged)
-            sp.pack(side="left", padx=(2, 8))
+            sp.pack(side="left", padx=(3, 8))
             sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
             Tooltip(sp, tip)
 
