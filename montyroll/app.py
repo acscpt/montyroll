@@ -47,6 +47,8 @@ LANE_GAP = 3         # space between the strip gutter's rule and the first lane
 BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
 BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
+NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
+BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
 DRAWER_PAGES = ("Events", "Report")        # the drawer's pages, in tab order
 INSPECTOR_W = 290    # the inspector's width when open
 INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
@@ -314,6 +316,8 @@ class MidiEditorApp(tk.Tk):
         self._budgetSettleAfter: str | None = None
         self._budgetEditor: ttk.Entry | None = None
         self._stripScale: tuple[float, float] | None = None   # (base y, pixels per voice)
+        self._hoverBar: tuple[int, int] | None = None   # (first tick, end tick) of the lit bar
+        self._hoverItem: tuple[int, str] | None = None  # (canvas item, its own fill) lit
 
         # With one pool the strip's budget and the pool's voices are one
         # number, whichever control it was typed into.
@@ -987,6 +991,7 @@ class MidiEditorApp(tk.Tk):
         self.ruler.bind("<Double-Button-1>", self.onRulerDouble)
         self.ruler.bind("<Button-3>", self.onRulerContext)
         self.canvas.bind("<Motion>", self.onMotion)
+        self.canvas.bind("<Leave>", self._clearHover, add="+")
         self.canvas.bind("<Configure>", lambda e: self._centreOnNotes()
                          if self._centrePending else None, add="+")
 
@@ -2078,17 +2083,18 @@ class MidiEditorApp(tk.Tk):
         height = 128 * self.rowH
         c.configure(scrollregion=(0, 0, width, height))
 
-        # row shading for black keys + octave lines
+        # Row shading for the black keys, then the octave lines. The shading
+        # is drawn first and all together, so the band over the bar under
+        # the pointer can sit between it and every line.
         for pitch in range(128):
-            y = (127 - pitch) * self.rowH
-
-            if pitch % 12 in (1, 3, 6, 8, 10):
+            if pitch % 12 in BLACK_KEYS:
+                y = (127 - pitch) * self.rowH
                 c.create_rectangle(0, y, width, y + self.rowH,
-                                   fill=theme.ROLL["row"], outline="")
+                                   fill=theme.ROLL["row"], outline="", tags="rowShade")
 
-            if pitch % 12 == 0:
-                c.create_line(0, y + self.rowH, width, y + self.rowH,
-                              fill=theme.ROLL["octave"])
+        for pitch in range(0, 128, 12):
+            y = (128 - pitch) * self.rowH
+            c.create_line(0, y, width, y, fill=theme.ROLL["octave"])
 
         # bar / beat grid from the first time signature
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
@@ -2182,10 +2188,13 @@ class MidiEditorApp(tk.Tk):
                     self.noteToItem[id(note)] = item
 
         # Selection outlines, then the ruler and keys at the same width and
-        # height as the roll so they scroll in step with it.
+        # height as the roll so they scroll in step with it, and the band
+        # over the bar under the pointer, which outlives the redraw.
         self._applySelectionStyle()
         self._drawRuler(width)
         self._drawKeys(height)
+        self._hoverItem = None
+        self._paintHoverBar()
         self._scheduleDemand()
 
     def _drawRuler(self, width: int):
@@ -4547,12 +4556,13 @@ class MidiEditorApp(tk.Tk):
         menu.tk_popup(event.x_root, event.y_root)
 
     def onMotion(self, event):
-        """Track the pointer in the status bar as musical time and pitch.
+        """Track the pointer: light its bar and note, and report it in the status bar.
 
         Args:
             event: `x` and `y`, the pointer position.
         """
         x, y = self._eventPos(event)
+        self._hover(x, y)
         tick, pitch = self._posToTickPitch(x, y)
         bar, beat = self.song.barBeat(tick)
         secs = self.song.tickToSeconds(tick)
@@ -4569,6 +4579,108 @@ class MidiEditorApp(tk.Tk):
             name = (gm.drumName(pitch) if self.activeChannel == model.DRUM_CHANNEL
                     else gm.noteName(pitch))
             self._setStatus(f"{where}  {name}")
+
+    def _barSpan(self, tick: float) -> tuple[int, int]:
+        """Find the bar of the roll's grid that holds a tick.
+
+        The grid draws its bars from the first time signature, and so does
+        this, so the span matches the lines on the roll.
+
+        Args:
+            tick: a position on the roll.
+
+        Returns:
+            tuple[int, int]: the bar's first tick and the first tick after it.
+        """
+        num, den = self.song.timeSigs[0][1], self.song.timeSigs[0][2]
+        length = self.song.mf.division * 4 // den * num
+        start = int(tick // length) * length
+        span = (start, start + length)
+        return span
+
+    def _hover(self, x: float, y: float):
+        """Light the bar under the pointer, and the note under it a little more.
+
+        The band is redrawn only when the pointer crosses into another bar.
+        The note is lit by mixing its fill towards white, and given its own
+        fill back when the pointer leaves it.
+
+        Args:
+            x: canvas x coordinate.
+            y: canvas y coordinate.
+        """
+        bar = self._barSpan(max(0.0, x / self.ppt))
+
+        if bar != self._hoverBar:
+            self._hoverBar = bar
+            self._paintHoverBar()
+
+        # The topmost note item under the pointer: with the reduction on, a
+        # sounding segment lies over its stippled ghost.
+        items = [i for i in self.canvas.find_overlapping(x, y, x, y) if i in self.itemToNote]
+        item = items[-1] if items else None
+        lit = self._hoverItem[0] if self._hoverItem else None
+
+        if item != lit:
+            self._unhoverNote()
+
+            if item is not None:
+                fill = self.canvas.itemcget(item, "fill")
+                self._hoverItem = (item, fill)
+                self.canvas.itemconfigure(item, fill=theme.mix(fill, "#ffffff", NOTE_HOVER_MIX))
+
+    def _unhoverNote(self):
+        """Give the lit note its own fill back."""
+        if self._hoverItem is not None:
+            item, fill = self._hoverItem
+            self._hoverItem = None
+
+            if item in self.itemToNote:
+                self.canvas.itemconfigure(item, fill=fill)
+
+    def _clearHover(self, _event=None):
+        """The pointer left the roll: take down the band and the lit note.
+
+        Args:
+            _event: the <Leave> event; unused.
+        """
+        self._hoverBar = None
+        self._unhoverNote()
+        self._paintHoverBar()
+
+    def _paintHoverBar(self):
+        """Draw the band over the bar under the pointer on the roll and the ruler, or clear it.
+
+        The band is a few percent lighter than what it covers. On the roll
+        it is a lighter base under everything and lighter pieces of the
+        black-key rows just above their own shading, so the lines and the
+        notes stay on top; on the ruler it is a lighter base under the
+        labels.
+        """
+        c, r = self.canvas, self.ruler
+        c.delete("hoverBar")
+        r.delete("hoverBar")
+
+        if self._hoverBar is None:
+            return
+
+        x0, x1 = (t * self.ppt for t in self._hoverBar)
+        base = c.create_rectangle(x0, 0, x1, 128 * self.rowH, fill=theme.ROLL["hoverBar"],
+                                  outline="", tags="hoverBar")
+        c.tag_lower(base)
+
+        for pitch in range(128):
+            if pitch % 12 in BLACK_KEYS:
+                y = (127 - pitch) * self.rowH
+                c.create_rectangle(x0, y, x1, y + self.rowH, fill=theme.ROLL["hoverRow"],
+                                   outline="", tags=("hoverBar", "hoverRow"))
+
+        if c.find_withtag("rowShade"):
+            c.tag_raise("hoverRow", "rowShade")
+
+        band = r.create_rectangle(x0, 0, x1, self.rulerRows[4], fill=theme.ROLL["hoverRuler"],
+                                  outline="", tags="hoverBar")
+        r.tag_lower(band)
 
     def _describeNote(self, note: model.Note, prefix: str = ""):
         """Show a note's pitch, velocity, channel, ticks and track in the

@@ -216,7 +216,7 @@ The ruler has four rows.
 | 3 | Tempo changes and markers |
 | 4 | The chord in each beat |
 
-Each note is a block in the colour of its channel, brighter at a higher velocity, with an edge a little darker than its fill. A selected note has a white edge. A dashed vertical line marks each tempo change. The roll opens scrolled to the middle of the pitches of the file.
+Each note is a block in the colour of its channel, brighter at a higher velocity, with an edge a little darker than its fill. A selected note has a white edge. The bar under the pointer is lit faintly, down through the ruler and the roll, and the note under the pointer is lit a little more. A dashed vertical line marks each tempo change. The roll opens scrolled to the middle of the pitches of the file.
 
 ## Lanes
 

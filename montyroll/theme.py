@@ -37,12 +37,15 @@ PALETTE = {
 # The roll, ruler, keyboard gutter and strip: a mid grey note grid with
 # darker lines, so the pastel notes stand out; muted channels' notes in a
 # grey a step lighter than the grid. The strip under the roll, its lane
-# switch and its gutter are a near-black display panel.
+# switch and its gutter are a near-black display panel. The bar under the
+# pointer is lit a few percent towards white: hoverBar over the grid,
+# hoverRow over the black-key rows, hoverRuler over the ruler.
 ROLL = {
     "roll": "#3b3d48", "row": "#363843", "octave": "#2a2c35", "bar": "#2a2c35",
     "beat": "#353742", "ruler": "#282a33", "strip": "#16181f", "sash": "#22242d",
     "white": "#c4c5cc", "black": "#2a2c35", "keyEdge": "#22242d", "keyText": "#3b3d48",
     "muted": "#4c4e59", "mutedEdge": "#2a2c35",
+    "hoverBar": "#454751", "hoverRow": "#40424c", "hoverRuler": "#35373f",
 }
 
 UI_FONTS = ("Ubuntu", "Noto Sans", "Cantarell", "DejaVu Sans")   # first one installed wins

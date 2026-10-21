@@ -35,6 +35,7 @@ from montyroll.app import (
     LANE_GAP,
     MAX_EVENT_ROWS,
     NO_POOL,
+    NOTE_HOVER_MIX,
     PLAY_GLYPH,
     STOP_GLYPH,
     TEMPO_GLYPH,
@@ -981,6 +982,82 @@ class TestTonal:
         rebuilt = app._ensureChords()
         assert rebuilt is not first
         assert all(name == "N.C." for _, _, name in rebuilt)
+
+
+class TestHover:
+    """The bar under the pointer, lit faintly, and the note under it, lit a little more."""
+
+    def _hoverOn(self, app: MidiEditorApp, note: model.Note) -> int:
+        """Move the pointer onto a note's middle.
+
+        Args:
+            app: the window.
+            note: the note.
+
+        Returns:
+            int: the note's canvas item.
+        """
+        app.onMotion(FakeEvent(*_noteCentre(app, note)))
+        item = app.noteToItem[id(note)]
+        return item
+
+    def testBandCoversTheBar(self, app: MidiEditorApp) -> None:
+        """The band spans the bar under the pointer, on the roll and the ruler."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        start, end = app._hoverBar
+        assert start <= note.start < end
+        assert end - start == app.song.barTick(2) - app.song.barTick(1)
+        base = app.canvas.find_withtag("hoverBar")[0]
+        assert app.canvas.coords(base)[0] == pytest.approx(start * app.ppt)
+        assert app.canvas.coords(base)[2] == pytest.approx(end * app.ppt)
+        assert app.ruler.find_withtag("hoverBar")
+
+    def testBandSitsUnderTheLinesAndNotes(self, app: MidiEditorApp) -> None:
+        """The band's base is under everything; its rows sit just over the row shading."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        order = list(app.canvas.find_all())
+        base = app.canvas.find_withtag("hoverBar")[0]
+        shade = [order.index(i) for i in app.canvas.find_withtag("rowShade")]
+        rows = [order.index(i) for i in app.canvas.find_withtag("hoverRow")]
+        notes = [order.index(i) for i in app.itemToNote]
+        assert order[0] == base
+        assert max(shade) < min(rows)
+        assert max(rows) < min(notes)
+        assert max(rows) < min(order.index(i) for i in app.canvas.find_withtag("tempo"))
+
+    def testNoteUnderThePointerIsLit(self, app: MidiEditorApp) -> None:
+        """The note under the pointer is mixed towards white, and given its fill back after."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        item = app.noteToItem[id(note)]
+        fill = app.canvas.itemcget(item, "fill")
+        self._hoverOn(app, note)
+        assert app.canvas.itemcget(item, "fill") == theme.mix(fill, "#ffffff", NOTE_HOVER_MIX)
+        x, y = _noteCentre(app, note)
+        app.onMotion(FakeEvent(x, y - 3 * app.rowH))
+        assert app.canvas.itemcget(item, "fill") == fill
+
+    def testLeavingTheRollClearsIt(self, app: MidiEditorApp) -> None:
+        """Leaving the roll takes down the band and gives the note its fill back."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        item = app.noteToItem[id(note)]
+        fill = app.canvas.itemcget(item, "fill")
+        self._hoverOn(app, note)
+        app._clearHover()
+        assert not app.canvas.find_withtag("hoverBar")
+        assert not app.ruler.find_withtag("hoverBar")
+        assert app.canvas.itemcget(item, "fill") == fill
+
+    def testBandOutlivesARedraw(self, app: MidiEditorApp) -> None:
+        """A full redraw, as after a zoom, keeps the band on the same bar."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        bar = app._hoverBar
+        app.zoom(1.25)
+        assert app._hoverBar == bar
+        base = app.canvas.find_withtag("hoverBar")[0]
+        assert app.canvas.coords(base)[0] == pytest.approx(bar[0] * app.ppt)
 
 
 class TestBudget:
