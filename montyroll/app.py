@@ -36,14 +36,16 @@ CHANNEL_COLORS = [
     "#ffcf8a", "#c8f5a4", "#9be0ff", "#e7b8ff",
 ]
 
-KEYS_W = 52          # piano keyboard gutter width
+KEYS_W = 52          # the narrowest the piano keyboard gutter is, in pixels
 RULER_FONT_SIZES = (7, 8, 7, 7)   # seconds, bars, tempo and markers, chords
 DEMAND_H = 90        # initial height of the voice-demand strip under the roll
 DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
 LANES = ("Demand", "Velocity", "Weight")   # what the strip under the roll can show
-LANE_GAP = 3         # space between the strip gutter's rule and the first lane
+LANE_GAP = "4p"      # space between the strip gutter's rule and the first lane
+CORNER_PAD = "3p"    # space either side of the strip gutter's Voices heading
+CORNER_FONT_PT = 8   # the Voices heading, the size of the lane switch's text
 BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
 BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
@@ -842,7 +844,16 @@ class MidiEditorApp(tk.Tk):
         self.ruler = tk.Canvas(roll, height=self.rulerRows[-1], bg=theme.ROLL["ruler"],
                                highlightthickness=0)
         self.ruler.grid(row=0, column=1, sticky="ew")
-        self.keys = tk.Canvas(roll, width=KEYS_W, bg=theme.ROLL["roll"], highlightthickness=0)
+        # The left column, under the keyboard and the strip's gutter, is as
+        # wide as the keys need or, at a large font, as the Voices heading
+        # needs with its padding. The paddings are in points, so they grow
+        # with the display's scaling as the text does.
+        pad = round(self.winfo_fpixels(CORNER_PAD))
+        heading = tkfont.Font(self, family=self.uiFamily, size=CORNER_FONT_PT)
+        self.keysW = max(KEYS_W, heading.measure("Voices") + 2 * pad + 1)
+        self.laneGap = round(self.winfo_fpixels(LANE_GAP))
+        self.keys = tk.Canvas(roll, width=self.keysW, bg=theme.ROLL["roll"],
+                              highlightthickness=0)
         self.keys.grid(row=1, column=0, sticky="ns")
         self.canvas = tk.Canvas(roll, bg=theme.ROLL["roll"], highlightthickness=0)
         self.canvas.grid(row=1, column=1, sticky="nsew")
@@ -873,8 +884,9 @@ class MidiEditorApp(tk.Tk):
         # only the visible columns from the current scroll position, so its
         # cost is the window width and not the length of the piece. The
         # gutter beside it holds the voice budget.
-        gutter = ttk.Frame(roll, width=KEYS_W, style="Lane.TFrame")
-        switch = ttk.Frame(roll, padding=(KEYS_W + LANE_GAP, 3, 0, 3), style="Lane.TFrame")
+        gutter = ttk.Frame(roll, width=self.keysW, style="Lane.TFrame")
+        switch = ttk.Frame(roll, padding=(self.keysW + self.laneGap, 3, 0, 3),
+                           style="Lane.TFrame")
         switch.grid(row=3, column=0, columnspan=2, sticky="ew")
 
         for lane, tip in (("Demand", "Voices sounding over time, against the budget"),
@@ -896,8 +908,8 @@ class MidiEditorApp(tk.Tk):
         # text colour so it reads as a label and not a fourth lane, with a
         # rule beside it that runs on down the gutter's edge.
         tk.Label(roll, text="Voices", bg=theme.ROLL["strip"], fg=self.palette["text"],
-                 font=(self.uiFamily, 8)).grid(row=3, column=0, sticky="nsew",
-                                               padx=(0, 1), pady=(0, 1))
+                 font=(self.uiFamily, CORNER_FONT_PT), padx=pad).grid(
+            row=3, column=0, sticky="nsew", padx=(0, 1), pady=(0, 1))
         tk.Frame(roll, width=1, bg=self.palette["raised"]).grid(row=3, column=0, sticky="nse")
         gutter.grid(row=4, column=0, sticky="nsew")
         gutter.grid_propagate(False)
@@ -2317,19 +2329,19 @@ class MidiEditorApp(tk.Tk):
         """
         k = self.keys
         k.delete("all")
-        k.configure(scrollregion=(0, 0, KEYS_W, height))
+        k.configure(scrollregion=(0, 0, self.keysW, height))
 
         for pitch in range(128):
             y = (127 - pitch) * self.rowH
             black = pitch % 12 in (1, 3, 6, 8, 10)
-            k.create_rectangle(0, y, KEYS_W, y + self.rowH,
+            k.create_rectangle(0, y, self.keysW, y + self.rowH,
                                fill=theme.ROLL["black"] if black else theme.ROLL["white"],
                                outline=theme.ROLL["keyEdge"])
 
             # Octave labels on each C, once the rows are tall enough to hold
             # the text.
             if pitch % 12 == 0 and self.rowH >= 7:
-                k.create_text(KEYS_W - 4, y + self.rowH / 2,
+                k.create_text(self.keysW - 4, y + self.rowH / 2,
                               text=gm.noteName(pitch), anchor="e",
                               fill=theme.ROLL["keyText"], font=(self.uiFamily, 7))
 

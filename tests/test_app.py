@@ -26,6 +26,7 @@ from montyroll.app import (
     BUDGET_GRAB,
     BUDGET_SETTLE_MS,
     CHANNEL_COLORS,
+    CORNER_PAD,
     DEMAND_MAX_H,
     DEMAND_MIN_H,
     DRAWER_CLOSE_GLYPH,
@@ -1136,7 +1137,15 @@ class TestBudget:
                   if isinstance(w, tk.Label) and w.cget("text") == "Voices"]
         assert corner and str(corner[0].cget("foreground")) == theme.PALETTE["text"]
         switch = next(w for w in roll.grid_slaves(row=3) if isinstance(w, ttk.Frame))
-        assert int(str(switch.cget("padding")[0])) == KEYS_W + LANE_GAP
+        assert int(str(switch.cget("padding")[0])) == app.keysW + app.laneGap
+        assert app.laneGap == round(app.winfo_fpixels(LANE_GAP))
+
+        # The heading has its padding either side within the column, which
+        # is never narrower than the keyboard needs.
+        heading = tkfont.Font(app, font=corner[0].cget("font"))
+        pad = round(app.winfo_fpixels(CORNER_PAD))
+        assert app.keysW >= max(KEYS_W, heading.measure("Voices") + 2 * pad)
+        assert int(app.keys.cget("width")) == app.keysW
         up, down = app.budgetArrows["budgetUp"], app.budgetArrows["budgetDown"]
         middle = (up.winfo_y() + up.winfo_height() + down.winfo_y()) / 2
         box = app.budgetBox
