@@ -221,8 +221,27 @@ class TestTheme:
             assert [str(w.cget("style")) for w in icons] == [
                 f"Ch{ch}.Mute.Row.TCheckbutton", f"Ch{ch}.Solo.Row.TCheckbutton"]
             assert str(icons[0].cget("variable")) == str(app.muteVars[ch])
-            assert style.lookup(icons[0].cget("style"), "background") == CHANNEL_COLORS[ch]
             assert icons[1].winfo_x() < app.nameLabels[ch].winfo_x()
+
+            # The icon stays on the header colour under the pointer and when
+            # on, not the checkbutton's hover grey.
+            for state in ([], ["active"], ["active", "selected"], ["pressed"]):
+                for icon in icons:
+                    assert (style.lookup(icon.cget("style"), "background", state)
+                            == CHANNEL_COLORS[ch])
+
+    def testIconsHaveSeparators(self, app: MidiEditorApp) -> None:
+        """A one-pixel line in a darker shade of the colour follows each icon."""
+        ch = sorted(app.song.channels)[0]
+        header = app.nameLabels[ch].master
+        parts = header.pack_slaves()
+        edge = theme.mix(CHANNEL_COLORS[ch], "#000000", 0.4)
+
+        for i in (1, 3):
+            assert isinstance(parts[i - 1], ttk.Checkbutton)
+            assert isinstance(parts[i], tk.Frame)
+            assert int(parts[i].cget("width")) == 1
+            assert str(parts[i].cget("background")) == edge
 
     def testNameGivesWayOnANarrowStrip(self, app: MidiEditorApp) -> None:
         """Narrowed, a long name ends in an ellipsis and the slider stays clear of it."""

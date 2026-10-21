@@ -541,7 +541,7 @@ class MidiEditorApp(tk.Tk):
 
         # The channel rows' mute and solo: checkbuttons drawn as the icon
         # alone, by state.
-        s.configure("Row.TCheckbutton", padding=1)
+        s.configure("Row.TCheckbutton", padding=(3, 1))
 
         for key in ("Mute", "Solo"):
             name = key.lower()
@@ -1301,9 +1301,14 @@ class MidiEditorApp(tk.Tk):
 
             # Mute and solo are painted icons that share _channelsChanged,
             # which dims the roll and restarts the synth when playing. A
-            # style per channel puts each icon on the header colour.
+            # style per channel puts each icon on the header colour in every
+            # state: ttk reads a state map anywhere up the style's family
+            # before a plain setting, so without one the checkbutton's
+            # hover colour would show. A one-pixel line in a darker shade
+            # of the colour follows each icon.
             self.muteVars[ch] = tk.BooleanVar(value=False)
             self.soloVars[ch] = tk.BooleanVar(value=False)
+            edge = theme.mix(colour, "#000000", 0.4)
 
             for key, var, tip in (
                     ("Mute", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
@@ -1312,9 +1317,11 @@ class MidiEditorApp(tk.Tk):
                      "soloed,\nonly soloed channels play (solo overrides mute)")):
                 style = f"Ch{ch}.{key}.Row.TCheckbutton"
                 s.configure(style, background=colour)
+                s.map(style, background=[("", colour)])
                 b = ttk.Checkbutton(top, variable=var, style=style,
                                     command=self._channelsChanged)
-                b.pack(side="left", padx=(3, 0) if key == "Mute" else 0)
+                b.pack(side="left")
+                tk.Frame(top, width=1, bg=edge).pack(side="left", fill="y")
                 Tooltip(b, tip)
 
             # Volume slider starts at the file's CC7 value, or 100 when the
