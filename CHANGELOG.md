@@ -18,7 +18,7 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ### Changed
 
-- **Compact channel rows.** Each channel is one line, a bar in its colour with its number, instrument, mute, solo and volume, and the active channel's row also shows its figures and its pool, release and priority. The instrument picker and the preview button moved to the inspector.
+- **Compact channel rows.** Each channel is one line, a bar in its colour with mute and solo as speaker and headphones icons, then its number, instrument and volume, and the active channel's row also shows its figures and its pool, release and priority. A name too long for a narrow strip ends in an ellipsis. The instrument picker and the preview button moved to the inspector.
 
 - **Events and Report in a drawer.** The two pages open under the roll from buttons along the bottom, beside the count of events, so the roll stays in view.
 

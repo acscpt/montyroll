@@ -159,10 +159,10 @@ Each channel in use has a row, and a click on a row makes its channel the active
 
 | Control | Values | Effect |
 | --- | --- | --- |
+| Speaker icon | on, off | Mutes the channel in playback and dims its notes. |
+| Headphones icon | on, off | Plays the soloed channels alone. |
 | Colour and number | | The bar along the top of the row is in the colour of the channel's notes, and carries its number. |
-| Instrument name | | The GM instrument of the channel. The inspector changes it. |
-| **M** | on, off | Mutes the channel in playback and dims its notes. |
-| **S** | on, off | Plays the soloed channels alone. |
+| Instrument name | | The GM instrument of the channel. The inspector changes it. A name too long for the row ends in an ellipsis. |
 | Volume slider | 0 to 127 | Writes a `CC7` volume event into the file. |
 
 The active channel's row also shows its detail.

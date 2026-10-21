@@ -64,6 +64,7 @@ NEWLINE_GLYPH = "\u23ce"    # return symbol standing in for newlines in event te
 BURGER_GLYPH = "\u2630"     # trigram for heaven, on the inspector's fold button
 DRAWER_OPEN_GLYPH = "\u25b4"    # small up-pointing triangle: a drawer button that opens
 DRAWER_CLOSE_GLYPH = "\u25be"   # small down-pointing triangle: one that closes
+ELLIPSIS = "\u2026"        # the end of a name cut short to fit its row
 
 
 def _shade(color: str, factor: float) -> str:
@@ -80,6 +81,30 @@ def _shade(color: str, factor: float) -> str:
     r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
     shaded = f"#{int(r * factor):02x}{int(g * factor):02x}{int(b * factor):02x}"
     return shaded
+
+
+def _elide(text: str, font: tkfont.Font, width: int) -> str:
+    """Cut text short with an ellipsis so it fits a width.
+
+    Args:
+        text: the text in full.
+        font: the font it is shown in.
+        width: the room it has, in pixels.
+
+    Returns:
+        str: the text when it fits, otherwise as much of it as fits
+        followed by an ellipsis.
+    """
+    if font.measure(text) <= width:
+        return text
+
+    cut = text
+
+    while cut and font.measure(cut.rstrip() + ELLIPSIS) > width:
+        cut = cut[:-1]
+
+    elided = cut.rstrip() + ELLIPSIS
+    return elided
 
 
 class Tooltip:
@@ -208,6 +233,7 @@ class MidiEditorApp(tk.Tk):
         self.channelRows: dict[int, tk.Frame] = {}
         self.channelDetails: dict[int, tk.Frame] = {}    # per channel: the part shown when active
         self.nameLabels: dict[int, tk.Label] = {}        # per channel: the instrument on its row
+        self.rowNames: dict[int, str] = {}               # per channel: that name in full
         self.activeChannel = 0
         self.originalPrograms: dict[int, int] = {}   # per channel, as the file was opened
 
@@ -301,12 +327,25 @@ class MidiEditorApp(tk.Tk):
     def _applyTheme(self):
         """Theme the window before any widget is built.
 
+        The named fonts take the first interface font that is installed.
         The ttk widgets take the clam theme, styled flat from `theme.PALETTE`
-        by `_styleFlat`, with the painted switch and sliders from
-        `_paintElements`. The option database gives the classic tk widgets
-        the same palette, and the named fonts take the first interface font
-        that is installed.
+        by `_styleFlat`, with the painted switch, sliders and icons from
+        `_paintElements`, and the option database gives the classic tk
+        widgets the same palette.
         """
+        # The named fonts take the interface family, first, so the styles
+        # can name it. Widgets given a size of their own use the same family
+        # by name.
+        family = theme.pickFont(tkfont.families(self))
+        self.uiFamily = family or tkfont.nametofont("TkDefaultFont").actual("family")
+        self.rowNameFont = tkfont.Font(self, family=self.uiFamily, size=theme.UI_FONT_PT)
+
+        if family is not None:
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                         "TkCaptionFont", "TkTooltipFont"):
+                size = theme.UI_CAPTION_PT if "Caption" in name else theme.UI_FONT_PT
+                tkfont.nametofont(name, root=self).configure(family=family, size=size)
+
         self.palette = theme.PALETTE
         self._styleFlat()
         self._paintElements()
@@ -348,17 +387,6 @@ class MidiEditorApp(tk.Tk):
         # dialog maps it.
         self.tk.eval("bind Canvas <Map> {+if {[string match .__tk_filedialog.* %W]} "
                      f"{{%W configure -background {p['field']}}}}}")
-
-        # The named fonts take the interface family. Widgets given a size of
-        # their own use the same family by name.
-        family = theme.pickFont(tkfont.families(self))
-        self.uiFamily = family or tkfont.nametofont("TkDefaultFont").actual("family")
-
-        if family is not None:
-            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
-                         "TkCaptionFont", "TkTooltipFont"):
-                size = theme.UI_CAPTION_PT if "Caption" in name else theme.UI_FONT_PT
-                tkfont.nametofont(name, root=self).configure(family=family, size=size)
 
     def _styleFlat(self):
         """Style the ttk clam theme flat from the palette.
@@ -404,6 +432,15 @@ class MidiEditorApp(tk.Tk):
                         ("active", p["hover"])))
         s.configure("Toolbutton", **flat(p["panel"]))
         s.map("Toolbutton", **flatMap(("pressed", p["active"]), ("active", p["hover"])))
+
+        # A panel's title bar, a step lighter than the panel, with compact
+        # buttons, and the inspector's burger button, which sits on it.
+        s.configure("Title.TFrame", background=p["title"])
+        s.configure("Title.TLabel", background=p["title"], foreground=p["text"])
+        s.configure("Title.TButton", padding=(6, 0), width=0, font=(self.uiFamily, 9))
+        s.configure("Burger.Toolbutton", font=(self.uiFamily, 14), padding=(6, 0, 6, 2),
+                    **flat(p["title"]))
+        s.map("Burger.Toolbutton", **flatMap(("pressed", p["active"]), ("active", p["hover"])))
 
         # Fields: flat on the field colour with an etched edge.
         for style in ("TCombobox", "TSpinbox"):
@@ -451,8 +488,8 @@ class MidiEditorApp(tk.Tk):
         dark = theme.ROLL["strip"]
         s.configure("Lane.TFrame", background=dark)
         s.configure("Lane.TLabel", background=dark, foreground=p["muted"])
-        s.configure("Lane.Toggle.TButton", foreground=p["accent"], padding=(10, 1),
-                    focuscolor=dark, **flat(dark))
+        s.configure("Lane.Toggle.TButton", foreground=p["accent"], padding=(8, 0),
+                    font=(self.uiFamily, 8), focuscolor=dark, **flat(dark))
         s.map("Lane.Toggle.TButton", foreground=[("selected", p["ink"])],
               focuscolor=[("selected", p["accent"])],
               **flatMap(("selected", "active", lit), ("selected", p["accent"]),
@@ -465,7 +502,9 @@ class MidiEditorApp(tk.Tk):
         by state. Every horizontal `ttk.Scale` takes the painted knob and
         trough; `Row.Horizontal.TScale` takes the channel rows' smaller
         knob and translucent trough, and a style per channel derived from
-        it gives the colour the trough sits on.
+        it gives the colour the trough sits on. `Mute.Row.TCheckbutton` and
+        `Solo.Row.TCheckbutton` are the rows' icons, given the colour the
+        same way.
         """
         s = ttk.Style(self)
         img = {name: tk.PhotoImage(master=self, data=data)
@@ -499,6 +538,19 @@ class MidiEditorApp(tk.Tk):
         s.layout("Row.Horizontal.TScale", [("Row.Horizontal.Scale.trough", {
             "sticky": "nswe", "children": [
                 ("Row.Horizontal.Scale.slider", {"side": "left", "sticky": ""})]})])
+
+        # The channel rows' mute and solo: checkbuttons drawn as the icon
+        # alone, by state.
+        s.configure("Row.TCheckbutton", padding=1)
+
+        for key in ("Mute", "Solo"):
+            name = key.lower()
+            s.element_create(f"{key}.indicator", "image", img[f"{name}Off"],
+                             ("active", "selected", img[f"{name}OnHover"]),
+                             ("selected", img[f"{name}On"]),
+                             ("active", img[f"{name}OffHover"]), sticky="")
+            s.layout(f"{key}.Row.TCheckbutton", [("Checkbutton.padding", {
+                "sticky": "nswe", "children": [(f"{key}.indicator", {"sticky": ""})]})])
 
     # ------------------------------------------------------------------ UI
     def _buildMenu(self):
@@ -676,21 +728,24 @@ class MidiEditorApp(tk.Tk):
         # Header row with the title and the two bulk mute/solo buttons.
         left = ttk.Frame(paned, width=330)
         paned.add(left, weight=0)
-        head = ttk.Frame(left, padding=(6, 4))
+        # The buttons are packed first and the title last, so on a narrow
+        # strip the title gives way and the buttons stay whole.
+        head = ttk.Frame(left, padding=(6, 2), style="Title.TFrame")
         head.pack(fill="x")
-        ttk.Label(head, text="Channels",
-                  font=(self.uiFamily, 10, "bold")).pack(side="left")
-        b = ttk.Button(head, text="Mute All", width=8, command=self.muteAll)
+        b = ttk.Button(head, text="Mute All", style="Title.TButton", command=self.muteAll)
         b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Mute every channel")
-        b = ttk.Button(head, text="Change All", width=10, command=self.changeAllDialog)
+        b = ttk.Button(head, text="Change All", style="Title.TButton",
+                       command=self.changeAllDialog)
         b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Set every channel's instrument to one GM program\n"
                    "(Ch 10, the percussion channel, is left alone)")
-        b = ttk.Button(head, text="Clear", width=6, command=self.clearMuteSolo)
+        b = ttk.Button(head, text="Clear", style="Title.TButton", command=self.clearMuteSolo)
         b.pack(side="right")
         Tooltip(b, "Clear all mutes and solos and restore the\n"
                    "instruments the file was opened with")
+        ttk.Label(head, text="Channels", style="Title.TLabel",
+                  font=(self.uiFamily, 10, "bold")).pack(side="left")
 
         # Reduce panel, packed at the bottom before the strip so the strip
         # gives way to it rather than pushing it off the window.
@@ -800,8 +855,6 @@ class MidiEditorApp(tk.Tk):
         gutter = ttk.Frame(roll, width=KEYS_W, style="Lane.TFrame")
         switch = ttk.Frame(roll, padding=(KEYS_W, 3, 0, 3), style="Lane.TFrame")
         switch.grid(row=3, column=0, columnspan=2, sticky="ew")
-        ttk.Style(self).configure("Lane.Toggle.TButton", font=(self.uiFamily, 8),
-                                  padding=(8, 0))
 
         for lane, tip in (("Demand", "Voices sounding over time, against the budget"),
                           ("Velocity", "A bar for each note at its start, as tall as its velocity"),
@@ -1226,12 +1279,11 @@ class MidiEditorApp(tk.Tk):
         self.channelRows.clear()
         self.channelDetails.clear()
         self.nameLabels.clear()
+        self.rowNames.clear()
         figures = analysis.channelDemand(self._ensureSongDemand())
         self.channelFigures = figures
         p = self.palette
         s = ttk.Style(self)
-        s.configure("Row.Toggle.TButton", padding=(4, 0), width=2,
-                    font=(self.uiFamily, 9, "bold"))
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
@@ -1240,16 +1292,30 @@ class MidiEditorApp(tk.Tk):
             row.pack(fill="x", pady=(0, 1))
 
             # The one-line row is a header bar in the channel's colour: the
-            # number and instrument in dark text on the left; volume, solo
-            # and mute packed from the right.
+            # mute and solo icons on the left, the volume slider on the
+            # right, and between them the number and the instrument in dark
+            # text. Tk shrinks what is packed last when the strip is narrow,
+            # so the name goes last and gives way, with an ellipsis.
             top = tk.Frame(row, bg=colour)
             top.pack(fill="x")
-            tk.Label(top, text=f"Ch {ch + 1}", anchor="w", bg=colour, fg=p["ink"],
-                     font=(self.uiFamily, 10, "bold")).pack(side="left", padx=(6, 4))
-            name = tk.Label(top, text=info.instrument, anchor="w", bg=colour, fg=p["ink"],
-                            font=(self.uiFamily, 10))
-            name.pack(side="left", fill="x", expand=True)
-            self.nameLabels[ch] = name
+
+            # Mute and solo are painted icons that share _channelsChanged,
+            # which dims the roll and restarts the synth when playing. A
+            # style per channel puts each icon on the header colour.
+            self.muteVars[ch] = tk.BooleanVar(value=False)
+            self.soloVars[ch] = tk.BooleanVar(value=False)
+
+            for key, var, tip in (
+                    ("Mute", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
+                     "playback\nand dim its notes in the piano roll"),
+                    ("Solo", self.soloVars[ch], f"Solo channel {ch + 1}: when any channel is "
+                     "soloed,\nonly soloed channels play (solo overrides mute)")):
+                style = f"Ch{ch}.{key}.Row.TCheckbutton"
+                s.configure(style, background=colour)
+                b = ttk.Checkbutton(top, variable=var, style=style,
+                                    command=self._channelsChanged)
+                b.pack(side="left", padx=(3, 0) if key == "Mute" else 0)
+                Tooltip(b, tip)
 
             # Volume slider starts at the file's CC7 value, or 100 when the
             # channel has none. Its style puts the trough on the header
@@ -1265,20 +1331,16 @@ class MidiEditorApp(tk.Tk):
                     "Writes a volume event into the file (saved on\n"
                     "Ctrl+S). Applies live while playing.")
 
-            # Mute and solo are toggle buttons that share _channelsChanged,
-            # which dims the roll and restarts the synth when playing.
-            self.muteVars[ch] = tk.BooleanVar(value=False)
-            self.soloVars[ch] = tk.BooleanVar(value=False)
-
-            for text, var, tip in (
-                    ("S", self.soloVars[ch], f"Solo channel {ch + 1}: when any channel is "
-                     "soloed,\nonly soloed channels play (solo overrides mute)"),
-                    ("M", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
-                     "playback\nand dim its notes in the piano roll")):
-                b = ttk.Checkbutton(top, text=text, variable=var, style="Row.Toggle.TButton",
-                                    command=self._channelsChanged)
-                b.pack(side="right", padx=(2, 0))
-                Tooltip(b, tip)
+            # The number, then the name, which asks for no width of its own
+            # and is fitted to what it is given whenever that changes.
+            tk.Label(top, text=f"Ch {ch + 1}", anchor="w", bg=colour, fg=p["ink"],
+                     font=(self.uiFamily, 10, "bold")).pack(side="left", padx=(6, 4))
+            name = tk.Label(top, text=info.instrument, anchor="w", width=1, bg=colour,
+                            fg=p["ink"], font=self.rowNameFont)
+            name.pack(side="left", fill="x", expand=True)
+            name.bind("<Configure>", lambda e, c=ch: self._fitRowName(c))
+            self.nameLabels[ch] = name
+            self.rowNames[ch] = info.instrument
 
             # The detail, shown under the active row: summary, figures, and
             # the reduction controls.
@@ -1387,6 +1449,22 @@ class MidiEditorApp(tk.Tk):
                 stack.extend(w.winfo_children())
 
         return surfaces
+
+    def _fitRowName(self, ch: int):
+        """Show a row's instrument name in full, or cut short with an ellipsis to fit.
+
+        Args:
+            ch: 0-based channel index.
+        """
+        label = self.nameLabels[ch]
+        width = label.winfo_width()
+
+        # Until the row is laid out the label has no width to fit to.
+        shown = self.rowNames[ch] if width <= 1 else _elide(self.rowNames[ch],
+                                                             self.rowNameFont, width - 4)
+
+        if label.cget("text") != shown:
+            label.configure(text=shown)
 
     def _channelsChanged(self):
         """Mute or solo toggled: dim the roll and restart the synth if playing."""
@@ -1593,7 +1671,8 @@ class MidiEditorApp(tk.Tk):
         # The row shows the instrument, and its summary line carries the
         # instrument family, which the new program may have changed.
         if ch in self.nameLabels:
-            self.nameLabels[ch].config(text=gm.programName(program))
+            self.rowNames[ch] = gm.programName(program)
+            self._fitRowName(ch)
 
         label = self.descLabels.get(ch)
 
@@ -1664,20 +1743,18 @@ class MidiEditorApp(tk.Tk):
         """
         p = self.palette
         self.inspectorFolded = False
-        ttk.Style(self).configure("Burger.Toolbutton", font=(self.uiFamily, 14),
-                                  padding=(6, 0, 6, 2))
 
         # The open panel: header, then the channel card.
         self.inspectorBody = ttk.Frame(parent)
         self.inspectorBody.pack(fill="both", expand=True)
-        head = ttk.Frame(self.inspectorBody)
+        head = ttk.Frame(self.inspectorBody, style="Title.TFrame")
         head.pack(fill="x", pady=(0, 6))
         b = ttk.Button(head, text=BURGER_GLYPH, style="Burger.Toolbutton",
                        command=self.toggleInspector)
         b.pack(side="left")
         Tooltip(b, "Fold the inspector away; the roll takes its width")
-        ttk.Label(head, text="Inspector", font=(self.uiFamily, 11, "bold")).pack(
-            side="left", padx=(4, 0))
+        ttk.Label(head, text="Inspector", style="Title.TLabel",
+                  font=(self.uiFamily, 10, "bold")).pack(side="left", padx=(4, 0))
 
         card = self._inspectorCard("CHANNEL")
         top = tk.Frame(card, bg=p["raised"])
@@ -2674,8 +2751,8 @@ class MidiEditorApp(tk.Tk):
     def _buildReducePanel(self, parent: ttk.Frame):
         """Create the reduction controls under the channel strip.
 
-        Top to bottom: the switch that turns the reduction on and the
-        result label; the pool the panel edits, with its add, remove and
+        Top to bottom: the title bar; the switch that turns the reduction
+        on and the result label; the pool the panel edits, with its add, remove and
         tiers buttons; the pool's voices, tier and sound; how much its
         channels overlap; the transforms as toggle buttons; and the three
         gaps.
@@ -2683,8 +2760,14 @@ class MidiEditorApp(tk.Tk):
         Args:
             parent: the left column frame.
         """
-        panel = ttk.LabelFrame(parent, text="Reduce", padding=(8, 4))
-        panel.pack(side="bottom", fill="x", padx=4, pady=(6, 4))
+        box = ttk.Frame(parent)
+        box.pack(side="bottom", fill="x", pady=(6, 0))
+        title = ttk.Frame(box, padding=(6, 2), style="Title.TFrame")
+        title.pack(fill="x")
+        ttk.Label(title, text="Reduce", style="Title.TLabel",
+                  font=(self.uiFamily, 10, "bold")).pack(side="left")
+        panel = ttk.Frame(box, padding=(8, 4))
+        panel.pack(fill="x")
         cb = ttk.Checkbutton(panel, text="Reduce to the voice budget", variable=self.reduceVar,
                              style="Switch.TCheckbutton", command=self._reductionChanged)
         cb.pack(anchor="w")

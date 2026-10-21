@@ -9,6 +9,8 @@ import base64
 import struct
 import zlib
 
+import pytest
+
 from montyroll import theme
 
 
@@ -65,7 +67,8 @@ class TestPalettes:
     def testPaletteKeys(self) -> None:
         """The palette names every colour the window reads from it."""
         assert set(theme.PALETTE) == {"window", "panel", "raised", "field", "border", "text",
-                                      "muted", "accent", "active", "lcd", "hover", "ink"}
+                                      "muted", "accent", "active", "lcd", "hover", "ink",
+                                      "title"}
 
     def testColoursAreHex(self) -> None:
         """Every colour is a #rrggbb string."""
@@ -141,6 +144,13 @@ class TestPainter:
         assert rows[7][28:32] == bytes((0, 0, 255, 255))
         assert rows[7][8:12] == bytes((255, 0, 0, 255))
 
+    def testEraseCutsAShapeOut(self) -> None:
+        """A layer with no colour clears what is under it, leaving the rest."""
+        layers = [(theme.circle(8, 8, 8), "#000000"), (theme.circle(8, 8, 3), None)]
+        _, _, rows = _decode(theme.png(16, 16, layers))
+        assert _alpha(rows, 8, 8) == 0
+        assert _alpha(rows, 2, 8) == 255
+
     def testPaintedImages(self) -> None:
         """The switch is 40 by 20 in each state, and the images are painted once."""
         images = theme.paintedImages()
@@ -150,4 +160,44 @@ class TestPainter:
             width, height, _ = _decode(images[name])
             assert (width, height) == (40, 20)
 
+        for name in ("muteOff", "muteOffHover", "muteOn", "muteOnHover",
+                     "soloOff", "soloOffHover", "soloOn", "soloOnHover"):
+            width, height, _ = _decode(images[name])
+            assert (width, height) == (18, 18)
+
         assert theme.paintedImages() is images
+
+
+class TestShapes:
+    """The distance functions the painter draws with: negative inside, positive outside."""
+
+    def testBox(self) -> None:
+        """A box is inside at its centre and outside beyond its edge, by the distance."""
+        shape = theme.box(2, 2, 8, 6)
+        assert shape(5, 4) < 0
+        assert shape(10, 4) == pytest.approx(2.0)
+
+    def testRoundedCorner(self) -> None:
+        """A rounded box no longer covers its corner."""
+        assert theme.box(0, 0, 10, 10)(0.5, 0.5) < 0
+        assert theme.box(0, 0, 10, 10, 3)(0.5, 0.5) > 0
+
+    def testPolygon(self) -> None:
+        """A triangle holds a point inside it and measures to its nearest edge outside."""
+        shape = theme.polygon([(0, 0), (10, 0), (0, 10)])
+        assert shape(2, 2) < 0
+        assert shape(-3, 5) == pytest.approx(3.0)
+        assert shape(8, 8) > 0
+
+    def testArc(self) -> None:
+        """An arc is the stroke on its circle within its angles, with round ends."""
+        top = theme.arc(0, 0, 5, 1, -180.0, 0.0)
+        assert top(0, -5) < 0              # the top of the circle
+        assert top(0, 5) > 0               # the bottom, outside the angles
+        assert top(5, 1) == pytest.approx(0.5)   # a pixel below the right end
+
+    def testUnion(self) -> None:
+        """Two shapes joined cover what either covers."""
+        shape = theme.union(theme.circle(0, 0, 2), theme.circle(10, 0, 2))
+        assert shape(0, 0) < 0 and shape(10, 0) < 0 and shape(5, 0) > 0
+

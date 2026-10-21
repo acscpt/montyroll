@@ -27,6 +27,7 @@ from montyroll.app import (
     DEMAND_MIN_H,
     DRAWER_CLOSE_GLYPH,
     DRAWER_OPEN_GLYPH,
+    ELLIPSIS,
     MAX_EVENT_ROWS,
     NO_POOL,
     PLAY_GLYPH,
@@ -34,6 +35,7 @@ from montyroll.app import (
     TEMPO_GLYPH,
     X16_TIERS,
     MidiEditorApp,
+    _elide,
     _shade,
 )
 from montyroll.export import zsm, zsmcheck, zsmdecode
@@ -207,6 +209,59 @@ class TestTheme:
                 == theme.PALETTE["accent"])
         assert (style.lookup("Lane.Toggle.TButton", "foreground", ["selected"])
                 == theme.PALETTE["ink"])
+
+    def testMuteAndSoloIconsLeadTheRow(self, app: MidiEditorApp) -> None:
+        """Each row opens with its mute and solo icons, on the header colour."""
+        style = ttk.Style(app)
+        assert {"Mute.indicator", "Solo.indicator"} <= set(style.element_names())
+
+        for ch in sorted(app.song.channels):
+            header = app.nameLabels[ch].master
+            icons = [w for w in header.winfo_children() if isinstance(w, ttk.Checkbutton)]
+            assert [str(w.cget("style")) for w in icons] == [
+                f"Ch{ch}.Mute.Row.TCheckbutton", f"Ch{ch}.Solo.Row.TCheckbutton"]
+            assert str(icons[0].cget("variable")) == str(app.muteVars[ch])
+            assert style.lookup(icons[0].cget("style"), "background") == CHANNEL_COLORS[ch]
+            assert icons[1].winfo_x() < app.nameLabels[ch].winfo_x()
+
+    def testNameGivesWayOnANarrowStrip(self, app: MidiEditorApp) -> None:
+        """Narrowed, a long name ends in an ellipsis and the slider stays clear of it."""
+        ch = next(c for c, name in app.rowNames.items() if len(name) > 12)
+        label = app.nameLabels[ch]
+        app.paned.sashpos(0, 190)
+        app.update()
+        assert label.cget("text").endswith(ELLIPSIS)
+        assert app.rowNameFont.measure(label.cget("text")) <= label.winfo_width()
+        scale = next(w for w in label.master.winfo_children() if isinstance(w, ttk.Scale))
+        assert label.winfo_x() + label.winfo_width() <= scale.winfo_x()
+        app.paned.sashpos(0, 420)
+        app.update()
+        assert label.cget("text") == app.rowNames[ch]
+
+    def testElide(self, app: MidiEditorApp) -> None:
+        """Text that fits is kept; text that does not is cut to fit with an ellipsis."""
+        font = app.rowNameFont
+        text = "Acoustic Grand Piano"
+        assert _elide(text, font, font.measure(text)) == text
+        cut = _elide(text, font, font.measure("Acoustic"))
+        assert cut.endswith(ELLIPSIS) and font.measure(cut) <= font.measure("Acoustic")
+        assert _elide(text, font, 1) == ELLIPSIS
+
+    def testPanelTitleBars(self, app: MidiEditorApp) -> None:
+        """Channels, Reduce and the inspector each have a title bar in the title colour."""
+        style = ttk.Style(app)
+        assert style.lookup("Title.TFrame", "background") == theme.PALETTE["title"]
+        titles = []
+        stack: list[tk.Misc] = [app]
+
+        while stack:
+            w = stack.pop()
+            stack.extend(w.winfo_children())
+
+            if isinstance(w, ttk.Label) and str(w.cget("style")) == "Title.TLabel":
+                titles.append(str(w.cget("text")))
+
+        assert {"Channels", "Reduce", "Inspector"} <= set(titles)
 
     def testRowHeaderTakesTheChannelColour(self, app: MidiEditorApp) -> None:
         """A row's header bar is its channel colour with dark text, active or not."""

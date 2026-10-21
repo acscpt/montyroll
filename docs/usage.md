@@ -64,7 +64,7 @@ Playback goes through [a synth](install.md#add-a-synth-for-sound), and a cursor 
 
 **Play** on the toolbar starts the music from the first bar, and the same button stops it. `Space` does both from the keyboard. Playback can also start part way through. A right-click on the roll opens a menu with **Play from bar N** and **Play from beat N:B**, for the bar and the beat under the pointer.
 
-Each channel row has two toggle buttons for listening to part of the arrangement. **M** mutes the channel, and its notes are dimmed on the roll. **S** solos the channel, so that the soloed channels are heard alone.
+Each channel row opens with two icons for listening to part of the arrangement. The speaker mutes the channel, and its notes are dimmed on the roll. The headphones solo the channel, so that the soloed channels are heard alone. An icon that is on is drawn solid.
 
 **Vol** and **Speed** on the toolbar set the loudness and the speed of playback. Both change what is heard, and the file is left as it is.
 

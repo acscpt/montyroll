@@ -137,7 +137,7 @@ The pause is expected. A synth plays a file from its first event, so to apply a 
 
 Three controls can silence a channel, and all three are on the channel rows.
 
-The first is **M** on the row of the channel itself. With **M** on, the channel is muted, and its notes are dimmed on the roll. The second is **S** on any other row. With **S** on, the soloed channels play alone, which silences every channel that is left unsoloed. **Clear** at the head of the strip resets every mute and solo in one click.
+The first is the speaker on the row of the channel itself. With the speaker on, drawn solid, the channel is muted, and its notes are dimmed on the roll. The second is the headphones on any other row. With the headphones on, the soloed channels play alone, which silences every channel that is left unsoloed. **Clear** at the head of the strip resets every mute and solo in one click.
 
 The third is the volume slider on the row. With the slider at the far left the channel plays at volume zero, and a drag to the right brings it back.
 

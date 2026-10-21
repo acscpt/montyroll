@@ -25,12 +25,13 @@ from functools import cache
 # and lists, border the etched lines between the parts of the window, text
 # and muted the two text colours, accent the "on" colour, active the tint of
 # the active channel's row, lcd the panel behind the toolbar readout, hover
-# a raised control under the pointer, and ink the text on the accent and on
-# the channel colours.
+# a raised control under the pointer, ink the text on the accent and on the
+# channel colours, and title the bar across the top of a panel.
 PALETTE = {
     "window": "#282a33", "panel": "#333540", "raised": "#3b3d48", "field": "#22242d",
     "border": "#22242d", "text": "#d4d5dc", "muted": "#878992", "accent": "#57c8ff",
     "active": "#434552", "lcd": "#16181f", "hover": "#4a4c59", "ink": "#1a1b20",
+    "title": "#434550",
 }
 
 # The roll, ruler, keyboard gutter and strip: a mid grey note grid with
@@ -125,18 +126,145 @@ def circle(cx: float, cy: float, radius: float) -> Distance:
     return distance
 
 
+def box(x0: float, y0: float, x1: float, y1: float, radius: float = 0.0) -> Distance:
+    """Describe a rectangle, its corners rounded by radius.
+
+    Args:
+        x0: the left edge.
+        y0: the top edge.
+        x1: the right edge.
+        y1: the bottom edge.
+        radius: the corner radius.
+
+    Returns:
+        Distance: the signed distance from a point to the rectangle's edge.
+    """
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    hx, hy = (x1 - x0) / 2 - radius, (y1 - y0) / 2 - radius
+
+    def distance(x: float, y: float) -> float:
+        """Measure from a point to the edge; negative inside."""
+        qx, qy = abs(x - cx) - hx, abs(y - cy) - hy
+        d = math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - radius
+        return d
+
+    return distance
+
+
+def polygon(points: list[tuple[float, float]]) -> Distance:
+    """Describe a polygon by its corners, in order.
+
+    Args:
+        points: the corners as (x, y).
+
+    Returns:
+        Distance: the signed distance from a point to the polygon's edge.
+    """
+    edges = list(zip(points, points[1:] + points[:1]))
+
+    def distance(x: float, y: float) -> float:
+        """Measure from a point to the edge; negative inside."""
+        nearest = min(_segmentDistance(x, y, a, b) for a, b in edges)
+        inside = False
+
+        # A ray to the right crosses the edges an odd number of times from
+        # inside the polygon.
+        for (ax, ay), (bx, by) in edges:
+            if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+                inside = not inside
+
+        d = -nearest if inside else nearest
+        return d
+
+    return distance
+
+
+def arc(cx: float, cy: float, radius: float, width: float,
+        start: float = -180.0, end: float = 180.0) -> Distance:
+    """Describe a stroke along a circle from one angle to another, with round ends.
+
+    Angles are in degrees from the +x axis, with y downwards, so -90 is the
+    top of the circle; the default range is the whole ring.
+
+    Args:
+        cx: the centre's x.
+        cy: the centre's y.
+        radius: the radius of the stroke's centre line.
+        width: the stroke's width.
+        start: the angle the stroke starts at, from -180.
+        end: the angle it ends at, up to 180.
+
+    Returns:
+        Distance: the signed distance from a point to the stroke's edge.
+    """
+    ends = [(cx + radius * math.cos(math.radians(a)), cy + radius * math.sin(math.radians(a)))
+            for a in (start, end)]
+
+    def distance(x: float, y: float) -> float:
+        """Measure from a point to the edge; negative inside."""
+        angle = math.degrees(math.atan2(y - cy, x - cx))
+
+        if start <= angle <= end:
+            d = abs(math.hypot(x - cx, y - cy) - radius) - width / 2
+        else:
+            d = min(math.hypot(x - ex, y - ey) for ex, ey in ends) - width / 2
+
+        return d
+
+    return distance
+
+
+def union(*shapes: Distance) -> Distance:
+    """Describe the shapes together as one.
+
+    Args:
+        shapes: the shapes to join.
+
+    Returns:
+        Distance: the distance to the nearest of them.
+    """
+    def distance(x: float, y: float) -> float:
+        """Measure from a point to the nearest shape's edge; negative inside any."""
+        d = min(shape(x, y) for shape in shapes)
+        return d
+
+    return distance
+
+
+def _segmentDistance(x: float, y: float, a: tuple[float, float],
+                     b: tuple[float, float]) -> float:
+    """Measure from a point to a line segment.
+
+    Args:
+        x: the point's x.
+        y: the point's y.
+        a: one end of the segment.
+        b: the other end.
+
+    Returns:
+        float: the distance to the nearest point of the segment.
+    """
+    (ax, ay), (bx, by) = a, b
+    dx, dy = bx - ax, by - ay
+    t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)))
+    d = math.hypot(x - ax - t * dx, y - ay - t * dy)
+    return d
+
+
 def png(width: int, height: int, layers: list[tuple]) -> str:
     """Paint shapes into an RGBA image and encode it as base64 PNG data.
 
     A pixel takes each layer's colour by the share of it that lies inside
     the shape, which smooths the edges, and the layers are laid over one
-    another in order on a clear background.
+    another in order on a clear background. A layer whose colour is None
+    erases what is under it instead, which cuts a shape out of the image.
 
     Args:
         width: the image width in pixels.
         height: the image height in pixels.
-        layers: (distance, "#rrggbb") or (distance, "#rrggbb", opacity)
-            tuples, bottom first; distance takes a pixel centre.
+        layers: (distance, colour) or (distance, colour, opacity) tuples,
+            bottom first; distance takes a pixel centre, and colour is
+            "#rrggbb" or None to erase.
 
     Returns:
         str: the PNG, base64 encoded, as `tk.PhotoImage(data=...)` takes it.
@@ -156,6 +284,10 @@ def png(width: int, height: int, layers: list[tuple]) -> str:
                 cover *= opacity[0] if opacity else 1.0
 
                 if cover == 0.0:
+                    continue
+
+                if colour is None:
+                    a *= 1 - cover
                     continue
 
                 cr, cg, cb = (int(colour[k:k + 2], 16) for k in (1, 3, 5))
@@ -193,19 +325,24 @@ def _chunk(tag: bytes, data: bytes) -> bytes:
 
 @cache
 def paintedImages() -> dict[str, str]:
-    """Paint the switch, the slider knobs and the slider troughs.
+    """Paint the switch, the slider knobs and troughs, and the mute and solo icons.
 
     The switch is a 40 by 20 pill: an outline with a grey knob on the left
     when off, filled with the accent with a dark knob on the right when on,
     and the knob a pixel larger under the pointer. The toolbar knob is a
     grey disc with an accent centre on a thin inset trough. The channel
     rows' knob is dark on a trough of translucent black, so both sit on any
-    header colour. The images are painted once and shared by every window.
+    header colour. The mute and solo icons are 18 pixels square, a speaker
+    and headphones: a dark ring and glyph when off, a dark disc with the
+    glyph cut out when on, so the header colour shows through it, and a
+    faint shadow behind the ring under the pointer. The images are painted
+    once and shared by every window.
 
     Returns:
         dict[str, str]: base64 PNG data by name: switchOff, switchOffHover,
         switchOffDisabled, switchOn, switchOnHover, switchOnDisabled, knob,
-        knobHover, trough, rowKnob, rowKnobHover and rowTrough.
+        knobHover, trough, rowKnob, rowKnobHover, rowTrough, and muteOff,
+        muteOffHover, muteOn, muteOnHover and the same four for solo.
     """
     p = PALETTE
     lit = mix(p["accent"], "#ffffff", 0.2)
@@ -234,4 +371,23 @@ def paintedImages() -> dict[str, str]:
         "rowKnobHover": png(10, 12, [(circle(5, 6, 4.5), "#000000")]),
         "rowTrough": png(16, 12, [(capsule(2, 14, 6, 2), "#000000", 0.35)]),
     }
+
+    # The icons: each glyph inside a ring, or cut out of a disc.
+    glyphs = {
+        "mute": union(box(4.8, 7.4, 7.0, 10.6, 0.4),
+                      polygon([(6.6, 7.4), (9.6, 5.0), (9.6, 13.0), (6.6, 10.6)]),
+                      arc(9.6, 9.0, 2.7, 1.2, -50.0, 50.0)),
+        "solo": union(arc(9.0, 9.8, 4.2, 1.3, -180.0, 0.0),
+                      box(4.1, 9.4, 6.4, 13.0, 0.8), box(11.6, 9.4, 13.9, 13.0, 0.8)),
+    }
+    ring = arc(9.0, 9.0, 7.9, 1.3)
+    disc = circle(9.0, 9.0, 8.55)
+
+    for name, glyph in glyphs.items():
+        images[f"{name}Off"] = png(18, 18, [(ring, p["ink"]), (glyph, p["ink"])])
+        images[f"{name}OffHover"] = png(18, 18, [(disc, "#000000", 0.18), (ring, p["ink"]),
+                                                 (glyph, p["ink"])])
+        images[f"{name}On"] = png(18, 18, [(disc, p["ink"]), (glyph, None)])
+        images[f"{name}OnHover"] = png(18, 18, [(disc, "#000000"), (glyph, None)])
+
     return images
