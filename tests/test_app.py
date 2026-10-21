@@ -185,6 +185,29 @@ class TestTheme:
         assert str(fileMenu.cget("activebackground")) == theme.PALETTE["accent"]
         assert str(fileMenu.cget("activeforeground")) == theme.PALETTE["ink"]
 
+    def testRowsAreOnePixelApart(self, app: MidiEditorApp) -> None:
+        """The channel rows are packed with a one-pixel etched line between them."""
+        app.update_idletasks()
+        rows = [app.channelRows[ch] for ch in sorted(app.song.channels)]
+
+        for upper, lower in zip(rows, rows[1:]):
+            assert lower.winfo_y() - (upper.winfo_y() + upper.winfo_height()) == 1
+
+        assert str(app.chanHolder.cget("style")) == "Etch.TFrame"
+        assert ttk.Style(app).lookup("Etch.TFrame", "background") == theme.PALETTE["border"]
+
+    def testLaneSwitchOnTheDarkStrip(self, app: MidiEditorApp) -> None:
+        """The lanes are accent text on the strip's dark; the lane on view is filled."""
+        style = ttk.Style(app)
+        dark = theme.ROLL["strip"]
+        assert str(app.demandCanvas.cget("background")) == dark
+        assert style.lookup("Lane.Toggle.TButton", "background") == dark
+        assert style.lookup("Lane.Toggle.TButton", "foreground") == theme.PALETTE["accent"]
+        assert (style.lookup("Lane.Toggle.TButton", "background", ["selected"])
+                == theme.PALETTE["accent"])
+        assert (style.lookup("Lane.Toggle.TButton", "foreground", ["selected"])
+                == theme.PALETTE["ink"])
+
     def testRowHeaderTakesTheChannelColour(self, app: MidiEditorApp) -> None:
         """A row's header bar is its channel colour with dark text, active or not."""
         first, second = sorted(app.song.channels)[:2]

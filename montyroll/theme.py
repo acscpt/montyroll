@@ -35,10 +35,11 @@ PALETTE = {
 
 # The roll, ruler, keyboard gutter and strip: a mid grey note grid with
 # darker lines, so the pastel notes stand out; muted channels' notes in a
-# grey a step lighter than the grid.
+# grey a step lighter than the grid. The strip under the roll, its lane
+# switch and its gutter are a near-black display panel.
 ROLL = {
     "roll": "#3b3d48", "row": "#363843", "octave": "#2a2c35", "bar": "#2a2c35",
-    "beat": "#353742", "ruler": "#282a33", "strip": "#2b2d36", "sash": "#22242d",
+    "beat": "#353742", "ruler": "#282a33", "strip": "#16181f", "sash": "#22242d",
     "white": "#c4c5cc", "black": "#2a2c35", "keyEdge": "#22242d", "keyText": "#3b3d48",
     "muted": "#4c4e59", "mutedEdge": "#2a2c35",
 }

@@ -439,8 +439,24 @@ class MidiEditorApp(tk.Tk):
         s.map("TScrollbar", **flatMap(("active", p["hover"])))
 
         # The sashes between the panes are the etched lines, three pixels wide.
+        # Etch.TFrame shows the same colour through the gaps between the
+        # channel rows.
         s.configure("Sash", sashthickness=3, gripcount=0, **flat(p["border"]))
         s.configure("TPanedwindow", background=p["border"])
+        s.configure("Etch.TFrame", background=p["border"])
+
+        # The lane switch and the strip's gutter sit on the strip's dark: a
+        # lane is accent text alone, and the lane on view is filled with the
+        # accent under dark text.
+        dark = theme.ROLL["strip"]
+        s.configure("Lane.TFrame", background=dark)
+        s.configure("Lane.TLabel", background=dark, foreground=p["muted"])
+        s.configure("Lane.Toggle.TButton", foreground=p["accent"], padding=(10, 1),
+                    focuscolor=dark, **flat(dark))
+        s.map("Lane.Toggle.TButton", foreground=[("selected", p["ink"])],
+              focuscolor=[("selected", p["accent"])],
+              **flatMap(("selected", "active", lit), ("selected", p["accent"]),
+                        ("active", theme.mix(dark, p["accent"], 0.15))))
 
     def _paintElements(self):
         """Make the painted images into the switch and slider elements.
@@ -680,11 +696,12 @@ class MidiEditorApp(tk.Tk):
         # gives way to it rather than pushing it off the window.
         self._buildReducePanel(left)
 
-        # Scrollable strip: the cards live in chanHolder, which is embedded in
+        # Scrollable strip: the rows live in chanHolder, which is embedded in
         # chanCanvas through create_window. The holder's <Configure> keeps the
-        # scrollregion in step with the cards' total height, and the canvas's
-        # <Configure> stretches the holder to the canvas width so the cards
-        # fill it edge to edge.
+        # scrollregion in step with the rows' total height, and the canvas's
+        # <Configure> stretches the holder to the canvas width so the rows
+        # fill it edge to edge. The holder is the etch colour, which frames
+        # the rows and shows as a one-pixel line between them.
         scroller = ttk.Frame(left)
         scroller.pack(fill="both", expand=True)
         self.chanCanvas = tk.Canvas(scroller, highlightthickness=0, width=340)
@@ -693,7 +710,7 @@ class MidiEditorApp(tk.Tk):
         self.chanCanvas.configure(yscrollcommand=cbar.set)
         cbar.pack(side="right", fill="y")
         self.chanCanvas.pack(side="left", fill="both", expand=True)
-        self.chanHolder = ttk.Frame(self.chanCanvas)
+        self.chanHolder = ttk.Frame(self.chanCanvas, style="Etch.TFrame", padding=(1, 1, 1, 0))
         self._chanWindow = self.chanCanvas.create_window(
             (0, 0), window=self.chanHolder, anchor="nw")
         self.chanHolder.bind(
@@ -780,8 +797,8 @@ class MidiEditorApp(tk.Tk):
         # only the visible columns from the current scroll position, so its
         # cost is the window width and not the length of the piece. The
         # gutter beside it holds the voice budget.
-        gutter = ttk.Frame(roll, width=KEYS_W)
-        switch = ttk.Frame(roll, padding=(KEYS_W, 3, 0, 2))
+        gutter = ttk.Frame(roll, width=KEYS_W, style="Lane.TFrame")
+        switch = ttk.Frame(roll, padding=(KEYS_W, 3, 0, 3), style="Lane.TFrame")
         switch.grid(row=3, column=0, columnspan=2, sticky="ew")
 
         for lane, tip in (("Demand", "Voices sounding over time, against the budget"),
@@ -789,13 +806,14 @@ class MidiEditorApp(tk.Tk):
                           ("Weight", "A bar for each note, as tall as its reduction weight;\n"
                                      "outlines are the notes the reduction drops")):
             b = ttk.Radiobutton(switch, text=lane, value=lane, variable=self.laneVar,
-                                style="Toggle.TButton", command=self._laneChanged)
-            b.pack(side="left", padx=(0, 4))
+                                style="Lane.Toggle.TButton", command=self._laneChanged)
+            b.pack(side="left", padx=(0, 2))
             Tooltip(b, tip)
 
         gutter.grid(row=4, column=0, sticky="nsew")
         gutter.grid_propagate(False)
-        ttk.Label(gutter, text="Voices", font=(self.uiFamily, 7)).pack(pady=(4, 0))
+        ttk.Label(gutter, text="Voices", style="Lane.TLabel",
+                  font=(self.uiFamily, 7)).pack(pady=(4, 0))
         self.budgetSpin = ttk.Spinbox(gutter, from_=1, to=64, width=3,
                                       textvariable=self.budgetVar,
                                       command=self._reductionChanged)
@@ -1216,9 +1234,8 @@ class MidiEditorApp(tk.Tk):
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
             colour = CHANNEL_COLORS[ch]
-            row = tk.Frame(self.chanHolder, padx=4, pady=3, highlightthickness=1,
-                           highlightbackground=p["border"], highlightcolor=p["border"])
-            row.pack(fill="x", padx=2, pady=1)
+            row = tk.Frame(self.chanHolder)
+            row.pack(fill="x", pady=(0, 1))
 
             # The one-line row is a header bar in the channel's colour: the
             # number and instrument in dark text on the left; volume, solo
@@ -1263,7 +1280,7 @@ class MidiEditorApp(tk.Tk):
 
             # The detail, shown under the active row: summary, figures, and
             # the reduction controls.
-            detail = tk.Frame(row)
+            detail = tk.Frame(row, padx=6, pady=2)
             self.channelDetails[ch] = detail
             fam = "Percussion" if info.isDrums else gm.familyName(info.program)
             desc = (f"{info.noteCount} notes | "
