@@ -800,6 +800,8 @@ class MidiEditorApp(tk.Tk):
         gutter = ttk.Frame(roll, width=KEYS_W, style="Lane.TFrame")
         switch = ttk.Frame(roll, padding=(KEYS_W, 3, 0, 3), style="Lane.TFrame")
         switch.grid(row=3, column=0, columnspan=2, sticky="ew")
+        ttk.Style(self).configure("Lane.Toggle.TButton", font=(self.uiFamily, 8),
+                                  padding=(8, 0))
 
         for lane, tip in (("Demand", "Voices sounding over time, against the budget"),
                           ("Velocity", "A bar for each note at its start, as tall as its velocity"),
