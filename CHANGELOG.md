@@ -8,7 +8,7 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ### Added
 
-- **A new look.** The window takes the Sun Valley dark theme at compact sizes when the `sv-ttk` package is installed, which the new `theme` extra brings in, and a dark ttk clam theme when it is not. The colours, fonts and sizes live in the new module `theme.py`.
+- **A new look.** A flat dark theme of blue-grey panels with etched lines between them, pastel channel colours, a cyan accent, and a painted switch and sliders. It is built on the ttk clam theme and needs nothing beyond the standard library. The colours, the fonts and the painting live in the new module `theme.py`.
 
 - **The inspector.** A right-hand pane describes the active channel, with its instrument picker and preview, and the selected note, with its reduction verdict and its weight. Its burger button folds it to a narrow strip and gives the roll the width.
 
@@ -18,7 +18,7 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ### Changed
 
-- **Compact channel rows.** Each channel is one line of colour, number, instrument, mute, solo and volume, and the active channel's row also shows its figures and its pool, release and priority. The instrument picker and the preview button moved to the inspector.
+- **Compact channel rows.** Each channel is one line, a bar in its colour with its number, instrument, mute, solo and volume, and the active channel's row also shows its figures and its pool, release and priority. The instrument picker and the preview button moved to the inspector.
 
 - **Events and Report in a drawer.** The two pages open under the roll from buttons along the bottom, beside the count of events, so the roll stays in view.
 
@@ -26,7 +26,7 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **The Reduce panel.** The reduction is a switch, and the transforms and the weight shading are toggle buttons: **Unisons**, **Octaves**, **Top line** and **Shade**.
 
-- **The roll.** A file opens scrolled to the middle of its pitches, notes have an edge a little lighter than their fill, and the playback cursor is drawn in the theme's accent colour.
+- **The roll.** A file opens scrolled to the middle of its pitches, notes have an edge a little darker than their fill, and the playback cursor is drawn in the accent colour.
 
 ## [0.3.0] - 2026-10-20
 

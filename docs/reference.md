@@ -159,7 +159,7 @@ Each channel in use has a row, and a click on a row makes its channel the active
 
 | Control | Values | Effect |
 | --- | --- | --- |
-| Swatch and number | | The colour and number of the channel. |
+| Colour and number | | The bar along the top of the row is in the colour of the channel's notes, and carries its number. |
 | Instrument name | | The GM instrument of the channel. The inspector changes it. |
 | **M** | on, off | Mutes the channel in playback and dims its notes. |
 | **S** | on, off | Plays the soloed channels alone. |
@@ -213,7 +213,7 @@ The ruler has four rows.
 | 3 | Tempo changes and markers |
 | 4 | The chord in each beat |
 
-Each note is a block in the colour of its channel, brighter at a higher velocity, with an edge a little lighter than its fill. A selected note has a white edge. A dashed vertical line marks each tempo change. The roll opens scrolled to the middle of the pitches of the file.
+Each note is a block in the colour of its channel, brighter at a higher velocity, with an edge a little darker than its fill. A selected note has a white edge. A dashed vertical line marks each tempo change. The roll opens scrolled to the middle of the pitches of the file.
 
 ## Lanes
 

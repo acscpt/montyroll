@@ -148,7 +148,7 @@ flowchart LR
 | `export/` | Holds one module for each export target. `zsm.py` writes a ZSM file for the Commander X16. |
 | `player.py` | Finds a synth on `PATH` and runs it on a temporary copy of the song. |
 | `app.py` | The tkinter window: the piano roll, the channel rows, the lanes under the roll, the Reduce panel, the inspector, the drawer, and the menus. |
-| `theme.py` | Holds the colours, the fonts, and the compact Sun Valley sizes that `app.py` applies. |
+| `theme.py` | Holds the colours and the fonts that `app.py` applies, and paints the switch and the sliders as images. |
 
 ## Design considerations
 

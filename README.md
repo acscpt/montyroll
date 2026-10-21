@@ -11,7 +11,7 @@
 
 MontyRoll reads a Standard MIDI File and shows it as a piano roll, with a voice-demand strip underneath that counts how many voices sound at each instant. Its main purpose is to reduce that demand to a voice *budget*, usually the number of channels on a target platform. The reduced arrangement plays through a [synth](#synths) such as `timidity`, and exports as a sequence of register writes for the sound chips of the platform, currently as a ZSM file for the Commander X16.
 
-MontyRoll is written in Python and uses the standard library alone, with tkinter for the window. The Sun Valley theme shown here is an optional extra. Without it, the window takes a dark theme with the same layout.
+MontyRoll is written in Python and uses the standard library alone, with tkinter for the window.
 
 The [documentation](https://github.com/acscpt/montyroll/blob/develop/docs/README.md) starts with a quick start on the demo file and goes on to every control, the plan file, and the Commander X16 export.
 
@@ -23,8 +23,6 @@ The [documentation](https://github.com/acscpt/montyroll/blob/develop/docs/README
 
 - Optional, for sound: a software synth on `PATH`, `timidity` recommended. See [Synths](#synths) for the alternatives and install commands.
 
-- Optional, for the Sun Valley look: the `sv-ttk` package, which the `theme` extra installs.
-
 Without a synth, everything except audio playback still works.
 
 ## Install
@@ -32,11 +30,10 @@ Without a synth, everything except audio playback still works.
 From PyPI, for the application alone:
 
 ```bash
-pip install montyroll                  # or: pipx install montyroll
-pip install "montyroll[theme]"         # with the Sun Valley theme
+pip install montyroll          # or: pipx install montyroll
 ```
 
-`pipx` suits systems where pip will not install into the system Python. The package has no dependencies, and the `theme` extra adds `sv-ttk` alone. The only things pip cannot provide are tkinter itself (`sudo apt install python3-tk` if `import tkinter` fails) and a synth for sound.
+`pipx` suits systems where pip will not install into the system Python. The package has no dependencies. The only things pip cannot provide are tkinter itself (`sudo apt install python3-tk` if `import tkinter` fails) and a synth for sound.
 
 From the repository, which also carries the demo file and the documentation:
 

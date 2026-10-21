@@ -50,12 +50,6 @@ pip install montyroll
 montyroll path/to/file.mid
 ```
 
-The `theme` extra adds the Sun Valley theme, the one the screenshots show, through the `sv-ttk` package. Without it the window takes a dark ttk theme with the same layout:
-
-```bash
-pip install "montyroll[theme]"
-```
-
 The package contains the program alone, so the demo file does not come with it. It can be downloaded from the repository, or any MIDI file will serve instead.
 
 > [!IMPORTANT]
