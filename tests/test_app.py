@@ -253,13 +253,20 @@ class TestTheme:
         """Narrowed, a long name ends in an ellipsis and the slider stays clear of it."""
         ch = next(c for c, name in app.rowNames.items() if len(name) > 12)
         label = app.nameLabels[ch]
-        app.paned.sashpos(0, 190)
+
+        # Narrow the strip by enough to leave the name about half its width,
+        # measured, so the test holds at any font size.
+        app.update_idletasks()
+        full = app.rowNameFont.measure(app.rowNames[ch])
+        squeeze = label.winfo_width() - full // 2
+        wide = app.paned.sashpos(0)
+        app.paned.sashpos(0, wide - squeeze)
         app.update()
         assert label.cget("text").endswith(ELLIPSIS)
         assert app.rowNameFont.measure(label.cget("text")) <= label.winfo_width()
         scale = next(w for w in label.master.winfo_children() if isinstance(w, ttk.Scale))
         assert label.winfo_x() + label.winfo_width() <= scale.winfo_x()
-        app.paned.sashpos(0, 420)
+        app.paned.sashpos(0, wide)
         app.update()
         assert label.cget("text") == app.rowNames[ch]
 
@@ -985,7 +992,7 @@ class TestTonal:
 
 
 class TestHover:
-    """The bar under the pointer, lit faintly, and the note under it, lit a little more."""
+    """The bar, beat and slot under the pointer, each lit a step more, and the note under it."""
 
     def _hoverOn(self, app: MidiEditorApp, note: model.Note) -> int:
         """Move the pointer onto a note's middle.
@@ -1013,19 +1020,53 @@ class TestHover:
         assert app.canvas.coords(base)[2] == pytest.approx(end * app.ppt)
         assert app.ruler.find_withtag("hoverBar")
 
-    def testBandSitsUnderTheLinesAndNotes(self, app: MidiEditorApp) -> None:
-        """The band's base is under everything; its rows sit just over the row shading."""
+    def testLevelsStackUnderTheLinesAndNotes(self, app: MidiEditorApp) -> None:
+        """Bar base, beat base, row shading, bar rows, beat rows, slot, then lines and notes."""
         note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
         self._hoverOn(app, note)
-        order = list(app.canvas.find_all())
-        base = app.canvas.find_withtag("hoverBar")[0]
-        shade = [order.index(i) for i in app.canvas.find_withtag("rowShade")]
-        rows = [order.index(i) for i in app.canvas.find_withtag("hoverRow")]
+        c = app.canvas
+        order = list(c.find_all())
+
+        def at(tag: str) -> list[int]:
+            return [order.index(i) for i in c.find_withtag(tag)]
+
+        assert order[0] == c.find_withtag("hoverBarBase")[0]
+        assert order[1] == c.find_withtag("hoverBeatBase")[0]
+        assert max(at("rowShade")) < min(at("hoverBarRow"))
+        assert max(at("hoverBarRow")) < min(at("hoverBeatRow"))
+        assert max(at("hoverBeatRow")) < min(at("hoverCell"))
         notes = [order.index(i) for i in app.itemToNote]
-        assert order[0] == base
-        assert max(shade) < min(rows)
-        assert max(rows) < min(notes)
-        assert max(rows) < min(order.index(i) for i in app.canvas.find_withtag("tempo"))
+        assert max(at("hoverCell")) < min(notes)
+        assert max(at("hoverCell")) < min(at("tempo"))
+
+    def testBeatAndSlotSitInsideTheBar(self, app: MidiEditorApp) -> None:
+        """The beat lies within the bar, and the slot is the note a double-click would add."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        bar, beat = app._hoverBar, app._hoverBeat
+        num, den = app.song.timeSigs[0][1], app.song.timeSigs[0][2]
+        assert bar[0] <= beat[0] < beat[1] <= bar[1]
+        assert beat[1] - beat[0] == app.song.mf.division * 4 // den
+        assert (bar[1] - bar[0]) == (beat[1] - beat[0]) * num
+        start, end, pitch = app._hoverCell
+        assert beat[0] <= start < end and pitch == note.pitch
+        assert end - start == app._snapTicks()
+        cell = app.canvas.find_withtag("hoverCell")[0]
+        black = note.pitch % 12 in (1, 3, 6, 8, 10)
+        assert (app.canvas.itemcget(cell, "fill")
+                == theme.ROLL["hoverCellRow" if black else "hoverCell"])
+
+    def testDoubleClickFillsTheSlot(self, app: MidiEditorApp) -> None:
+        """A note added by double-click lies exactly in the slot the pointer lit."""
+        app.snapVar.set("1/8")
+        x = (app.song.maxTick + app.song.mf.division) * app.ppt
+        y = (127 - 64) * app.rowH + app.rowH / 2
+        event = FakeEvent(*_toWidget(app, x, y))
+        app.onMotion(event)
+        slot = app._hoverCell
+        app.onDouble(event)
+        added = next(iter(app.selection))
+        assert (added.start, added.end, added.pitch) == slot
 
     def testNoteUnderThePointerIsLit(self, app: MidiEditorApp) -> None:
         """The note under the pointer is mixed towards white, and given its fill back after."""
@@ -1045,7 +1086,10 @@ class TestHover:
         fill = app.canvas.itemcget(item, "fill")
         self._hoverOn(app, note)
         app._clearHover()
-        assert not app.canvas.find_withtag("hoverBar")
+
+        for tag in ("hoverBar", "hoverBeat", "hoverCell"):
+            assert not app.canvas.find_withtag(tag)
+
         assert not app.ruler.find_withtag("hoverBar")
         assert app.canvas.itemcget(item, "fill") == fill
 

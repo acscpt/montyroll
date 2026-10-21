@@ -48,6 +48,7 @@ BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
 BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
 NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
+HOVER_LEVELS = ("bar", "beat", "cell")   # the lit areas under the pointer, outermost first
 BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
 DRAWER_PAGES = ("Events", "Report")        # the drawer's pages, in tab order
 INSPECTOR_W = 290    # the inspector's width when open
@@ -317,6 +318,8 @@ class MidiEditorApp(tk.Tk):
         self._budgetEditor: ttk.Entry | None = None
         self._stripScale: tuple[float, float] | None = None   # (base y, pixels per voice)
         self._hoverBar: tuple[int, int] | None = None   # (first tick, end tick) of the lit bar
+        self._hoverBeat: tuple[int, int] | None = None  # the same for the lit beat
+        self._hoverCell: tuple[int, int, int] | None = None   # (start, end, pitch) of the slot
         self._hoverItem: tuple[int, str] | None = None  # (canvas item, its own fill) lit
 
         # With one pool the strip's budget and the pool's voices are one
@@ -2194,7 +2197,10 @@ class MidiEditorApp(tk.Tk):
         self._drawRuler(width)
         self._drawKeys(height)
         self._hoverItem = None
-        self._paintHoverBar()
+
+        for level in HOVER_LEVELS:
+            self._paintHover(level)
+
         self._scheduleDemand()
 
     def _drawRuler(self, width: int):
@@ -4507,14 +4513,10 @@ class MidiEditorApp(tk.Tk):
         if self._noteAt(x, y):
             return
 
-        # The start snaps down to the grid; the length is one grid step, or a
-        # sixteenth note when snapping is off.
+        # The note fills the slot the pointer has lit.
         tick, pitch = self._posToTickPitch(x, y)
-        snap = self._snapTicks()
-        start = (tick // snap) * snap
-        length = snap if snap > 1 else self.song.mf.division // 4
-        note = self.song.addNote(self.activeChannel, pitch, 100,
-                                  start, start + length)
+        start, end = self._newNoteSpan(tick)
+        note = self.song.addNote(self.activeChannel, pitch, 100, start, end)
         self.selection = {note}
         self._markDirty()
         self._invalidateDemand()
@@ -4580,28 +4582,51 @@ class MidiEditorApp(tk.Tk):
                     else gm.noteName(pitch))
             self._setStatus(f"{where}  {name}")
 
-    def _barSpan(self, tick: float) -> tuple[int, int]:
-        """Find the bar of the roll's grid that holds a tick.
+    def _gridSpans(self, tick: float) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Find the bar and the beat of the roll's grid that hold a tick.
 
-        The grid draws its bars from the first time signature, and so does
-        this, so the span matches the lines on the roll.
+        The grid draws its bars and beats from the first time signature, and
+        so does this, so the spans match the lines on the roll.
 
         Args:
             tick: a position on the roll.
 
         Returns:
-            tuple[int, int]: the bar's first tick and the first tick after it.
+            tuple[tuple[int, int], tuple[int, int]]: the bar and the beat,
+            each as its first tick and the first tick after it.
         """
         num, den = self.song.timeSigs[0][1], self.song.timeSigs[0][2]
-        length = self.song.mf.division * 4 // den * num
-        start = int(tick // length) * length
+        beat = self.song.mf.division * 4 // den
+        bar = beat * num
+        barStart = int(tick // bar) * bar
+        beatStart = int(tick // beat) * beat
+        spans = ((barStart, barStart + bar), (beatStart, beatStart + beat))
+        return spans
+
+    def _newNoteSpan(self, tick: float) -> tuple[int, int]:
+        """Find where a note added at a tick would lie.
+
+        The start snaps down to the grid; the length is one grid step, or a
+        sixteenth note when snapping is off.
+
+        Args:
+            tick: the position of the click.
+
+        Returns:
+            tuple[int, int]: the note's start and end ticks.
+        """
+        snap = self._snapTicks()
+        start = int(tick // snap) * snap
+        length = snap if snap > 1 else self.song.mf.division // 4
         span = (start, start + length)
         return span
 
     def _hover(self, x: float, y: float):
-        """Light the bar under the pointer, and the note under it a little more.
+        """Light the bar, beat and note slot under the pointer, and the note under it.
 
-        The band is redrawn only when the pointer crosses into another bar.
+        Each level is a step lighter than the one around it: the bar, the
+        beat within it, and the slot a double-click would fill, at the
+        pointer's pitch. Each is repainted only when the pointer leaves it.
         The note is lit by mixing its fill towards white, and given its own
         fill back when the pointer leaves it.
 
@@ -4609,11 +4634,21 @@ class MidiEditorApp(tk.Tk):
             x: canvas x coordinate.
             y: canvas y coordinate.
         """
-        bar = self._barSpan(max(0.0, x / self.ppt))
+        tick, pitch = self._posToTickPitch(x, y)
+        bar, beat = self._gridSpans(tick)
+        cell = (*self._newNoteSpan(tick), pitch)
 
         if bar != self._hoverBar:
             self._hoverBar = bar
-            self._paintHoverBar()
+            self._paintHover("bar")
+
+        if beat != self._hoverBeat:
+            self._hoverBeat = beat
+            self._paintHover("beat")
+
+        if cell != self._hoverCell:
+            self._hoverCell = cell
+            self._paintHover("cell")
 
         # The topmost note item under the pointer: with the reduction on, a
         # sounding segment lies over its stippled ghost.
@@ -4639,48 +4674,103 @@ class MidiEditorApp(tk.Tk):
                 self.canvas.itemconfigure(item, fill=fill)
 
     def _clearHover(self, _event=None):
-        """The pointer left the roll: take down the band and the lit note.
+        """The pointer left the roll: take down the lit bar, beat, slot and note.
 
         Args:
             _event: the <Leave> event; unused.
         """
-        self._hoverBar = None
+        self._hoverBar = self._hoverBeat = self._hoverCell = None
         self._unhoverNote()
-        self._paintHoverBar()
 
-    def _paintHoverBar(self):
-        """Draw the band over the bar under the pointer on the roll and the ruler, or clear it.
+        for level in HOVER_LEVELS:
+            self._paintHover(level)
 
-        The band is a few percent lighter than what it covers. On the roll
-        it is a lighter base under everything and lighter pieces of the
-        black-key rows just above their own shading, so the lines and the
-        notes stay on top; on the ruler it is a lighter base under the
-        labels.
+    def _paintHover(self, level: str):
+        """Draw one level of the lit area under the pointer, or clear it.
+
+        Tk canvases have no alpha, so each level is opaque and a few percent
+        lighter than what it covers. The bar and the beat are a lighter
+        base under everything, the beat's over the bar's, and lighter pieces
+        of the black-key rows over their own shading; the slot is one cell
+        over all of those. The lines and the notes stay on top. The bar is
+        lit on the ruler too.
+
+        Args:
+            level: "bar", "beat" or "cell".
         """
-        c, r = self.canvas, self.ruler
-        c.delete("hoverBar")
-        r.delete("hoverBar")
+        c = self.canvas
+        tag = f"hover{level.title()}"
+        c.delete(tag)
 
-        if self._hoverBar is None:
+        if level == "bar":
+            self.ruler.delete(tag)
+
+        span = {"bar": self._hoverBar, "beat": self._hoverBeat, "cell": self._hoverCell}[level]
+
+        if span is None:
             return
 
-        x0, x1 = (t * self.ppt for t in self._hoverBar)
-        base = c.create_rectangle(x0, 0, x1, 128 * self.rowH, fill=theme.ROLL["hoverBar"],
-                                  outline="", tags="hoverBar")
-        c.tag_lower(base)
+        x0, x1 = span[0] * self.ppt, span[1] * self.ppt
 
-        for pitch in range(128):
-            if pitch % 12 in BLACK_KEYS:
-                y = (127 - pitch) * self.rowH
-                c.create_rectangle(x0, y, x1, y + self.rowH, fill=theme.ROLL["hoverRow"],
-                                   outline="", tags=("hoverBar", "hoverRow"))
+        # The slot: one cell at the pitch, in the tone of its row.
+        if level == "cell":
+            pitch = span[2]
+            y = (127 - pitch) * self.rowH
+            fill = theme.ROLL["hoverCellRow" if pitch % 12 in BLACK_KEYS else "hoverCell"]
+            c.create_rectangle(x0, y, x1, y + self.rowH, fill=fill, outline="", tags=tag)
 
-        if c.find_withtag("rowShade"):
-            c.tag_raise("hoverRow", "rowShade")
+        # The bar or the beat: a column of the base tone, and the
+        # black-key rows across it in the row tone.
+        else:
+            c.create_rectangle(x0, 0, x1, 128 * self.rowH, fill=theme.ROLL[tag],
+                               outline="", tags=(tag, f"{tag}Base"))
 
-        band = r.create_rectangle(x0, 0, x1, self.rulerRows[4], fill=theme.ROLL["hoverRuler"],
-                                  outline="", tags="hoverBar")
-        r.tag_lower(band)
+            for pitch in range(128):
+                if pitch % 12 in BLACK_KEYS:
+                    y = (127 - pitch) * self.rowH
+                    c.create_rectangle(x0, y, x1, y + self.rowH,
+                                       fill=theme.ROLL[f"{tag}Row"], outline="",
+                                       tags=(tag, f"{tag}Row"))
+
+        if level == "bar":
+            band = self.ruler.create_rectangle(x0, 0, x1, self.rulerRows[4],
+                                               fill=theme.ROLL["hoverRuler"], outline="",
+                                               tags=tag)
+            self.ruler.tag_lower(band)
+
+        # Stack the new level, from bottom to top: the bar's base, the
+        # beat's base, the row shading, the bar's rows, the beat's rows, the
+        # slot, then the lines and the notes. A raise puts the items just
+        # over the named ones, so the levels already there keep their order.
+        if level == "bar":
+            c.tag_lower("hoverBarBase")
+            self._raiseOver("hoverBarRow", "rowShade")
+        elif level == "beat":
+            if not self._raiseOver("hoverBeatBase", "hoverBarBase"):
+                c.tag_lower("hoverBeatBase")
+
+            self._raiseOver("hoverBeatRow", "hoverBarRow", "rowShade")
+        else:
+            self._raiseOver("hoverCell", "hoverBeatRow", "hoverBarRow", "rowShade")
+
+    def _raiseOver(self, tag: str, *under: str) -> bool:
+        """Raise a tag's items just over the first of some other tags on the roll.
+
+        Args:
+            tag: the items to move.
+            under: tags to try, in order.
+
+        Returns:
+            bool: True when one of `under` was on the roll to raise over.
+        """
+        c = self.canvas
+        found = next((t for t in under if c.find_withtag(t)), None)
+
+        if found is not None and c.find_withtag(tag):
+            c.tag_raise(tag, found)
+
+        raised = found is not None
+        return raised
 
     def _describeNote(self, note: model.Note, prefix: str = ""):
         """Show a note's pitch, velocity, channel, ticks and track in the
