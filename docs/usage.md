@@ -72,7 +72,7 @@ All of these can be changed while the music plays. The synth restarts from the c
 
 ## Reduce to a voice budget
 
-A voice is one note that sounds, and the voice budget is the number of voices that the target can sound at once. The strip under the roll draws the demand of the file as a coloured stack and the budget as a red dashed line. Where the stack rises above the line, the file asks for more voices than the budget, and those are the bars that a reduction thins.
+A voice is one note that sounds, and the voice budget is the number of voices that the target can sound at once. The strip under the roll draws the demand of the file as a coloured stack and the budget as a red line. Where the stack rises above the line, the file asks for more voices than the budget, and those are the bars that a reduction thins.
 
 Start with the number under **Voices**, in the gutter to the left of the strip, and set it to the number of voices that the target has. The arrows above and below it step it, a drag up or down changes it, and a double click opens it for typing. The budget line moves to that level, and a red wash marks each stretch where the demand is above it. The line itself can be dragged as well.
 
@@ -90,13 +90,15 @@ Once the reduction sounds right, **File > Save Reduced As...** writes it out as 
 
 A pool is a set of channels that share a number of voices. A new file has one pool, `all`, which holds every channel and the whole budget. Stealing happens inside one pool, so a second pool gives a group of channels voices that the rest of the file cannot take.
 
-1. Click **+** on the Reduce panel. A new pool appears in the **Pool** box with a name such as `pool 2`, and the panel now edits that pool.
+1. Click **+** on the Reduce panel. A new pool appears in the pools table with a name such as `pool 2`, selected, so the panel now edits it.
 
-2. Type a name for the pool in the **Pool** box and press Return.
+2. Double-click the name in the table, type a name for the pool, and press Return.
 
-3. Set **Voices** on the panel to the number of voices that the pool owns.
+3. Set the pool's voices in the table to the number of voices that it owns: drag the number up or down, or click the arrows beside it.
 
 4. Click the row of each channel that belongs in the pool, and pick the pool in the **Pool** box that opens under it.
+
+The table shows every pool at once, each with its peak: the most notes that its channels sound together, in amber while it is above the pool's voices. The budget lines on the strip can be dragged as well, and each one moves a pool: a tier's line moves the selected pool when it is on that tier, otherwise the tier's last pool.
 
 A melody is the usual case for a pool of its own. Its channels then keep their voices however busy the accompaniment becomes. A channel can also be left out of the reduction altogether, by setting **Pool** under its row to `(none)`.
 
@@ -112,13 +114,13 @@ Pools say how the channels share voices. Tiers say where the voices come from. A
 
 3. Click **OK** to close the dialog.
 
-4. Select each pool in turn in the **Pool** box and set its **Tier**.
+4. Click each pool in turn in the pools table and set its **Tier**.
 
 The strip then draws one budget line for each tier, and the reducer holds each voice for the release time of its tier after a note ends.
 
 ## Smooth or thin a pool
 
-The toggle buttons and the three gaps at the foot of the Reduce panel belong to the pool in the **Pool** box. Each one removes demand before any note competes for a voice, at a different cost to the music.
+The toggle buttons and the three gaps at the foot of the Reduce panel belong to the pool selected in the pools table. Each one removes demand before any note competes for a voice, at a different cost to the music.
 
 - **Unisons**, merging unisons, is on in a new pool. Two channels that start the same pitch together then share one voice. With it off, every doubling plays for as long as there are voices free.
 

@@ -26,21 +26,23 @@ from functools import cache
 # and muted the two text colours, accent the "on" colour, active the tint of
 # the active channel's row, lcd the panel behind the toolbar readout, hover
 # a raised control under the pointer, ink the text on the accent and on the
-# channel colours, and title the bar across the top of a panel.
+# channel colours, title the bar across the top of a panel, and warn a
+# figure that needs attention, such as a pool's peak above its voices.
 PALETTE = {
     "window": "#282a33", "panel": "#333540", "raised": "#3b3d48", "field": "#22242d",
     "border": "#22242d", "text": "#d4d5dc", "muted": "#878992", "accent": "#57c8ff",
     "active": "#434552", "lcd": "#16181f", "hover": "#4a4c59", "ink": "#1a1b20",
-    "title": "#434550",
+    "title": "#434550", "warn": "#ffb84d",
 }
 
 # The roll, ruler, keyboard gutter and strip: a mid grey note grid with
 # darker lines, so the pastel notes stand out; muted channels' notes in a
 # grey a step lighter than the grid. The strip under the roll, its lane
-# switch and its gutter are a near-black display panel. The area under the
-# pointer is lit towards white in three steps, each over the grid and, as
-# a Row tone, over the black-key rows: the bar 5% (and on the ruler), the
-# beat 9%, and the slot a note would fill 16%.
+# switch and its gutter are a near-black display panel, with the budget
+# lines and their tags in budget and the demand above them washed in over.
+# The area under the pointer is lit towards white in three steps, each
+# over the grid and, as a Row tone, over the black-key rows: the bar 5%
+# (and on the ruler), the beat 9%, and the slot a note would fill 16%.
 ROLL = {
     "roll": "#3b3d48", "row": "#363843", "octave": "#2a2c35", "bar": "#2a2c35",
     "beat": "#353742", "ruler": "#282a33", "strip": "#16181f", "sash": "#22242d",
@@ -49,6 +51,7 @@ ROLL = {
     "hoverBar": "#454751", "hoverBarRow": "#40424c", "hoverRuler": "#35373f",
     "hoverBeat": "#4d4e58", "hoverBeatRow": "#484a54",
     "hoverCell": "#5a5c65", "hoverCellRow": "#565861",
+    "budget": "#ff5a5a", "over": "#ff5050",
 }
 
 UI_FONTS = ("Ubuntu", "Noto Sans", "Cantarell", "DejaVu Sans")   # first one installed wins
@@ -344,8 +347,9 @@ def paintedImages() -> dict[str, str]:
     faint shadow behind the ring under the pointer. The budget's arrows
     are slim triangles, 40 by 11, in the accent: brighter under the
     pointer, dark on an accent bar when pressed, and dim when the budget
-    cannot be edited. The images are painted once and shared by every
-    window.
+    cannot be edited. The pools table's arrows are smaller, 14 by 8, plain
+    or dark on an accent bar when pressed. The images are painted once and
+    shared by every window.
 
     Returns:
         dict[str, str]: base64 PNG data by name: switchOff, switchOffHover,
@@ -353,7 +357,8 @@ def paintedImages() -> dict[str, str]:
         knobHover, trough, rowKnob, rowKnobHover, rowTrough, muteOff,
         muteOffHover, muteOn, muteOnHover and the same four for solo, and
         budgetUp, budgetUpHover, budgetUpPressed, budgetUpDisabled and the
-        same four for budgetDown.
+        same four for budgetDown, and poolUp, poolUpPressed, poolDown and
+        poolDownPressed.
     """
     p = PALETTE
     lit = mix(p["accent"], "#ffffff", 0.2)
@@ -411,5 +416,14 @@ def paintedImages() -> dict[str, str]:
         images[f"{name}Hover"] = png(40, 11, [(arrow, mix(p["accent"], "#ffffff", 0.3))])
         images[f"{name}Pressed"] = png(40, 11, [(bar, p["accent"]), (arrow, p["ink"])])
         images[f"{name}Disabled"] = png(40, 11, [(arrow, mix(p["muted"], ROLL["strip"], 0.5))])
+
+    # The pools table's arrows, stacked beside each pool's voices.
+    arrows = {"poolUp": polygon([(3.0, 6.0), (7.0, 2.0), (11.0, 6.0)]),
+              "poolDown": polygon([(3.0, 2.0), (7.0, 6.0), (11.0, 2.0)])}
+    bar = box(0.5, 0.5, 13.5, 7.5, 1.5)
+
+    for name, arrow in arrows.items():
+        images[name] = png(14, 8, [(arrow, p["accent"])])
+        images[f"{name}Pressed"] = png(14, 8, [(bar, p["accent"]), (arrow, p["ink"])])
 
     return images

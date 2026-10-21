@@ -1197,12 +1197,17 @@ class TestBudget:
         assert str(app.budgetBox.cget("background")) == theme.PALETTE["accent"]
         app._onBudgetDrag(FakeEvent(y=500 - 2 * BUDGET_DRAG_PX))
         assert app.budgetVar.get() == 3
-        assert app.demandCanvas.find_withtag("budgetTag")
+        c = app.demandCanvas
+
+        def tagged() -> list[str]:
+            return [c.itemcget(i, "text") for i in c.find_all() if c.type(i) == "text"]
+
+        assert "3 voices" in tagged()
         assert calls == []
         app._onBudgetRelease()
         assert not app.budgetDragging
         assert calls == [3]
-        assert not app.demandCanvas.find_withtag("budgetTag")
+        assert "3 voices" not in tagged()
 
     def testClickWithoutMovingKeepsTheReduction(self, app: MidiEditorApp,
                                                 monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1241,10 +1246,10 @@ class TestBudget:
         calls = self._countRecomputes(app, monkeypatch)
         base, scale = app._stripScale
         y = base - 3 * scale
-        assert app._nearBudgetLine(y + BUDGET_GRAB)
-        assert not app._nearBudgetLine(y + BUDGET_GRAB + 2)
+        assert app._budgetLineAt(y + BUDGET_GRAB)
+        assert app._budgetLineAt(y + BUDGET_GRAB + 2) is None
         app._onDemandMotion(FakeEvent(x=10, y=y))
-        assert app.budgetLineHover
+        assert app.budgetLineHover is app.plan.pools[0]
         assert str(app.demandCanvas.cget("cursor")) == "sb_v_double_arrow"
         app._onStripPress(FakeEvent(x=10, y=y, num=1))
         assert app.budgetDragging
@@ -1253,8 +1258,8 @@ class TestBudget:
         app._onBudgetRelease()
         assert calls == [2]
 
-    def testSeveralPoolsLockTheBudget(self, app: MidiEditorApp) -> None:
-        """With several pools the budget is their total: greyed, and nothing changes it."""
+    def testSeveralPoolsLockTheBudgetButNotTheLines(self, app: MidiEditorApp) -> None:
+        """With several pools the budget beside the strip is greyed; the line still moves a pool."""
         app.addPool()
         app.poolVars[1].set("pool 2")
         app._channelPoolChanged(1)
@@ -1268,10 +1273,165 @@ class TestBudget:
         app._onBudgetWheel(FakeEvent(num=4))
         app._editBudget()
         assert app._budgetEditor is None
-        assert app._stripScale is not None
-        base, scale = app._stripScale
-        assert not app._nearBudgetLine(base - total * scale)
         assert app.budgetVar.get() == total
+
+        # The total's line moves the selected pool, here the new one.
+        base, scale = app._stripScale
+        line = app._budgetLineAt(base - total * scale)
+        assert line is not None and line[2] is app.editPool
+        app._onStripPress(FakeEvent(x=10, y=base - total * scale, num=1))
+        app._onStripDrag(FakeEvent(x=10, y=base - (total + 2) * scale))
+        app._onBudgetRelease()
+        assert app.budgetVar.get() == total + 2
+        assert app.editPool.voices == 3
+
+
+class TestPoolTable:
+    """The pools table in the Reduce panel, and the chip lines on the strip."""
+
+    def _twoChips(self, app: MidiEditorApp) -> tuple[Any, Any]:
+        """Give the plan the X16's two chips, with the bass in a pool of its own on the PSG.
+
+        Args:
+            app: the window.
+
+        Returns:
+            tuple: the first pool, on the YM2151, and the bass pool.
+        """
+        app._applyTiers([type(t)(**vars(t)) for t in X16_TIERS])
+        app.addPool()
+        app.poolVar.set("bass")
+        app._renamePool()
+        app.poolVoicesVar.set(2)
+        app.poolTierVar.set("psg")
+        app._storePoolControls()
+        app.poolVars[1].set("bass")
+        app._channelPoolChanged(1)
+        app._selectPool(app.plan.pools[0])
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        app._drawDemand()
+        pools = (app.plan.pools[0], app.plan.pools[1])
+        return pools
+
+    def testALinePerPool(self, app: MidiEditorApp) -> None:
+        """The table has a line per pool with its voices, peak and channel count."""
+        first, bass = self._twoChips(app)
+        assert set(app.poolRows) == {id(first), id(bass)}
+        row = app.poolRows[id(bass)]
+        assert row["name"].cget("text") == "bass"
+        assert row["tier"].cget("text") == "psg"
+        assert row["box"].cget("text") == "2"
+        assert row["figure"].cget("text") == f"peak {app._poolPeak(bass)}"
+        assert row["count"].cget("text") == "1 ch"
+
+    def testPeakIsAmberAboveTheVoices(self, app: MidiEditorApp) -> None:
+        """A pool's peak is in the warning colour while it is above the pool's voices."""
+        first, _ = self._twoChips(app)
+        peak = app._poolPeak(first)
+        app._setPoolVoices(first, peak - 1)
+        figure = app.poolRows[id(first)]["figure"]
+        assert str(figure.cget("foreground")) == theme.PALETTE["warn"]
+        app._setPoolVoices(first, peak)
+        assert str(figure.cget("foreground")) == theme.PALETTE["muted"]
+
+    def testClickSelectsThePool(self, app: MidiEditorApp) -> None:
+        """A click on a line selects its pool: the bar lights and the panel edits it."""
+        first, bass = self._twoChips(app)
+        row = app.poolRows[id(bass)]
+        app._selectPool(bass)
+        assert app.editPool is bass
+        assert app.poolTierVar.get() == "psg"
+        assert str(row["bar"].cget("background")) == theme.PALETTE["accent"]
+        assert str(app.poolRows[id(first)]["bar"].cget("background")) != theme.PALETTE["accent"]
+        assert app.poolRows[id(bass)]["row"] is row["row"]
+
+    def testVoicesStepDragAndType(self, app: MidiEditorApp,
+                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pool's voices step with its arrows, drag with the pointer, and take a typed number."""
+        _, bass = self._twoChips(app)
+        box = app.poolRows[id(bass)]["box"]
+        up = app.poolRows[id(bass)]["arrows"].winfo_children()[0]
+        app._pressPoolArrow(up, "poolUp", bass, 1)
+        assert bass.voices == 3 and box.cget("text") == "3"
+        app._onPoolPress(FakeEvent(y=500, num=1), bass)
+        app._onPoolDrag(FakeEvent(y=500 - 2 * BUDGET_DRAG_PX), bass)
+        assert bass.voices == 5
+        recomputes: list[int] = []
+        original = app._reductionChanged
+        monkeypatch.setattr(app, "_reductionChanged",
+                            lambda: (recomputes.append(bass.voices), original()))
+        app._onPoolRelease()
+        assert recomputes == [5]
+        app._editPoolVoices(bass)
+        app.update()
+        app._poolEditor.delete(0, "end")
+        app._poolEditor.insert(0, "4")
+        app._poolEditor.event_generate("<Return>")
+        assert bass.voices == 4 and app._poolEditor is None
+
+    def testATierCapsItsPools(self, app: MidiEditorApp) -> None:
+        """A pool takes no more voices than its tier has left after its other pools."""
+        first, bass = self._twoChips(app)
+        opm = next(t for t in app.plan.tiers if t.name == "opm")
+        app._setPoolVoices(first, 99)
+        assert first.voices == opm.capacity - opm.reserved
+
+    def testRenameFromTheTable(self, app: MidiEditorApp) -> None:
+        """A double click on a pool's name opens it for typing; Return renames the pool."""
+        _, bass = self._twoChips(app)
+        app._editPoolName(bass)
+        app.update()
+        assert app.editPool is bass
+        app._poolEditor.delete(0, "end")
+        app._poolEditor.insert(0, "low")
+        app._poolEditor.event_generate("<Return>")
+        assert bass.name == "low"
+        assert app.poolRows[id(bass)]["name"].cget("text") == "low"
+
+    def testChipLinesMoveTheirPools(self, app: MidiEditorApp) -> None:
+        """Each chip's line moves the selected pool on that chip, or the chip's last pool."""
+        first, bass = self._twoChips(app)
+        levels = app._budgetLevels()
+        assert [(label.split()[0], pool) for label, _, pool in levels] == [
+            ("opm", first), ("psg", bass)]
+
+        # Dragging the PSG line two voices down takes them from the bass.
+        base, scale = app._stripScale
+        level = levels[1][1]
+        app._onStripPress(FakeEvent(x=10, y=base - level * scale, num=1))
+        assert app._lineDrag[0] is bass
+        start = bass.voices
+        app._onStripDrag(FakeEvent(x=10, y=base - (level - 1) * scale))
+        assert bass.voices == start - 1
+        app._onBudgetRelease()
+        assert app._lineDrag is None
+
+    def testTagsDoNotTouch(self, app: MidiEditorApp) -> None:
+        """Tags of lines close together step apart rather than cover or touch each other."""
+        first, bass = self._twoChips(app)
+        app.demandCanvas.configure(height=60)
+        app._setPoolVoices(bass, 1)
+        app._drawDemand()
+        c = app.demandCanvas
+        boxes = [tuple(c.coords(i)) for i in c.find_all() if c.type(i) == "rectangle"
+                 and c.itemcget(i, "fill") == theme.ROLL["budget"]]
+        assert len(boxes) == 2
+        assert app._tagClash(boxes[1], [boxes[0]]) is None
+
+    def testLinesAreSolidWithTags(self, app: MidiEditorApp) -> None:
+        """A budget line is two pixels in the budget colour, lit in the accent under the pointer."""
+        first, _ = self._twoChips(app)
+        c = app.demandCanvas
+        solid = [i for i in c.find_all() if c.type(i) == "line"
+                 and c.itemcget(i, "fill") == theme.ROLL["budget"]]
+        assert len(solid) == len(app._budgetLevels())
+        assert all(float(c.itemcget(i, "width")) == 2 and not c.itemcget(i, "dash")
+                   for i in solid)
+        app._hoverBudgetLine(first)
+        lit = [i for i in c.find_all() if c.type(i) == "text"
+               and c.itemcget(i, "text") == f"{first.name} {first.voices}"]
+        assert lit
 
 
 class TestReduction:
@@ -1568,8 +1728,9 @@ class TestPlanControls:
         c = app.demandCanvas
         labels = [c.itemcget(i, "text") for i in c.find_all() if c.type(i) == "text"]
         assert "opm 6" in labels and "psg 8" in labels
-        dashed = [i for i in c.find_all() if c.type(i) == "line" and c.itemcget(i, "dash")]
-        assert len(dashed) == 2
+        lines = [i for i in c.find_all() if c.type(i) == "line"
+                 and c.itemcget(i, "fill") == theme.ROLL["budget"]]
+        assert len(lines) == 2
         app._onDemandMotion(FakeEvent(x=int(100 * app.ppt)))
         assert "opm " in app.status.cget("text") and "/6" in app.status.cget("text")
         assert app._stackOrder(app._ensureDemand().channels) == [0, 1, 9]

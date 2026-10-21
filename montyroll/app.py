@@ -23,6 +23,7 @@ import os
 import time
 import tkinter as tk
 from bisect import bisect_right
+from collections.abc import Callable
 from dataclasses import replace
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
@@ -313,11 +314,16 @@ class MidiEditorApp(tk.Tk):
         self.budgetLimit = 64                # the most the budget can be set to
         self.budgetEditable = True           # one pool: the budget is set beside the strip
         self.budgetDragging = False          # the budget or its line is being dragged
-        self.budgetLineHover = False         # the pointer could grab the budget line
+        self.budgetLineHover: reduce.Pool | None = None   # the pool whose line the pointer is on
         self._budgetHover = False            # the pointer is on the budget
         self._budgetArrowStates: dict[str, str] = {}   # per arrow: "", "Hover" or "Pressed"
         self._budgetDragStart = (0, 0)       # (pointer y on screen, budget) at the press
-        self._budgetSettleAfter: str | None = None
+        self._settleAfter: str | None = None  # a pending recompute of the reduction
+        self._lineDrag: tuple[reduce.Pool, int, int] | None = None   # (pool, voices, level)
+        self._poolDrag: tuple[reduce.Pool, int, int] | None = None   # (pool, pointer y, voices)
+        self._poolEditor: ttk.Entry | None = None
+        self._poolTableKey: tuple = ()        # the pools the table was built for
+        self.poolRows: dict[int, dict[str, Any]] = {}   # id(pool) -> its line's widgets
         self._budgetEditor: ttk.Entry | None = None
         self._stripScale: tuple[float, float] | None = None   # (base y, pixels per voice)
         self._hoverBar: tuple[int, int] | None = None   # (first tick, end tick) of the lit bar
@@ -930,7 +936,7 @@ class MidiEditorApp(tk.Tk):
         self.demandCanvas.bind("<ButtonPress>", self._onStripPress, add="+")
         self.demandCanvas.bind("<B1-Motion>", self._onStripDrag)
         self.demandCanvas.bind("<ButtonRelease-1>", self._onBudgetRelease)
-        self.demandCanvas.bind("<Leave>", lambda e: self._hoverBudgetLine(False), add="+")
+        self.demandCanvas.bind("<Leave>", lambda e: self._hoverBudgetLine(None), add="+")
         Tooltip(self.demandCanvas,
                 "Voices sounding over time, stacked per channel.\n"
                 "White line: distinct pitches (unisons merged).\n"
@@ -2688,7 +2694,7 @@ class MidiEditorApp(tk.Tk):
                     y -= h
 
             if y < yBudget:
-                c.create_rectangle(xa, y, xb, yBudget, fill="#ff5050", stipple="gray50",
+                c.create_rectangle(xa, y, xb, yBudget, fill=theme.ROLL["over"], stipple="gray50",
                                    outline="")
 
         # The two merged counts as step lines over the stack.
@@ -2702,43 +2708,99 @@ class MidiEditorApp(tk.Tk):
             if len(points) >= 4:
                 c.create_line(*points, fill=colour, width=1)
 
-        # Budget lines, each labelled, and the scale at the top.
-        for label, level in self._budgetLevels():
-            y = base - level * scale
-            c.create_line(0, y, width, y, fill="#ff5050", dash=(4, 3))
-            c.create_text(width - 3, y, text=label, anchor="e", fill="#ff5050",
-                          font=(self.uiFamily, 7))
+        # The budget lines. The one being moved, or under the pointer, is
+        # lit and its tag names the pool it moves; dragging the budget beside
+        # the strip moves the one pool's line.
+        if self._lineDrag is not None:
+            moving = self._lineDrag[0]
+        elif self.budgetDragging and single:
+            moving = self.editPool
+        else:
+            moving = self.budgetLineHover
 
-        c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
-                      font=(self.uiFamily, 7))
+        tags: list[tuple[float, float, float, float]] = []
 
-        if single and (self.budgetDragging or self.budgetLineHover):
-            self._drawBudgetTag(base - budget * scale, width)
+        for label, level, pool in self._budgetLevels():
+            lit = pool is not None and pool is moving
 
-    def _drawBudgetTag(self, y: float, width: int):
-        """Draw the budget line solid in the accent, with the number on a tag at its left end.
+            if lit and single:
+                label = f"{pool.voices} voice" + ("s" if pool.voices != 1 else "")
+            elif lit:
+                label = f"{pool.name} {pool.voices}"
+
+            tags.append(self._drawBudgetLine(base - level * scale, width, label, lit, tags))
+
+        # The scale's top figure, unless a tag covers it.
+        figure = c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
+                               font=(self.uiFamily, 7))
+        fx0, fy0, fx1, fy1 = c.bbox(figure)
+
+        if any(fx0 < x1 and x0 < fx1 and fy0 < y1 and y0 < fy1 for x0, y0, x1, y1 in tags):
+            c.delete(figure)
+
+    def _drawBudgetLine(self, y: float, width: int, label: str, lit: bool,
+                        others: list[tuple[float, float, float, float]]
+                        ) -> tuple[float, float, float, float]:
+        """Draw one budget line with its label on a tag at the right-hand end.
+
+        The line is two pixels wide over a dark halo, so it reads across
+        the stack, in the budget colour, or in the accent when it is lit.
+        A tag that would cover one already drawn steps to its left.
 
         Args:
             y: the line's height on the strip.
             width: the strip's width.
+            label: the tag's text.
+            lit: True for the line being moved or under the pointer.
+            others: the tags drawn so far, as bounding boxes.
+
+        Returns:
+            tuple[float, float, float, float]: the tag's bounding box.
         """
         c = self.demandCanvas
         p = self.palette
-        budget = self.budgetVar.get()
-        c.create_line(0, y, width, y, fill=p["accent"], width=2, tags="budgetTag")
-        label = c.create_text(8, y, text=f"{budget} voice" + ("s" if budget != 1 else ""),
-                              anchor="w", fill=p["ink"], font=(self.uiFamily, 8, "bold"),
-                              tags="budgetTag")
-        x0, y0, x1, y1 = c.bbox(label)
+        colour = p["accent"] if lit else theme.ROLL["budget"]
+        c.create_line(0, y, width, y, fill=theme.ROLL["strip"], width=4)
+        c.create_line(0, y, width, y, fill=colour, width=2)
+        text = c.create_text(width - 8, y, text=label, anchor="e", fill=p["ink"],
+                             font=(self.uiFamily, 8, "bold"))
+        x0, y0, x1, y1 = c.bbox(text)
 
         # At the top of the strip the tag hangs below the line instead.
         if y0 < 1:
-            c.move(label, 0, (y1 - y0) / 2 + 3)
-            x0, y0, x1, y1 = c.bbox(label)
+            c.move(text, 0, (y1 - y0) / 2 + 3)
+            x0, y0, x1, y1 = c.bbox(text)
 
-        tag = c.create_rectangle(x0 - 5, y0 - 1, x1 + 5, y1 + 1, fill=p["accent"],
-                                 outline="", tags="budgetTag")
-        c.tag_lower(tag, label)
+        box = (x0 - 5, y0 - 1, x1 + 5, y1 + 1)
+        clash = self._tagClash(box, others)
+
+        while clash is not None:
+            shift = box[2] - clash[0] + 4
+            c.move(text, -shift, 0)
+            box = (box[0] - shift, box[1], box[2] - shift, box[3])
+            clash = self._tagClash(box, others)
+
+        tag = c.create_rectangle(*box, fill=colour, outline="")
+        c.tag_lower(tag, text)
+        return box
+
+    @staticmethod
+    def _tagClash(box: tuple[float, float, float, float],
+                  others: list[tuple[float, float, float, float]]
+                  ) -> tuple[float, float, float, float] | None:
+        """Find a tag that a new one would cover or touch.
+
+        Args:
+            box: the new tag's bounding box.
+            others: the tags already drawn.
+
+        Returns:
+            tuple[float, float, float, float] | None: the first tag within
+            two pixels of the new one, or None.
+        """
+        clash = next((o for o in others if box[0] < o[2] + 2 and o[0] < box[2] + 2
+                      and box[1] < o[3] + 2 and o[1] < box[3] + 2), None)
+        return clash
 
     def _drawNoteLane(self, lane: str):
         """Draw the Velocity or Weight lane for the visible part of the roll.
@@ -2823,7 +2885,8 @@ class MidiEditorApp(tk.Tk):
             event: `x` and `y`, the point under the pointer.
         """
         if not self.budgetDragging:
-            self._hoverBudgetLine(self._nearBudgetLine(event.y))
+            line = self._budgetLineAt(event.y)
+            self._hoverBudgetLine(line[2] if line else None)
 
         if not self.song.notes:
             return
@@ -2994,17 +3057,22 @@ class MidiEditorApp(tk.Tk):
             return
 
         self._setBudget(self.budgetVar.get() + delta)
+        self._settleReduction()
 
-        # Each step restarts the wait, so a run of clicks or wheel turns
-        # recomputes once.
-        if self._budgetSettleAfter is not None:
-            self.after_cancel(self._budgetSettleAfter)
+    def _settleReduction(self):
+        """Recompute the reduction once the steps pause.
 
-        self._budgetSettleAfter = self.after(BUDGET_SETTLE_MS, self._budgetSettled)
+        Each step restarts the wait, so a run of clicks or wheel turns
+        recomputes once.
+        """
+        if self._settleAfter is not None:
+            self.after_cancel(self._settleAfter)
 
-    def _budgetSettled(self):
-        """The budget has stopped changing: recompute the reduction."""
-        self._budgetSettleAfter = None
+        self._settleAfter = self.after(BUDGET_SETTLE_MS, self._settled)
+
+    def _settled(self):
+        """The steps have paused: recompute the reduction."""
+        self._settleAfter = None
         self._reductionChanged()
 
     def _onBudgetWheel(self, event):
@@ -3041,17 +3109,18 @@ class MidiEditorApp(tk.Tk):
             self._setBudget(start + round((y - event.y_root) / BUDGET_DRAG_PX))
 
     def _startBudgetDrag(self, y: int):
-        """Begin dragging the budget or its line.
+        """Begin dragging the budget.
 
         Args:
             y: the pointer's height on the screen.
         """
         self.budgetDragging = True
+        self._lineDrag = None
         self._budgetDragStart = (y, self.budgetVar.get())
         self._drawDemand()
 
     def _onBudgetRelease(self, _event=None):
-        """End a drag of the budget or its line, recomputing the reduction if it moved.
+        """End a drag of the budget or a budget line, recomputing the reduction if it moved.
 
         Args:
             _event: the release; unused.
@@ -3061,7 +3130,14 @@ class MidiEditorApp(tk.Tk):
 
         self.budgetDragging = False
 
-        if self.budgetVar.get() != self._budgetDragStart[1]:
+        if self._lineDrag is not None:
+            pool, voices, _ = self._lineDrag
+            self._lineDrag = None
+            moved = pool.voices != voices
+        else:
+            moved = self.budgetVar.get() != self._budgetDragStart[1]
+
+        if moved:
             self._reductionChanged()
 
         self._drawDemand()
@@ -3107,52 +3183,61 @@ class MidiEditorApp(tk.Tk):
             self._setBudget(int(text))
             self._reductionChanged()
 
-    def _nearBudgetLine(self, y: float) -> bool:
-        """Report whether a point on the strip is near enough the budget line to grab it.
+    def _budgetLineAt(self, y: float) -> tuple[str, int, reduce.Pool | None] | None:
+        """Find the budget line a press at a height on the strip would pick up.
 
         Args:
             y: the height on the strip.
 
         Returns:
-            bool: True when the budget can be set here, the Demand lane is
-            drawn, and y is within BUDGET_GRAB pixels of the line.
+            tuple[str, int, reduce.Pool | None] | None: the line, as
+            `_budgetLevels` gives it, when the Demand lane is drawn and a
+            line with a pool to move is within BUDGET_GRAB pixels; else None.
         """
-        if not self.budgetEditable or self._stripScale is None:
-            return False
+        if self._stripScale is None:
+            return None
 
         base, scale = self._stripScale
-        near = abs(y - (base - self.budgetVar.get() * scale)) <= BUDGET_GRAB
-        return near
+        line = next((line for line in self._budgetLevels()
+                     if line[2] is not None and abs(y - (base - line[1] * scale)) <= BUDGET_GRAB),
+                    None)
+        return line
 
-    def _hoverBudgetLine(self, on: bool):
-        """Show whether the budget line can be grabbed: the pointer and the line's highlight.
+    def _hoverBudgetLine(self, pool: reduce.Pool | None):
+        """Show the line under the pointer as one that can be grabbed, or none.
 
         Args:
-            on: True when a press would pick the line up.
+            pool: the pool the line under the pointer moves, or None.
         """
-        if on != self.budgetLineHover:
-            self.budgetLineHover = on
-            self.demandCanvas.configure(cursor="sb_v_double_arrow" if on else "")
+        if pool is not self.budgetLineHover:
+            self.budgetLineHover = pool
+            self.demandCanvas.configure(cursor="sb_v_double_arrow" if pool else "")
             self._drawDemand()
 
     def _onStripPress(self, event):
-        """Pick the budget line up when a press of the first button is near it.
+        """Pick a budget line up when a press of the first button is near it.
 
         Args:
             event: the press, at `y`.
         """
-        if event.num == 1 and self._nearBudgetLine(event.y):
-            self._startBudgetDrag(event.y_root)
+        line = self._budgetLineAt(event.y) if event.num == 1 else None
+
+        if line is not None:
+            pool = line[2]
+            self.budgetDragging = True
+            self._lineDrag = (pool, pool.voices, line[1])
+            self._drawDemand()
 
     def _onStripDrag(self, event):
-        """Move the budget line to the pointer, in whole voices.
+        """Move the grabbed line to the pointer, changing its pool's voices in whole voices.
 
         Args:
             event: the motion, at `y`.
         """
-        if self.budgetDragging and self._stripScale is not None:
+        if self._lineDrag is not None and self._stripScale is not None:
             base, scale = self._stripScale
-            self._setBudget(round((base - event.y) / scale))
+            pool, voices, level = self._lineDrag
+            self._setPoolVoices(pool, voices + round((base - event.y) / scale) - level)
 
     # ----------------------------------------------------------- reduction
     def _buildReducePanel(self, parent: ttk.Frame):
@@ -3184,42 +3269,35 @@ class MidiEditorApp(tk.Tk):
                                  justify="left", foreground=self.palette["muted"])
         self.lossLbl.pack(fill="x", pady=(2, 4))
 
-        # The pool the controls below edit: pick it, rename it with Return,
-        # add or remove one, and open the tiers.
-        pools = ttk.Frame(panel)
-        pools.pack(fill="x", pady=(0, 3))
-        ttk.Label(pools, text="Pool", font=(self.uiFamily, 9)).pack(side="left")
-        self.poolCombo = ttk.Combobox(pools, textvariable=self.poolVar, width=9)
-        self.poolCombo.pack(side="left", padx=(3, 4))
-        self.poolCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSelected())
-        self.poolCombo.bind("<Return>", lambda e: self._renamePool())
-        Tooltip(self.poolCombo, "The pool the controls below edit. Type a new name\n"
-                                "and press Return to rename it; channels join a\n"
-                                "pool on their rows")
-        b = ttk.Button(pools, text="Tiers...", width=7, command=self.tiersDialog)
-        b.pack(side="right")
-        Tooltip(b, "The chips the pools' voices come from: channels,\n"
-                   "how many are reserved for effects, and the release\n"
-                   "their patches need")
-        b = ttk.Button(pools, text="-", width=2, command=self.removePool)
-        b.pack(side="right", padx=(2, 4))
-        Tooltip(b, "Remove this pool; its channels leave the reduction\n"
-                   "until they are given another")
-        b = ttk.Button(pools, text="+", width=2, command=self.addPool)
-        b.pack(side="right")
-        Tooltip(b, "Add a pool")
+        # The pools, one line each, with add, remove and the tiers above
+        # them. A line selects its pool for the controls below it.
+        head = ttk.Frame(panel)
+        head.pack(fill="x", pady=(0, 2))
+        ttk.Label(head, text="Pools", font=(self.uiFamily, 9),
+                  foreground=self.palette["muted"]).pack(side="left")
 
-        # The edited pool's voices and tier, then its sound on a line of its
-        # own, as the sound names are long.
+        for text, command, tip in (
+                ("Tiers...", self.tiersDialog,
+                 "The chips the pools' voices come from: channels,\n"
+                 "how many are reserved for effects, and the release\n"
+                 "their patches need"),
+                ("-", self.removePool,
+                 "Remove the selected pool; its channels leave the\n"
+                 "reduction until they are given another"),
+                ("+", self.addPool, "Add a pool")):
+            b = ttk.Button(head, text=text, style="Title.TButton", command=command)
+            b.pack(side="right", padx=(2, 0))
+            Tooltip(b, tip)
+
+        mono = theme.pickFont(tkfont.families(self), theme.MONO_FONTS) or self.uiFamily
+        self.poolFont = (mono, 11, "bold")
+        self.poolTable = tk.Frame(panel, bg=self.palette["border"])
+        self.poolTable.pack(fill="x", pady=(0, 4))
+
+        # The selected pool's tier, then its sound on a line of its own, as
+        # the sound names are long.
         budget = ttk.Frame(panel)
         budget.pack(fill="x", pady=(0, 3))
-        ttk.Label(budget, text="Voices", font=(self.uiFamily, 9)).pack(side="left")
-        sp = ttk.Spinbox(budget, from_=0, to=64, width=3, textvariable=self.poolVoicesVar,
-                         command=self._reductionChanged)
-        sp.pack(side="left", padx=(3, 10))
-        sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
-        Tooltip(sp, "Voices this pool owns; the strip's budget is every\n"
-                    "pool's voices added up")
         ttk.Label(budget, text="Tier", font=(self.uiFamily, 9)).pack(side="left")
         self.tierCombo = ttk.Combobox(budget, textvariable=self.poolTierVar, state="readonly",
                                       width=8)
@@ -3283,6 +3361,354 @@ class MidiEditorApp(tk.Tk):
             sp.pack(side="left", padx=(3, 8))
             sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
             Tooltip(sp, tip)
+
+    # ------------------------------------------------------------ pools table
+    def _refreshPoolTable(self):
+        """Show the plan's pools in the table, marking the one the panel edits.
+
+        The lines are built again when the pools themselves change (added,
+        removed, renamed, moved to another tier, or given other channels),
+        and otherwise restyled in place, so a click or a double click on a
+        line keeps its widgets. Nothing changes while a value is dragged or
+        typed.
+        """
+        if self._poolDrag is not None or self._poolEditor is not None:
+            return
+
+        key = tuple((id(p), p.name, p.tier, len(p.channels)) for p in self.plan.pools)
+
+        if key != self._poolTableKey:
+            self._poolTableKey = key
+
+            for w in self.poolTable.winfo_children():
+                w.destroy()
+
+            self.poolRows.clear()
+
+            for pool in self.plan.pools:
+                self._buildPoolRow(pool)
+
+        for pool in self.plan.pools:
+            self._stylePoolRow(pool)
+
+    def _buildPoolRow(self, pool: reduce.Pool):
+        """Add a pool's line to the table.
+
+        The line holds a bar that marks the edited pool, the pool's name
+        and tier, its voices in a value box with small arrows beside it,
+        its peak, and its channel count. A click selects the pool and a
+        double click on the name renames it. The value box drags up or
+        down, steps with the wheel, the arrows and the Up and Down keys,
+        and opens for typing with a double click.
+
+        Args:
+            pool: the pool.
+        """
+        p = self.palette
+        row = tk.Frame(self.poolTable)
+        row.pack(fill="x", pady=(0, 1))
+        bar = tk.Frame(row, width=3)
+        bar.pack(side="left", fill="y")
+        name = tk.Label(row, text=pool.name, anchor="w", width=8, fg=p["text"])
+        name.pack(side="left", padx=(5, 0))
+        tier = tk.Label(row, text=pool.tier or "-", anchor="w", width=5, fg=p["muted"],
+                        font=(self.uiFamily, 9))
+        tier.pack(side="left")
+        box = tk.Label(row, width=3, font=self.poolFont, bg=p["field"],
+                       cursor="sb_v_double_arrow", takefocus=1)
+        box.pack(side="left", pady=2)
+        arrows = tk.Frame(row)
+        arrows.pack(side="left", padx=(2, 8))
+
+        # The arrows show pressed until the button comes up.
+        for image, delta in (("poolUp", 1), ("poolDown", -1)):
+            a = tk.Label(arrows, image=self.paintedImages[image], bd=0, cursor="hand2")
+            a.pack(side="top")
+            a.bind("<ButtonPress-1>", lambda e, w=a, i=image, d=delta:
+                   self._pressPoolArrow(w, i, pool, d))
+            a.bind("<ButtonRelease-1>", lambda e, w=a, i=image:
+                   w.configure(image=self.paintedImages[i]))
+
+        figure = tk.Label(row, anchor="w", font=(self.uiFamily, 9))
+        figure.pack(side="left")
+        count = tk.Label(row, text=f"{len(pool.channels)} ch", anchor="e", fg=p["muted"],
+                         font=(self.uiFamily, 9))
+        count.pack(side="right", padx=(0, 6))
+
+        # A click anywhere but the voices selects the pool.
+        for w in (row, bar, name, tier, figure, count):
+            w.bind("<Button-1>", lambda e: self._selectPool(pool))
+
+        name.bind("<Double-Button-1>", lambda e: self._editPoolName(pool))
+
+        for seq, handler in (
+                ("<ButtonPress>", lambda e: self._onPoolPress(e, pool)),
+                ("<B1-Motion>", lambda e: self._onPoolDrag(e, pool)),
+                ("<ButtonRelease-1>", self._onPoolRelease),
+                ("<Double-Button-1>", lambda e: self._editPoolVoices(pool)),
+                ("<Button-4>", lambda e: self._stepPool(pool, 1)),
+                ("<Button-5>", lambda e: self._stepPool(pool, -1)),
+                ("<MouseWheel>", lambda e: self._stepPool(pool, 1 if e.delta > 0 else -1)),
+                ("<Up>", lambda e: self._stepPool(pool, 1)),
+                ("<Down>", lambda e: self._stepPool(pool, -1))):
+            box.bind(seq, handler, add="+")
+
+        Tooltip(name, "Click to edit this pool below; double-click to rename it")
+        Tooltip(box, "Voices this pool owns: drag up or down, use the wheel\n"
+                     "or the arrows, or double-click to type. A pool takes\n"
+                     "no more than its tier has left")
+        Tooltip(figure, "The most notes this pool's channels sound at once in\n"
+                        "the song; amber when it is above the pool's voices")
+        self.poolRows[id(pool)] = {"row": row, "bar": bar, "name": name, "tier": tier,
+                                   "box": box, "arrows": arrows, "figure": figure,
+                                   "count": count}
+
+    def _stylePoolRow(self, pool: reduce.Pool):
+        """Colour a pool's line: the edited pool lit, its voices, and its peak.
+
+        Args:
+            pool: the pool.
+        """
+        widgets = self.poolRows.get(id(pool))
+
+        if widgets is None:
+            return
+
+        p = self.palette
+        chosen = pool is self.editPool
+        bg = p["active"] if chosen else p["panel"]
+        peak = self._poolPeak(pool)
+
+        for key in ("row", "name", "tier", "arrows", "figure", "count"):
+            widgets[key].configure(bg=bg)
+
+        for arrow in widgets["arrows"].winfo_children():
+            arrow.configure(bg=bg)
+
+        widgets["bar"].configure(bg=p["accent"] if chosen else bg)
+        widgets["name"].configure(font=(self.uiFamily, 9, "bold" if chosen else "normal"))
+        widgets["box"].configure(text=str(pool.voices), bg=p["field"], fg=p["accent"])
+        widgets["figure"].configure(text=f"peak {peak}",
+                                    fg=p["warn"] if peak > pool.voices else p["muted"])
+
+    def _poolPeak(self, pool: reduce.Pool) -> int:
+        """Find the most notes a pool's channels sound at once in the song as written.
+
+        Args:
+            pool: the pool.
+
+        Returns:
+            int: the peak.
+        """
+        demand = self._ensureSongDemand()
+        counts = [demand.channels[ch] for ch in pool.channels if ch in demand.channels]
+        peak = max((sum(column) for column in zip(*counts)), default=0)
+        return peak
+
+    def _poolRoom(self, pool: reduce.Pool) -> int:
+        """Find the most voices a pool can be given.
+
+        A pool on a tier has what the tier's voices leave after its
+        reservation and its other pools; a lone pool, as the strip's
+        budget, goes no higher than the song's peak; other pools stop at 64.
+
+        Args:
+            pool: the pool.
+
+        Returns:
+            int: the most voices.
+        """
+        tier = next((t for t in self.plan.tiers if t.name == pool.tier), None)
+        room = 64
+
+        if tier is not None:
+            others = sum(p.voices for p in self.plan.pools
+                         if p.tier == pool.tier and p is not pool)
+            room = max(0, tier.capacity - tier.reserved - others)
+
+        if len(self.plan.pools) == 1:
+            room = min(room, self.budgetLimit)
+
+        return room
+
+    def _selectPool(self, pool: reduce.Pool):
+        """Make a pool the one the panel's controls below edit.
+
+        The budget lines follow, as a tier's line moves the selected pool.
+
+        Args:
+            pool: the pool.
+        """
+        if pool is self.editPool:
+            return
+
+        self._storePoolControls()
+        self.poolVar.set(pool.name)
+        self._poolSelected()
+        self._drawDemand()
+
+    def _setPoolVoices(self, pool: reduce.Pool, value: int):
+        """Set a pool's voices, held to what it can be given, and redraw the strip at once.
+
+        A lone pool keeps at least one voice, as it is the strip's budget.
+        The panel writes its controls into the edited pool at every redraw,
+        so they follow; with several pools the strip's budget is their
+        total. The reduction is left as it was; the caller recomputes it
+        when the change is done.
+
+        Args:
+            pool: the pool.
+            value: the voices asked for.
+        """
+        least = 1 if len(self.plan.pools) == 1 else 0
+        value = max(least, min(self._poolRoom(pool), value))
+
+        if value == pool.voices:
+            return
+
+        pool.voices = value
+
+        if pool is self.editPool:
+            self.poolVoicesVar.set(value)
+
+        if len(self.plan.pools) != 1:
+            self.budgetVar.set(self._totalVoices())
+
+        self._stylePoolRow(pool)
+        self._drawDemand()
+
+    def _stepPool(self, pool: reduce.Pool, delta: int):
+        """Step a pool's voices, and recompute the reduction once the steps pause.
+
+        Args:
+            pool: the pool.
+            delta: +1 or -1.
+        """
+        self._setPoolVoices(pool, pool.voices + delta)
+        self._settleReduction()
+
+    def _pressPoolArrow(self, arrow: tk.Label, image: str, pool: reduce.Pool, delta: int):
+        """Press a table arrow: show it pressed and step its pool.
+
+        Args:
+            arrow: the arrow.
+            image: its painted image's name.
+            pool: the pool.
+            delta: +1 or -1.
+        """
+        arrow.configure(image=self.paintedImages[image + "Pressed"])
+        self._stepPool(pool, delta)
+
+    def _onPoolPress(self, event, pool: reduce.Pool):
+        """Start dragging a pool's voices, filled with the accent, and take the focus.
+
+        Args:
+            event: the press, at `y_root`; only the first button drags.
+            pool: the pool.
+        """
+        if event.num != 1:
+            return
+
+        box = self.poolRows[id(pool)]["box"]
+        box.focus_set()
+        box.configure(bg=self.palette["accent"], fg=self.palette["ink"])
+        self._poolDrag = (pool, event.y_root, pool.voices)
+
+    def _onPoolDrag(self, event, pool: reduce.Pool):
+        """Move a pool's voices with the pointer: up for more.
+
+        Args:
+            event: the motion, at `y_root`.
+            pool: the pool.
+        """
+        drag = self._poolDrag
+
+        if drag is not None and drag[0] is pool:
+            self._setPoolVoices(pool, drag[2] + round((drag[1] - event.y_root) / BUDGET_DRAG_PX))
+            self.poolRows[id(pool)]["box"].configure(bg=self.palette["accent"],
+                                                     fg=self.palette["ink"])
+
+    def _onPoolRelease(self, _event=None):
+        """End a drag of a pool's voices, recomputing the reduction if they moved.
+
+        Args:
+            _event: the release; unused.
+        """
+        drag, self._poolDrag = self._poolDrag, None
+
+        if drag is None:
+            return
+
+        self._stylePoolRow(drag[0])
+
+        if drag[0].voices != drag[2]:
+            self._reductionChanged()
+
+    def _openPoolEditor(self, over: tk.Label, text: str, done: Callable[[str | None], None]):
+        """Open a typing field over a table cell.
+
+        Return or leaving the field keeps what was typed, and Escape drops
+        it; either way `done` receives the result.
+
+        Args:
+            over: the cell.
+            text: the text to start from.
+            done: called with what was typed, or None when it was dropped.
+        """
+        entry = ttk.Entry(over.master, font=over.cget("font"))
+        entry.insert(0, text)
+        entry.select_range(0, "end")
+        entry.place(in_=over, x=0, y=0, relwidth=1, relheight=1)
+        entry.focus_set()
+
+        def close(keep: bool):
+            if self._poolEditor is not entry:
+                return
+
+            self._poolEditor = None
+            typed = entry.get().strip()
+            entry.destroy()
+            done(typed if keep else None)
+
+        for seq, keep in (("<Return>", True), ("<KP_Enter>", True), ("<Escape>", False),
+                          ("<FocusOut>", True)):
+            entry.bind(seq, lambda e, k=keep: close(k))
+
+        self._poolEditor = entry
+
+    def _editPoolVoices(self, pool: reduce.Pool):
+        """Open a pool's voices for typing.
+
+        Args:
+            pool: the pool.
+        """
+        self._poolDrag = None
+
+        def done(typed: str | None):
+            if typed is not None and typed.isdigit():
+                self._setPoolVoices(pool, int(typed))
+                self._reductionChanged()
+
+            self._stylePoolRow(pool)
+
+        self._openPoolEditor(self.poolRows[id(pool)]["box"], str(pool.voices), done)
+
+    def _editPoolName(self, pool: reduce.Pool):
+        """Open a pool's name for typing; Return renames the pool.
+
+        Args:
+            pool: the pool.
+        """
+        self._selectPool(pool)
+
+        def done(typed: str | None):
+            if typed:
+                self.poolVar.set(typed)
+                self._renamePool()
+
+            self._refreshPoolTable()
+
+        self._openPoolEditor(self.poolRows[id(pool)]["name"], pool.name, done)
 
     def _currentPlan(self) -> reduce.Plan:
         """The plan as the controls have it.
@@ -3391,6 +3817,7 @@ class MidiEditorApp(tk.Tk):
     def _reductionChanged(self):
         """A reduction control changed: store it, recompute and redraw what depends on it."""
         self._storePoolControls()
+        self._refreshPoolTable()
 
         if len(self.plan.pools) != 1:
             self.budgetVar.set(self._totalVoices())
@@ -3652,34 +4079,42 @@ class MidiEditorApp(tk.Tk):
         order = sorted(channels, key=lambda ch: (rank.get(ch, last), ch))
         return order
 
-    def _budgetLevels(self) -> list[tuple[str, int]]:
-        """The strip's budget lines.
+    def _budgetLevels(self) -> list[tuple[str, int, reduce.Pool | None]]:
+        """The strip's budget lines, and the pool a drag of each one moves.
 
         Returns:
-            list[tuple[str, int]]: (label, voices) per line: one per tier
-            with voices, at its cumulative total and named after it, then
-            the plan's total when that differs.
+            list[tuple[str, int, reduce.Pool | None]]: (label, voices,
+            pool) per line: one per tier with voices, at its cumulative
+            total and named after it, then the plan's total when that
+            differs. A tier's line moves the edited pool when it is on that
+            tier, otherwise the tier's last pool. The total's line moves the
+            edited pool when it has no tier or every pool has one, otherwise
+            the last pool without one.
         """
-        levels: list[tuple[str, int]] = []
+        levels: list[tuple[str, int, reduce.Pool | None]] = []
         running = 0
+        edit = self.editPool
 
         for tier in self.plan.tiers:
-            voices = sum(p.voices for p in self.plan.pools if p.tier == tier.name)
+            pools = [p for p in self.plan.pools if p.tier == tier.name]
+            voices = sum(p.voices for p in pools)
 
             if voices:
                 running += voices
-                levels.append((f"{tier.name} {running}", running))
+                pool = edit if any(p is edit for p in pools) else pools[-1]
+                levels.append((f"{tier.name} {running}", running, pool))
 
         total = self._totalVoices()
 
         if not levels or total != running:
-            levels.append((str(total), total))
+            loose = [p for p in self.plan.pools if not p.tier]
+            pool = edit if not loose or any(p is edit for p in loose) else loose[-1]
+            levels.append((str(total), total, pool))
 
         return levels
 
     def _refreshPoolLists(self):
         """Put the current pool and tier names into every box that lists them."""
-        self.poolCombo.configure(values=[p.name for p in self.plan.pools])
         names = self._poolNames()
 
         for combo in self.poolCombos:
@@ -3699,6 +4134,8 @@ class MidiEditorApp(tk.Tk):
 
         for ch, var in self.releaseVars.items():
             var.set(f"{self.plan.release[ch]:g}" if ch in self.plan.release else "")
+
+        self._refreshPoolTable()
 
     def _loadPoolControls(self):
         """Show the edited pool's voices, tier and transforms in the panel."""
@@ -3724,6 +4161,7 @@ class MidiEditorApp(tk.Tk):
         self.legatoVar.set(pool.legatoGap)
         self.maxChordVar.set(pool.maxChord)
         self._refreshOverlap()
+        self._refreshPoolTable()
 
     def _scheduleOverlap(self):
         """Refresh the overlap figures once the current burst of edits is over."""

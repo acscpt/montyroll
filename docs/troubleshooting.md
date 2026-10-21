@@ -151,7 +151,7 @@ Error message: the result label reads `plan refused`, as in `plan refused: tier 
 
 The pools of one tier ask for more voices than the tier has.
 
-There are two ways out. Select a pool on that tier and lower its **Voices** until the pools fit. Or open **Tiers...** and lower **Reserved** on the tier, which gives its pools more voices to share.
+There are two ways out. Lower the voices of a pool on that tier in the pools table until the pools fit. Or open **Tiers...** and lower **Reserved** on the tier, which gives its pools more voices to share.
 
 [^ Index](#index)
 
@@ -159,7 +159,7 @@ There are two ways out. Select a pool on that tier and lower its **Voices** unti
 
 The result label counts many `no voice` drops. Each one is a note that found every voice of its pool busy with a note that weighs more. Five changes lower the count, in order of cost to the music.
 
-1. Raise **Voices** on the pool, up to what its tier has.
+1. Raise the pool's voices in the pools table, up to what its tier has.
 
 2. Turn on **Octaves** on the pool, which folds octave doublings.
 
@@ -175,7 +175,7 @@ The result label counts many `no voice` drops. Each one is a note that found eve
 
 Error message: an export dialog with `has no tier, so its voices have no chip`.
 
-The export places each pool on the chip of its tier, so every pool needs one. Open **Tiers...** on the Reduce panel, click the preset for the machine, and close the dialog with **OK**. The tiers of the machine are now in the plan. Then select the pool in the **Pool** box and set its **Tier** to one of them.
+The export places each pool on the chip of its tier, so every pool needs one. Open **Tiers...** on the Reduce panel, click the preset for the machine, and close the dialog with **OK**. The tiers of the machine are now in the plan. Then click the pool in the pools table and set its **Tier** to one of them.
 
 [^ Index](#index)
 

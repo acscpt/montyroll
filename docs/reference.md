@@ -92,7 +92,9 @@ The keys act on the window as a whole. The mouse actions belong to the roll, the
 | Resize the lanes under the roll | Drag the bar above the lane switch |
 | Change the voice budget | Drag the number under **Voices**, click the arrows beside it, or turn the mouse wheel over it |
 | Type the voice budget | Double-click the number under **Voices** |
-| Move the budget line | Drag the red dashed line on the Demand lane, with one pool |
+| Move a budget line | Drag a red line on the Demand lane |
+| Change a pool's voices | Drag its number in the pools table, click the arrows beside it, or turn the mouse wheel over it |
+| Rename a pool | Double-click its name in the pools table |
 | Fold or open the inspector | Click the burger button at its top |
 | Open or close the drawer | Click **Events** or **Report** along the bottom |
 | Resize the drawer | Drag the bar above it |
@@ -220,7 +222,7 @@ Each note is a block in the colour of its channel, brighter at a higher velocity
 
 ## Lanes
 
-The strip under the roll shows one of three lanes, chosen with the switch above it, on the same horizontal scale as the roll. **Voices** heads the gutter beside the strip, and the number under it is the budget, whichever lane is on view. The arrows above and below the number step it by one voice, as do the mouse wheel over it and the `Up` and `Down` keys once it is clicked. Dragging the number up or down changes it a voice at a time, and a double click opens it for typing, where `Return` keeps the number and `Esc` drops it. With one pool the budget line on the Demand lane can be dragged too. The reduction is worked out again once the budget stops changing.
+The strip under the roll shows one of three lanes, chosen with the switch above it, on the same horizontal scale as the roll. **Voices** heads the gutter beside the strip, and the number under it is the budget, whichever lane is on view. The arrows above and below the number step it by one voice, as do the mouse wheel over it and the `Up` and `Down` keys once it is clicked. Dragging the number up or down changes it a voice at a time, and a double click opens it for typing, where `Return` keeps the number and `Esc` drops it. Every budget line on the Demand lane can be dragged too, and the Reduce panel says which pool each one moves. The reduction is worked out again once the budget stops changing.
 
 ### Demand
 
@@ -231,7 +233,7 @@ The Demand lane plots the voice demand against time.
 | Coloured stack | The notes that sound at each moment, one layer for each channel. |
 | White line | The count of distinct pitches. A unison on two channels counts once. |
 | Yellow line | The count of distinct pitch classes. An octave doubling counts once. |
-| Red dashed line | The voice budget. With tiers, one line for each tier, labelled with the tier and its running total. |
+| Red line | The voice budget, labelled on a tag at its right-hand end. With tiers, one line for each tier, labelled with the tier and its running total. A line under the pointer, or being dragged, turns blue, and its tag names the pool that it moves. |
 | Red wash | The demand above the budget. |
 | **Voices** | The budget. With one pool it runs from 1 to the peak of the file. With several pools it shows the sum of their voices, greyed, and the pools set it. |
 
@@ -257,17 +259,18 @@ The **Original** sub-tab reports on the song. The **Reduced** sub-tab reports on
 
 ## Reduce panel
 
-The Reduce panel sits under the channel rows. Its first rows switch the reduction on and report the result, and the rest edit one pool at a time.
+The Reduce panel sits under the channel rows. Its first rows switch the reduction on and report the result. A table of the pools follows, and the controls under it edit the pool selected in the table.
 
 | Control | Values | Effect |
 | --- | --- | --- |
 | **Reduce to the voice budget** | on, off | A switch that draws and plays the reduction. |
 | Result label | | Shows the notes kept, the notes cut, the tails clipped, and the loss, then the drops by reason. |
-| **Pool** | Pool names | Chooses the pool that the panel edits. Return renames the pool to the typed text. |
-| **+**, **-** | | Add a pool and remove the edited pool. |
+| **+**, **-** | | Add a pool and remove the selected pool. |
 | **Tiers...** | | Opens the tiers dialog. |
-| **Voices** | 0 to 64 | The voices that the pool owns. |
-| **Tier** | Tier names, `(none)` | The tier that the pool's voices come from. |
+| Pools table | | One line for each pool: its name, its tier, its voices, its peak, and its channel count. A click selects the pool for the controls below, and a double click on the name opens it for renaming. |
+| Voices, in the table | 0 to what the tier has left | The voices that the pool owns. A drag on the number up or down, its arrows, and the mouse wheel change it, and a double click opens it for typing. |
+| Peak, in the table | | The most notes that the pool's channels sound at once in the file, in amber while it is above the pool's voices, when the pool must drop notes. |
+| **Tier** | Tier names, `(none)` | The tier that the selected pool's voices come from. |
 | **Sound** | Sound names, `(by instrument)` | The sound of the pool in an export. |
 | Overlap line | | Shows the highest overlap among the channels of the pool. |
 | **Unisons** | on, off | Merges unisons: drops a note that starts with the same pitch on another channel. On by default. |
@@ -380,9 +383,9 @@ A plan file is JSON with the suffix `.monty`. Channel numbers in the file run fr
 
 | Field | Type | Control on the Reduce panel |
 | --- | --- | --- |
-| `name` | string | **Pool** |
+| `name` | string | The name in the pools table |
 | `tier` | string | **Tier** |
-| `voices` | number | **Voices** |
+| `voices` | number | The voices in the pools table |
 | `channels` | list of numbers | **Pool** under each channel's row |
 | `dedupUnison` | true or false | **Merge unisons** |
 | `dedupOctave` | true or false | **Fold octaves** |

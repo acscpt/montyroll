@@ -30,7 +30,7 @@ Note that the stack is low while the piano plays alone and climbs at bar 17 when
 
 ![The demo file open in MontyRoll: four channel rows, the piano roll from bar 12 to bar 24, the voice-demand strip rising at bar 17, and the inspector on the right](images/demo-open.png)
 
-The dashed line along the top of the strip is the voice *budget*, the number of voices that the arrangement is allowed to use. It automatically starts at the peak of the file, which for this file is 8.
+The red line along the top of the strip is the voice *budget*, the number of voices that the arrangement is allowed to use. It automatically starts at the peak of the file, which for this file is 8.
 
 ## Reduce to four voices
 

@@ -68,7 +68,7 @@ class TestPalettes:
         """The palette names every colour the window reads from it."""
         assert set(theme.PALETTE) == {"window", "panel", "raised", "field", "border", "text",
                                       "muted", "accent", "active", "lcd", "hover", "ink",
-                                      "title"}
+                                      "title", "warn"}
 
     def testColoursAreHex(self) -> None:
         """Every colour is a #rrggbb string."""
@@ -169,6 +169,10 @@ class TestPainter:
             for state in ("", "Hover", "Pressed", "Disabled"):
                 width, height, _ = _decode(images[name + state])
                 assert (width, height) == (40, 11)
+
+        for name in ("poolUp", "poolUpPressed", "poolDown", "poolDownPressed"):
+            width, height, _ = _decode(images[name])
+            assert (width, height) == (14, 8)
 
         assert theme.paintedImages() is images
 

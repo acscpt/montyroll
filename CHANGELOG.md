@@ -28,7 +28,11 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **The roll.** A file opens scrolled to the middle of its pitches, notes have an edge a little darker than their fill, and the playback cursor is drawn in the accent colour. The bar under the pointer is lit faintly through the ruler and the roll, the beat within it a step more, and the slot a double click would fill a step more again, as is the note under the pointer.
 
-- **The voice budget.** The budget beside the strip is a number between two slim arrows, in place of a spinbox. The arrows and the mouse wheel step it, a drag up or down changes it, and a double click opens it for typing. With one pool the budget line on the strip can be dragged as well. The reduction is worked out again once the budget stops changing, so stepping through budgets stays quick on a large file.
+- **The voice budget.** The budget beside the strip is a number between two slim arrows, in place of a spinbox. The arrows and the mouse wheel step it, a drag up or down changes it, and a double click opens it for typing. Every budget line on the strip can be dragged as well. The reduction is worked out again once the budget stops changing, so stepping through budgets stays quick on a large file.
+
+- **The pools table.** The Reduce panel shows every pool on a line of its own, with its tier, its voices in a value box that drags, steps and takes typing, its peak, amber while it is above its voices, and its channel count, in place of the pool box and its Voices spinbox. A click selects the pool for the controls below it, and a double click on the name renames it. A pool takes no more voices than its tier has left.
+
+- **Budget lines.** The lines on the strip are solid and two pixels wide over a dark edge, with their labels on tags, so they read across the stack. Each one moves a pool when dragged, a tier's line the selected pool on that tier, and it turns blue with the pool's name on its tag while it is under the pointer or dragged.
 
 ### Fixed
 
