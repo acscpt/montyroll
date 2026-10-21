@@ -22,12 +22,17 @@ import pytest
 from conftest import TRACK_NAMES, needsDisplay
 from montyroll import analysis, gm, model, player, reduce, smf, theme
 from montyroll.app import (
+    BUDGET_DRAG_PX,
+    BUDGET_GRAB,
+    BUDGET_SETTLE_MS,
     CHANNEL_COLORS,
     DEMAND_MAX_H,
     DEMAND_MIN_H,
     DRAWER_CLOSE_GLYPH,
     DRAWER_OPEN_GLYPH,
     ELLIPSIS,
+    KEYS_W,
+    LANE_GAP,
     MAX_EVENT_ROWS,
     NO_POOL,
     PLAY_GLYPH,
@@ -777,17 +782,17 @@ class TestDemandStrip:
         app.budgetVar.set(40)
         app._drawDemand()
         assert app.budgetVar.get() == peak
-        assert int(float(app.budgetSpin.cget("to"))) == peak
+        assert app.budgetLimit == peak
 
     def testBudgetCanRiseWhileReduced(self, app: MidiEditorApp) -> None:
-        """With the reduction on, the spinbox still reaches the song's peak, not the reduced one."""
+        """With the reduction on, the budget still reaches the song's peak, not the reduced one."""
         peak = app._ensureSongDemand().peak
         app.budgetVar.set(peak - 2)
         app.reduceVar.set(True)
         app._reductionChanged()
         app._drawDemand()
-        assert int(float(app.budgetSpin.cget("to"))) == peak
-        app.tk.call("ttk::spinbox::Spin", app.budgetSpin, 1)
+        assert app.budgetLimit == peak
+        app._stepBudget(1)
         assert app.budgetVar.get() == peak - 1
 
     def testColumnsMergeIntoRuns(self, app: MidiEditorApp) -> None:
@@ -976,6 +981,161 @@ class TestTonal:
         rebuilt = app._ensureChords()
         assert rebuilt is not first
         assert all(name == "N.C." for _, _, name in rebuilt)
+
+
+class TestBudget:
+    """The voice budget beside the strip: its arrows, its number and its line."""
+
+    def _countRecomputes(self, app: MidiEditorApp,
+                         monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """Count the reduction's recomputes from here on.
+
+        Args:
+            app: the window.
+            monkeypatch: the fixture that wraps `_reductionChanged`.
+
+        Returns:
+            list[int]: grows by one at each recompute, holding the budget.
+        """
+        calls: list[int] = []
+        original = app._reductionChanged
+
+        def counted() -> None:
+            calls.append(app.budgetVar.get())
+            original()
+
+        monkeypatch.setattr(app, "_reductionChanged", counted)
+        return calls
+
+    def testLayout(self, app: MidiEditorApp) -> None:
+        """Voices heads the gutter, the lanes clear its rule, and the number is centred."""
+        app.update_idletasks()
+        roll = app.demandCanvas.master
+        corner = [w for w in roll.grid_slaves(row=3, column=0)
+                  if isinstance(w, tk.Label) and w.cget("text") == "Voices"]
+        assert corner and str(corner[0].cget("foreground")) == theme.PALETTE["text"]
+        switch = next(w for w in roll.grid_slaves(row=3) if isinstance(w, ttk.Frame))
+        assert int(str(switch.cget("padding")[0])) == KEYS_W + LANE_GAP
+        up, down = app.budgetArrows["budgetUp"], app.budgetArrows["budgetDown"]
+        middle = (up.winfo_y() + up.winfo_height() + down.winfo_y()) / 2
+        box = app.budgetBox
+        assert abs(box.winfo_y() + box.winfo_height() / 2 - middle) <= 2
+
+    def testArrowsStepAndRecomputeOnce(self, app: MidiEditorApp,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each click steps a voice at once; the reduction recomputes once the clicks pause."""
+        app.budgetVar.set(2)
+        app._drawDemand()
+        calls = self._countRecomputes(app, monkeypatch)
+        up = app.budgetArrows["budgetUp"]
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetUp", 1)
+        assert str(up.cget("image")) == str(app.paintedImages["budgetUpPressed"])
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetUp", 1)
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetDown", -1)
+        assert app.budgetVar.get() == 3
+        assert calls == []
+        app.after(BUDGET_SETTLE_MS + 50)
+        app.update()
+        assert calls == [3]
+        assert app.plan.pools[0].voices == 3
+
+    def testWheelAndKeysStep(self, app: MidiEditorApp) -> None:
+        """The wheel and the arrow keys step the budget, held between 1 and the peak."""
+        app.budgetVar.set(1)
+        app._drawDemand()
+        app._onBudgetWheel(FakeEvent(num=5))
+        assert app.budgetVar.get() == 1
+        app._onBudgetWheel(FakeEvent(num=4))
+        app._onBudgetWheel(FakeEvent(delta=120))
+        assert app.budgetVar.get() == 3
+        app._stepBudget(100)
+        assert app.budgetVar.get() == app.budgetLimit
+
+    def testDragTheNumber(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Dragging the number up raises the budget, filled with the accent; release recomputes."""
+        app.budgetVar.set(1)
+        app._drawDemand()
+        calls = self._countRecomputes(app, monkeypatch)
+        app._onBudgetPress(FakeEvent(y=500, num=1))
+        assert app.budgetDragging
+        assert str(app.budgetBox.cget("background")) == theme.PALETTE["accent"]
+        app._onBudgetDrag(FakeEvent(y=500 - 2 * BUDGET_DRAG_PX))
+        assert app.budgetVar.get() == 3
+        assert app.demandCanvas.find_withtag("budgetTag")
+        assert calls == []
+        app._onBudgetRelease()
+        assert not app.budgetDragging
+        assert calls == [3]
+        assert not app.demandCanvas.find_withtag("budgetTag")
+
+    def testClickWithoutMovingKeepsTheReduction(self, app: MidiEditorApp,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+        """A press and release that leave the budget alone recompute nothing."""
+        calls = self._countRecomputes(app, monkeypatch)
+        app._onBudgetPress(FakeEvent(y=500, num=1))
+        app._onBudgetRelease()
+        assert calls == []
+
+    def testTypeABudget(self, app: MidiEditorApp) -> None:
+        """A double click opens the number for typing; Return keeps it, Escape drops it."""
+        app.budgetVar.set(1)
+        app._drawDemand()
+        app._editBudget()
+        editor = app._budgetEditor
+        editor.delete(0, "end")
+        editor.insert(0, "2")
+        app._closeBudgetEditor(True)
+        assert app.budgetVar.get() == 2
+        assert app._budgetEditor is None
+        app._editBudget()
+        app._budgetEditor.delete(0, "end")
+        app._budgetEditor.insert(0, "3")
+        app._closeBudgetEditor(False)
+        assert app.budgetVar.get() == 2
+        app._editBudget()
+        app._budgetEditor.delete(0, "end")
+        app._budgetEditor.insert(0, "999")
+        app._closeBudgetEditor(True)
+        assert app.budgetVar.get() == app.budgetLimit
+
+    def testDragTheLine(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The budget line is grabbed within a few pixels and dragged in whole voices."""
+        app.budgetVar.set(3)
+        app._drawDemand()
+        calls = self._countRecomputes(app, monkeypatch)
+        base, scale = app._stripScale
+        y = base - 3 * scale
+        assert app._nearBudgetLine(y + BUDGET_GRAB)
+        assert not app._nearBudgetLine(y + BUDGET_GRAB + 2)
+        app._onDemandMotion(FakeEvent(x=10, y=y))
+        assert app.budgetLineHover
+        assert str(app.demandCanvas.cget("cursor")) == "sb_v_double_arrow"
+        app._onStripPress(FakeEvent(x=10, y=y, num=1))
+        assert app.budgetDragging
+        app._onStripDrag(FakeEvent(x=10, y=base - 2 * scale))
+        assert app.budgetVar.get() == 2
+        app._onBudgetRelease()
+        assert calls == [2]
+
+    def testSeveralPoolsLockTheBudget(self, app: MidiEditorApp) -> None:
+        """With several pools the budget is their total: greyed, and nothing changes it."""
+        app.addPool()
+        app.poolVars[1].set("pool 2")
+        app._channelPoolChanged(1)
+        app._drawDemand()
+        total = app.budgetVar.get()
+        assert not app.budgetEditable
+        assert str(app.budgetBox.cget("foreground")) == theme.PALETTE["muted"]
+        assert (str(app.budgetArrows["budgetUp"].cget("image"))
+                == str(app.paintedImages["budgetUpDisabled"]))
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetUp", 1)
+        app._onBudgetWheel(FakeEvent(num=4))
+        app._editBudget()
+        assert app._budgetEditor is None
+        assert app._stripScale is not None
+        base, scale = app._stripScale
+        assert not app._nearBudgetLine(base - total * scale)
+        assert app.budgetVar.get() == total
 
 
 class TestReduction:
@@ -1190,10 +1350,10 @@ class TestPlanControls:
         assert all(v.get() == "all" for v in app.poolVars.values())
         assert app.poolVar.get() == "all"
         assert app.editPool is app.plan.pools[0]
-        assert str(app.budgetSpin.cget("state")) == "normal"
+        assert app.budgetEditable
 
     def testBudgetAndPoolVoicesAreOneNumber(self, app: MidiEditorApp) -> None:
-        """With one pool the strip's spinbox and the panel's Voices mirror each other."""
+        """With one pool the strip's budget and the panel's Voices mirror each other."""
         app.budgetVar.set(3)
         assert app.poolVoicesVar.get() == 3
         app.poolVoicesVar.set(5)
@@ -1212,7 +1372,7 @@ class TestPlanControls:
         assert app.plan.pools[0].channels == [0, 9]
         assert app.plan.pools[1].channels == [1]
         app._drawDemand()
-        assert str(app.budgetSpin.cget("state")) == "disabled"
+        assert not app.budgetEditable
         assert app.budgetVar.get() == app._totalVoices()
         app.poolVars[1].set(NO_POOL)
         app._channelPoolChanged(1)

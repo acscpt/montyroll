@@ -28,6 +28,12 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **The roll.** A file opens scrolled to the middle of its pitches, notes have an edge a little darker than their fill, and the playback cursor is drawn in the accent colour.
 
+- **The voice budget.** The budget beside the strip is a number between two slim arrows, in place of a spinbox. The arrows and the mouse wheel step it, a drag up or down changes it, and a double click opens it for typing. With one pool the budget line on the strip can be dragged as well. The reduction is worked out again once the budget stops changing, so stepping through budgets stays quick on a large file.
+
+### Fixed
+
+- **Raising the budget with the reduction on.** While **Reduce to the voice budget** was on, the budget beside the strip could be lowered but not raised, as its limit followed the reduced demand, which the budget itself caps. The limit is now the peak of the file as written.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

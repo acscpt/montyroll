@@ -36,9 +36,9 @@ The dashed line along the top of the strip is the voice *budget*, the number of 
 
 The main purpose of MontyRoll is to allow a multi-voice MIDI arrangement to be trimmed to a smaller number of simultaneous voices, which is useful for playback on hardware with a limited set of channels.
 
-Set the desired voice budget via the **Voices** control located just to the left of the demand strip.
+The voice budget is the number under **Voices**, just to the left of the demand strip.
 
-1. Set **Voices** to 4. The budget line drops, and a red wash marks each stretch where the stack rises above it.
+1. Set **Voices** to 4, with the arrows beside the number or by double-clicking it and typing 4. The budget line drops, and a red wash marks each stretch where the stack rises above it.
 
 2. Switch on **Reduce to the voice budget** on the Reduce panel, under the channel rows.
 

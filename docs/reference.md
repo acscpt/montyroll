@@ -90,6 +90,9 @@ The keys act on the window as a whole. The mouse actions belong to the roll, the
 | Scale every tempo | Right-click the tempo row of the ruler |
 | Make a channel active | Click its row |
 | Resize the lanes under the roll | Drag the bar above the lane switch |
+| Change the voice budget | Drag the number under **Voices**, click the arrows beside it, or turn the mouse wheel over it |
+| Type the voice budget | Double-click the number under **Voices** |
+| Move the budget line | Drag the red dashed line on the Demand lane, with one pool |
 | Fold or open the inspector | Click the burger button at its top |
 | Open or close the drawer | Click **Events** or **Report** along the bottom |
 | Resize the drawer | Drag the bar above it |
@@ -217,7 +220,7 @@ Each note is a block in the colour of its channel, brighter at a higher velocity
 
 ## Lanes
 
-The strip under the roll shows one of three lanes, chosen with the switch above it, on the same horizontal scale as the roll. **Voices** in the gutter beside the strip is the budget, whichever lane is on view.
+The strip under the roll shows one of three lanes, chosen with the switch above it, on the same horizontal scale as the roll. **Voices** heads the gutter beside the strip, and the number under it is the budget, whichever lane is on view. The arrows above and below the number step it by one voice, as do the mouse wheel over it and the `Up` and `Down` keys once it is clicked. Dragging the number up or down changes it a voice at a time, and a double click opens it for typing, where `Return` keeps the number and `Esc` drops it. With one pool the budget line on the Demand lane can be dragged too. The reduction is worked out again once the budget stops changing.
 
 ### Demand
 
@@ -230,7 +233,7 @@ The Demand lane plots the voice demand against time.
 | Yellow line | The count of distinct pitch classes. An octave doubling counts once. |
 | Red dashed line | The voice budget. With tiers, one line for each tier, labelled with the tier and its running total. |
 | Red wash | The demand above the budget. |
-| **Voices** | The budget. With one pool it runs from 1 to the peak of the file. With several pools it shows the sum of their voices. |
+| **Voices** | The budget. With one pool it runs from 1 to the peak of the file. With several pools it shows the sum of their voices, greyed, and the pools set it. |
 
 While the reduction is on, the lane shows each voice as busy until its release ends. The status bar reports the counts under the pointer.
 

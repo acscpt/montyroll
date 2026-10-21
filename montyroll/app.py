@@ -43,6 +43,10 @@ DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
 LANES = ("Demand", "Velocity", "Weight")   # what the strip under the roll can show
+LANE_GAP = 3         # space between the strip gutter's rule and the first lane
+BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
+BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
+BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
 DRAWER_PAGES = ("Events", "Report")        # the drawer's pages, in tab order
 INSPECTOR_W = 290    # the inspector's width when open
 INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
@@ -300,6 +304,16 @@ class MidiEditorApp(tk.Tk):
         self._centrePending = False                       # the roll waits to be laid out to centre
         self.laneBars: list[tuple[float, float, model.Note]] = []   # x extents drawn in a note lane
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
+        self.budgetLimit = 64                # the most the budget can be set to
+        self.budgetEditable = True           # one pool: the budget is set beside the strip
+        self.budgetDragging = False          # the budget or its line is being dragged
+        self.budgetLineHover = False         # the pointer could grab the budget line
+        self._budgetHover = False            # the pointer is on the budget
+        self._budgetArrowStates: dict[str, str] = {}   # per arrow: "", "Hover" or "Pressed"
+        self._budgetDragStart = (0, 0)       # (pointer y on screen, budget) at the press
+        self._budgetSettleAfter: str | None = None
+        self._budgetEditor: ttk.Entry | None = None
+        self._stripScale: tuple[float, float] | None = None   # (base y, pixels per voice)
 
         # With one pool the strip's budget and the pool's voices are one
         # number, whichever control it was typed into.
@@ -853,7 +867,7 @@ class MidiEditorApp(tk.Tk):
         # cost is the window width and not the length of the piece. The
         # gutter beside it holds the voice budget.
         gutter = ttk.Frame(roll, width=KEYS_W, style="Lane.TFrame")
-        switch = ttk.Frame(roll, padding=(KEYS_W, 3, 0, 3), style="Lane.TFrame")
+        switch = ttk.Frame(roll, padding=(KEYS_W + LANE_GAP, 3, 0, 3), style="Lane.TFrame")
         switch.grid(row=3, column=0, columnspan=2, sticky="ew")
 
         for lane, tip in (("Demand", "Voices sounding over time, against the budget"),
@@ -871,22 +885,29 @@ class MidiEditorApp(tk.Tk):
         self.laneRule = tk.Frame(roll, height=1, bg=self.palette["raised"])
         self.laneRule.grid(row=3, column=0, columnspan=2, sticky="sew")
 
+        # The gutter's heading sits in the corner of the lane row, in the
+        # text colour so it reads as a label and not a fourth lane, with a
+        # rule beside it that runs on down the gutter's edge.
+        tk.Label(roll, text="Voices", bg=theme.ROLL["strip"], fg=self.palette["text"],
+                 font=(self.uiFamily, 8)).grid(row=3, column=0, sticky="nsew",
+                                               padx=(0, 1), pady=(0, 1))
+        tk.Frame(roll, width=1, bg=self.palette["raised"]).grid(row=3, column=0, sticky="nse")
         gutter.grid(row=4, column=0, sticky="nsew")
         gutter.grid_propagate(False)
-        ttk.Label(gutter, text="Voices", style="Lane.TLabel",
-                  font=(self.uiFamily, 7)).pack(pady=(4, 0))
-        self.budgetSpin = ttk.Spinbox(gutter, from_=1, to=64, width=3,
-                                      textvariable=self.budgetVar,
-                                      command=self._reductionChanged)
-        self.budgetSpin.pack()
-        self.budgetSpin.bind("<KeyRelease>", lambda e: self._reductionChanged())
-        Tooltip(gutter, "Voice budget: the line on the demand strip.\n"
-                "Where the stack crosses it, notes would have to go.")
+        self._buildBudget(gutter)
+
+        # The strip reports what is under the pointer, and the budget line
+        # on it can be grabbed and dragged. The press is bound for every
+        # button, alongside the tooltip's, so the tooltip still closes.
         self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg=theme.ROLL["strip"],
                                       highlightthickness=0)
         self.demandCanvas.grid(row=4, column=1, sticky="ew")
         self.demandCanvas.bind("<Configure>", lambda e: self._scheduleDemand())
         self.demandCanvas.bind("<Motion>", self._onDemandMotion)
+        self.demandCanvas.bind("<ButtonPress>", self._onStripPress, add="+")
+        self.demandCanvas.bind("<B1-Motion>", self._onStripDrag)
+        self.demandCanvas.bind("<ButtonRelease-1>", self._onBudgetRelease)
+        self.demandCanvas.bind("<Leave>", lambda e: self._hoverBudgetLine(False), add="+")
         Tooltip(self.demandCanvas,
                 "Voices sounding over time, stacked per channel.\n"
                 "White line: distinct pitches (unisons merged).\n"
@@ -2569,9 +2590,17 @@ class MidiEditorApp(tk.Tk):
         distinct-pitch and pitch-class counts are drawn as lines over the
         stack, and the budget is a horizontal line: with tiers, one at each
         tier's cumulative voices as well. The vertical scale is whichever is
-        larger of the piece's peak and the budget, so the lines always fit.
+        larger of the piece's peak and the budget, so the lines always fit,
+        and it is kept in `_stripScale` for grabbing the budget line. While
+        the budget is dragged, or its line could be grabbed, the line is
+        drawn solid in the accent with a tag giving the number.
         """
-        self._demandAfter = None
+        # A redraw still queued is this one, or made redundant by it.
+        if self._demandAfter is not None:
+            self.after_cancel(self._demandAfter)
+            self._demandAfter = None
+
+        self._stripScale = None
         c = self.demandCanvas
         c.delete("all")
         width = c.winfo_width()
@@ -2589,8 +2618,9 @@ class MidiEditorApp(tk.Tk):
         peak = max(demand.peak, 1)
         limit = max(self._ensureSongDemand().peak, 1)
         single = len(self.plan.pools) == 1
-        self.budgetSpin.configure(to=limit if single else 64,
-                                  state="normal" if single else "disabled")
+        self.budgetLimit = limit if single else 64
+        self.budgetEditable = single
+        self._paintBudget()
 
         if single and self.budgetVar.get() > limit:
             self.budgetVar.set(limit)
@@ -2605,6 +2635,7 @@ class MidiEditorApp(tk.Tk):
         top = max(peak, budget)
         scale = (height - 6) / top
         base = height - 2
+        self._stripScale = (base, scale)
         channels = self._stackOrder(demand.channels)
         runs = self._demandColumns(width)
 
@@ -2649,6 +2680,34 @@ class MidiEditorApp(tk.Tk):
 
         c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
                       font=(self.uiFamily, 7))
+
+        if single and (self.budgetDragging or self.budgetLineHover):
+            self._drawBudgetTag(base - budget * scale, width)
+
+    def _drawBudgetTag(self, y: float, width: int):
+        """Draw the budget line solid in the accent, with the number on a tag at its left end.
+
+        Args:
+            y: the line's height on the strip.
+            width: the strip's width.
+        """
+        c = self.demandCanvas
+        p = self.palette
+        budget = self.budgetVar.get()
+        c.create_line(0, y, width, y, fill=p["accent"], width=2, tags="budgetTag")
+        label = c.create_text(8, y, text=f"{budget} voice" + ("s" if budget != 1 else ""),
+                              anchor="w", fill=p["ink"], font=(self.uiFamily, 8, "bold"),
+                              tags="budgetTag")
+        x0, y0, x1, y1 = c.bbox(label)
+
+        # At the top of the strip the tag hangs below the line instead.
+        if y0 < 1:
+            c.move(label, 0, (y1 - y0) / 2 + 3)
+            x0, y0, x1, y1 = c.bbox(label)
+
+        tag = c.create_rectangle(x0 - 5, y0 - 1, x1 + 5, y1 + 1, fill=p["accent"],
+                                 outline="", tags="budgetTag")
+        c.tag_lower(tag, label)
 
     def _drawNoteLane(self, lane: str):
         """Draw the Velocity or Weight lane for the visible part of the roll.
@@ -2727,9 +2786,14 @@ class MidiEditorApp(tk.Tk):
     def _onDemandMotion(self, event):
         """Pointer over the demand strip: report the counts at that column.
 
+        Near the budget line the pointer also shows the line can be grabbed.
+
         Args:
-            event: `x`, the column under the pointer.
+            event: `x` and `y`, the point under the pointer.
         """
+        if not self.budgetDragging:
+            self._hoverBudgetLine(self._nearBudgetLine(event.y))
+
         if not self.song.notes:
             return
 
@@ -2762,6 +2826,302 @@ class MidiEditorApp(tk.Tk):
         tiers = "   " + " ".join(parts) if parts else ""
         self._setStatus(f"bar {bar}:{beat}  {secs:6.2f}s   voices {raw} | pitches {pitches} "
                         f"| classes {classes}{excess}{tiers}   {busiest}")
+
+    # -------------------------------------------------------------- budget
+    def _buildBudget(self, gutter: ttk.Frame):
+        """Build the voice budget in the strip's gutter.
+
+        The budget is a number in the accent colour, centred between a slim
+        arrow at the top and the bottom of the gutter, with a rule down the
+        gutter's edge between it and the strip. A click on an arrow steps
+        it a voice; the number is dragged up or down, stepped with the
+        wheel or the Up and Down keys, or opened for typing with a double
+        click. Presses are bound for every button, alongside the tooltips'
+        own, so the tooltips still close.
+
+        Args:
+            gutter: the frame beside the strip.
+        """
+        dark = theme.ROLL["strip"]
+        tk.Frame(gutter, width=1, bg=self.palette["raised"]).pack(side="right", fill="y")
+        self.budgetArrows: dict[str, tk.Label] = {}
+
+        # The arrows, at the top and the bottom of the gutter.
+        for name, side, pad, delta, tip in (
+                ("budgetUp", "top", (3, 0), 1, "One voice more"),
+                ("budgetDown", "bottom", (0, 3), -1, "One voice fewer")):
+            arrow = tk.Label(gutter, image=self.paintedImages[name], bg=dark, bd=0)
+            arrow.pack(side=side, fill="x", pady=pad)
+            arrow.bind("<ButtonPress>", lambda e, n=name, d=delta: self._pressBudgetArrow(e, n, d),
+                       add="+")
+            arrow.bind("<ButtonRelease-1>", lambda e, n=name: self._showBudgetArrow(n, "Hover"))
+            arrow.bind("<Enter>", lambda e, n=name: self._showBudgetArrow(n, "Hover"), add="+")
+            arrow.bind("<Leave>", lambda e, n=name: self._showBudgetArrow(n, ""), add="+")
+            Tooltip(arrow, tip)
+            self.budgetArrows[name] = arrow
+
+        # The number, in the readout's fixed-width face, centred between
+        # them.
+        mono = theme.pickFont(tkfont.families(self), theme.MONO_FONTS) or self.uiFamily
+        self.budgetFont = (mono, 14, "bold")
+        b = self.budgetBox = tk.Label(gutter, textvariable=self.budgetVar, font=self.budgetFont,
+                                      bg=dark, fg=self.palette["accent"], bd=0, takefocus=1)
+        b.pack(side="top", fill="x", expand=True, padx=5)
+        Tooltip(b, "Voice budget: the line on the demand strip.\n"
+                   "Drag up or down, or use the wheel or the arrows;\n"
+                   "double-click to type a number.")
+        b.bind("<ButtonPress>", self._onBudgetPress, add="+")
+        b.bind("<B1-Motion>", self._onBudgetDrag)
+        b.bind("<ButtonRelease-1>", self._onBudgetRelease)
+        b.bind("<Double-Button-1>", self._editBudget)
+        b.bind("<Up>", lambda e: self._stepBudget(1))
+        b.bind("<Down>", lambda e: self._stepBudget(-1))
+        b.bind("<Enter>", lambda e: self._hoverBudget(True), add="+")
+        b.bind("<Leave>", lambda e: self._hoverBudget(False), add="+")
+
+        for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+            b.bind(seq, self._onBudgetWheel)
+
+    def _paintBudget(self):
+        """Colour the budget and its arrows for their state.
+
+        Dragged, the number fills with the accent under dark text, and
+        under the pointer it brightens. With several pools the budget is
+        their total, so the number and the arrows grey and take no input.
+        """
+        p = self.palette
+        editable = self.budgetEditable
+
+        if not editable:
+            fg, bg = p["muted"], theme.ROLL["strip"]
+        elif self.budgetDragging:
+            fg, bg = p["ink"], p["accent"]
+        else:
+            fg = theme.mix(p["accent"], "#ffffff", 0.3) if self._budgetHover else p["accent"]
+            bg = theme.ROLL["strip"]
+
+        self.budgetBox.configure(fg=fg, bg=bg, cursor="sb_v_double_arrow" if editable else "")
+
+        for name, arrow in self.budgetArrows.items():
+            state = self._budgetArrowStates.get(name, "") if editable else "Disabled"
+            arrow.configure(image=self.paintedImages[name + state],
+                            cursor="hand2" if editable else "")
+
+    def _hoverBudget(self, on: bool):
+        """Track the pointer on the budget.
+
+        Args:
+            on: True when the pointer is on it.
+        """
+        self._budgetHover = on
+        self._paintBudget()
+
+    def _showBudgetArrow(self, name: str, state: str):
+        """Show an arrow plain, under the pointer, or pressed.
+
+        Args:
+            name: "budgetUp" or "budgetDown".
+            state: "", "Hover" or "Pressed".
+        """
+        self._budgetArrowStates[name] = state
+        self._paintBudget()
+
+    def _pressBudgetArrow(self, event, name: str, delta: int):
+        """Press an arrow: show it pressed and step the budget.
+
+        Args:
+            event: the press; only the first button steps.
+            name: "budgetUp" or "budgetDown".
+            delta: +1 or -1.
+        """
+        if event.num == 1 and self.budgetEditable:
+            self._showBudgetArrow(name, "Pressed")
+            self._stepBudget(delta)
+
+    def _setBudget(self, value: int):
+        """Set the budget, held between 1 and its limit, and redraw the strip at once.
+
+        The reduction is left as it was; the caller recomputes it when the
+        change is done.
+
+        Args:
+            value: the budget asked for.
+        """
+        value = max(1, min(self.budgetLimit, value))
+
+        if value != self.budgetVar.get():
+            self.budgetVar.set(value)
+            self._drawDemand()
+
+    def _stepBudget(self, delta: int):
+        """Step the budget a voice, and recompute the reduction once the steps pause.
+
+        Args:
+            delta: +1 or -1.
+        """
+        if not self.budgetEditable:
+            return
+
+        self._setBudget(self.budgetVar.get() + delta)
+
+        # Each step restarts the wait, so a run of clicks or wheel turns
+        # recomputes once.
+        if self._budgetSettleAfter is not None:
+            self.after_cancel(self._budgetSettleAfter)
+
+        self._budgetSettleAfter = self.after(BUDGET_SETTLE_MS, self._budgetSettled)
+
+    def _budgetSettled(self):
+        """The budget has stopped changing: recompute the reduction."""
+        self._budgetSettleAfter = None
+        self._reductionChanged()
+
+    def _onBudgetWheel(self, event):
+        """Step the budget with the wheel: up for more voices.
+
+        Args:
+            event: Button-4 or Button-5 on X11, or MouseWheel with a delta.
+        """
+        up = event.num == 4 or getattr(event, "delta", 0) > 0
+        self._stepBudget(1 if up else -1)
+
+    def _onBudgetPress(self, event):
+        """Start a drag on the budget, and take the focus for the arrow keys.
+
+        Args:
+            event: the press, at `y_root`; only the first button drags.
+        """
+        if event.num != 1:
+            return
+
+        self.budgetBox.focus_set()
+
+        if self.budgetEditable:
+            self._startBudgetDrag(event.y_root)
+
+    def _onBudgetDrag(self, event):
+        """Move the budget with the pointer: up for more voices.
+
+        Args:
+            event: the motion, at `y_root`.
+        """
+        if self.budgetDragging and self._budgetEditor is None:
+            y, start = self._budgetDragStart
+            self._setBudget(start + round((y - event.y_root) / BUDGET_DRAG_PX))
+
+    def _startBudgetDrag(self, y: int):
+        """Begin dragging the budget or its line.
+
+        Args:
+            y: the pointer's height on the screen.
+        """
+        self.budgetDragging = True
+        self._budgetDragStart = (y, self.budgetVar.get())
+        self._drawDemand()
+
+    def _onBudgetRelease(self, _event=None):
+        """End a drag of the budget or its line, recomputing the reduction if it moved.
+
+        Args:
+            _event: the release; unused.
+        """
+        if not self.budgetDragging:
+            return
+
+        self.budgetDragging = False
+
+        if self.budgetVar.get() != self._budgetDragStart[1]:
+            self._reductionChanged()
+
+        self._drawDemand()
+
+    def _editBudget(self, _event=None):
+        """Open the budget for typing: Return keeps the number, Escape drops it.
+
+        Args:
+            _event: the double click; unused.
+        """
+        if not self.budgetEditable or self._budgetEditor is not None:
+            return
+
+        self.budgetDragging = False
+        entry = ttk.Entry(self.budgetBox.master, justify="center", font=self.budgetFont)
+        entry.insert(0, str(self.budgetVar.get()))
+        entry.select_range(0, "end")
+        entry.place(in_=self.budgetBox, x=0, y=0, relwidth=1, relheight=1)
+        entry.focus_set()
+
+        for seq, keep in (("<Return>", True), ("<KP_Enter>", True), ("<Escape>", False),
+                          ("<FocusOut>", True)):
+            entry.bind(seq, lambda e, k=keep: self._closeBudgetEditor(k))
+
+        self._budgetEditor = entry
+        self._drawDemand()
+
+    def _closeBudgetEditor(self, keep: bool):
+        """Close the typing field, setting the budget from it when asked and it holds a number.
+
+        Args:
+            keep: True to keep what was typed.
+        """
+        entry, self._budgetEditor = self._budgetEditor, None
+
+        if entry is None:
+            return
+
+        text = entry.get().strip()
+        entry.destroy()
+
+        if keep and text.isdigit() and int(text) != self.budgetVar.get():
+            self._setBudget(int(text))
+            self._reductionChanged()
+
+    def _nearBudgetLine(self, y: float) -> bool:
+        """Report whether a point on the strip is near enough the budget line to grab it.
+
+        Args:
+            y: the height on the strip.
+
+        Returns:
+            bool: True when the budget can be set here, the Demand lane is
+            drawn, and y is within BUDGET_GRAB pixels of the line.
+        """
+        if not self.budgetEditable or self._stripScale is None:
+            return False
+
+        base, scale = self._stripScale
+        near = abs(y - (base - self.budgetVar.get() * scale)) <= BUDGET_GRAB
+        return near
+
+    def _hoverBudgetLine(self, on: bool):
+        """Show whether the budget line can be grabbed: the pointer and the line's highlight.
+
+        Args:
+            on: True when a press would pick the line up.
+        """
+        if on != self.budgetLineHover:
+            self.budgetLineHover = on
+            self.demandCanvas.configure(cursor="sb_v_double_arrow" if on else "")
+            self._drawDemand()
+
+    def _onStripPress(self, event):
+        """Pick the budget line up when a press of the first button is near it.
+
+        Args:
+            event: the press, at `y`.
+        """
+        if event.num == 1 and self._nearBudgetLine(event.y):
+            self._startBudgetDrag(event.y_root)
+
+    def _onStripDrag(self, event):
+        """Move the budget line to the pointer, in whole voices.
+
+        Args:
+            event: the motion, at `y`.
+        """
+        if self.budgetDragging and self._stripScale is not None:
+            base, scale = self._stripScale
+            self._setBudget(round((base - event.y) / scale))
 
     # ----------------------------------------------------------- reduction
     def _buildReducePanel(self, parent: ttk.Frame):

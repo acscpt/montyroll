@@ -74,7 +74,7 @@ All of these can be changed while the music plays. The synth restarts from the c
 
 A voice is one note that sounds, and the voice budget is the number of voices that the target can sound at once. The strip under the roll draws the demand of the file as a coloured stack and the budget as a red dashed line. Where the stack rises above the line, the file asks for more voices than the budget, and those are the bars that a reduction thins.
 
-Start with **Voices**, in the gutter to the left of the strip, and set it to the number of voices that the target has. The budget line moves to that level, and a red wash marks each stretch where the demand is above it.
+Start with the number under **Voices**, in the gutter to the left of the strip, and set it to the number of voices that the target has. The arrows above and below it step it, a drag up or down changes it, and a double click opens it for typing. The budget line moves to that level, and a red wash marks each stretch where the demand is above it. The line itself can be dragged as well.
 
 Then switch on **Reduce to the voice budget** on the Reduce panel. From this point the roll, the strip, and playback all show the reduced arrangement. The roll stipples every note that the reduction drops or cuts short, so the loss can be seen bar by bar.
 

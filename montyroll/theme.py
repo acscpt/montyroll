@@ -335,14 +335,19 @@ def paintedImages() -> dict[str, str]:
     header colour. The mute and solo icons are 18 pixels square, a speaker
     and headphones: a dark ring and glyph when off, a dark disc with the
     glyph cut out when on, so the header colour shows through it, and a
-    faint shadow behind the ring under the pointer. The images are painted
-    once and shared by every window.
+    faint shadow behind the ring under the pointer. The budget's arrows
+    are slim triangles, 40 by 11, in the accent: brighter under the
+    pointer, dark on an accent bar when pressed, and dim when the budget
+    cannot be edited. The images are painted once and shared by every
+    window.
 
     Returns:
         dict[str, str]: base64 PNG data by name: switchOff, switchOffHover,
         switchOffDisabled, switchOn, switchOnHover, switchOnDisabled, knob,
-        knobHover, trough, rowKnob, rowKnobHover, rowTrough, and muteOff,
-        muteOffHover, muteOn, muteOnHover and the same four for solo.
+        knobHover, trough, rowKnob, rowKnobHover, rowTrough, muteOff,
+        muteOffHover, muteOn, muteOnHover and the same four for solo, and
+        budgetUp, budgetUpHover, budgetUpPressed, budgetUpDisabled and the
+        same four for budgetDown.
     """
     p = PALETTE
     lit = mix(p["accent"], "#ffffff", 0.2)
@@ -389,5 +394,16 @@ def paintedImages() -> dict[str, str]:
                                                  (glyph, p["ink"])])
         images[f"{name}On"] = png(18, 18, [(disc, p["ink"]), (glyph, None)])
         images[f"{name}OnHover"] = png(18, 18, [(disc, "#000000"), (glyph, None)])
+
+    # The budget's arrows: a slim triangle, alone or on a bar.
+    arrows = {"budgetUp": polygon([(14.0, 7.5), (20.0, 3.5), (26.0, 7.5)]),
+              "budgetDown": polygon([(14.0, 3.5), (20.0, 7.5), (26.0, 3.5)])}
+    bar = box(0.5, 0.5, 39.5, 10.5, 2)
+
+    for name, arrow in arrows.items():
+        images[name] = png(40, 11, [(arrow, p["accent"])])
+        images[f"{name}Hover"] = png(40, 11, [(arrow, mix(p["accent"], "#ffffff", 0.3))])
+        images[f"{name}Pressed"] = png(40, 11, [(bar, p["accent"]), (arrow, p["ink"])])
+        images[f"{name}Disabled"] = png(40, 11, [(arrow, mix(p["muted"], ROLL["strip"], 0.5))])
 
     return images

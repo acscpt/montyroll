@@ -165,6 +165,11 @@ class TestPainter:
             width, height, _ = _decode(images[name])
             assert (width, height) == (18, 18)
 
+        for name in ("budgetUp", "budgetDown"):
+            for state in ("", "Hover", "Pressed", "Disabled"):
+                width, height, _ = _decode(images[name + state])
+                assert (width, height) == (40, 11)
+
         assert theme.paintedImages() is images
 
 
