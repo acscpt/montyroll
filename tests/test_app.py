@@ -282,6 +282,15 @@ class TestTheme:
 
         assert {"Channels", "Reduce", "Inspector"} <= set(titles)
 
+    def testRuleUnderTheLanes(self, app: MidiEditorApp) -> None:
+        """A one-pixel rule runs under the lane switch, flush on top of the strip."""
+        app.update_idletasks()
+        rule = app.laneRule
+        assert rule.winfo_height() == 1
+        assert str(rule.cget("background")) == theme.PALETTE["raised"]
+        assert rule.winfo_y() + 1 == app.demandCanvas.winfo_y()
+        assert rule.winfo_width() >= app.demandCanvas.winfo_width()
+
     def testRowHeaderTakesTheChannelColour(self, app: MidiEditorApp) -> None:
         """A row's header bar is its channel colour with dark text, active or not."""
         first, second = sorted(app.song.channels)[:2]

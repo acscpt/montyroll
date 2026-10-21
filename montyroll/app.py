@@ -865,6 +865,12 @@ class MidiEditorApp(tk.Tk):
             b.pack(side="left", padx=(0, 2))
             Tooltip(b, tip)
 
+        # A one-pixel rule along the bottom of the lane row, across the
+        # gutter and the strip. It shares the row's grid cell and is made
+        # after the row, so it sits over the row's bottom edge.
+        self.laneRule = tk.Frame(roll, height=1, bg=self.palette["raised"])
+        self.laneRule.grid(row=3, column=0, columnspan=2, sticky="sew")
+
         gutter.grid(row=4, column=0, sticky="nsew")
         gutter.grid_propagate(False)
         ttk.Label(gutter, text="Voices", style="Lane.TLabel",
