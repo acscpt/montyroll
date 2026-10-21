@@ -331,6 +331,17 @@ class MidiEditorApp(tk.Tk):
         self.option_add("*TCombobox*Listbox.background", p["field"])
         self.option_add("*TCombobox*Listbox.foreground", p["text"])
 
+        # Menus are classic tk widgets too: a one-pixel edge in place of the
+        # bevel, no raised border on the entry under the pointer, and the
+        # accent behind it. _buildMenu flattens the menubar itself.
+        for name, value in (("*Menu.relief", "solid"), ("*Menu.borderWidth", 1),
+                            ("*Menu.activeBorderWidth", 0),
+                            ("*Menu.background", p["raised"]),
+                            ("*Menu.activeBackground", p["accent"]),
+                            ("*Menu.activeForeground", p["ink"]),
+                            ("*Menu.selectColor", p["accent"])):
+            self.option_add(name, value)
+
         # Tk's file dialog on X11 draws its folder pane on a canvas with a
         # white background of its own, and its text takes the light colour
         # above. A class binding gives that canvas the field colour as the
@@ -476,7 +487,7 @@ class MidiEditorApp(tk.Tk):
     # ------------------------------------------------------------------ UI
     def _buildMenu(self):
         """Create the File and Edit menus and route window close to onClose."""
-        m = tk.Menu(self)
+        m = tk.Menu(self, relief="flat", borderwidth=0, background=self.palette["window"])
 
         # The accelerator captions are display only; the key bindings that
         # back them live in _bindKeys.

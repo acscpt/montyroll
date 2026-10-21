@@ -175,6 +175,16 @@ class TestTheme:
         assert {"Horizontal.Scale.slider", "Horizontal.Scale.trough",
                 "Row.Horizontal.Scale.slider", "Row.Horizontal.Scale.trough"} <= names
 
+    def testMenusAreFlat(self, app: MidiEditorApp) -> None:
+        """The menus have a plain edge and the accent on the active entry; the bar is flat."""
+        bar = app.nametowidget(app.cget("menu"))
+        fileMenu = app.nametowidget(bar.entrycget("File", "menu"))
+        assert str(bar.cget("relief")) == "flat"
+        assert str(fileMenu.cget("relief")) == "solid"
+        assert str(fileMenu.cget("activeborderwidth")) == "0"
+        assert str(fileMenu.cget("activebackground")) == theme.PALETTE["accent"]
+        assert str(fileMenu.cget("activeforeground")) == theme.PALETTE["ink"]
+
     def testRowHeaderTakesTheChannelColour(self, app: MidiEditorApp) -> None:
         """A row's header bar is its channel colour with dark text, active or not."""
         first, second = sorted(app.song.channels)[:2]
