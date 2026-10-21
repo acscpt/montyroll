@@ -2580,17 +2580,20 @@ class MidiEditorApp(tk.Tk):
         if width < 2 or height < 2 or not self.song.notes:
             return
 
-        # With one pool the budget cannot usefully exceed the piece's peak,
-        # so the spinbox stops there; with several pools the budget is what
-        # they add up to and the spinbox only displays it.
+        # With one pool the budget cannot usefully exceed the peak of the
+        # song as written, so the spinbox stops there; with several pools the
+        # budget is what they add up to and the spinbox only displays it.
+        # The strip's own peak is the reduced one while the reduction is on,
+        # which the budget caps, so it cannot be the limit.
         demand = self._ensureDemand()
         peak = max(demand.peak, 1)
+        limit = max(self._ensureSongDemand().peak, 1)
         single = len(self.plan.pools) == 1
-        self.budgetSpin.configure(to=peak if single else 64,
+        self.budgetSpin.configure(to=limit if single else 64,
                                   state="normal" if single else "disabled")
 
-        if single and self.budgetVar.get() > peak:
-            self.budgetVar.set(peak)
+        if single and self.budgetVar.get() > limit:
+            self.budgetVar.set(limit)
 
         self._storePoolControls()
 

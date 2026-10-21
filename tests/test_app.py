@@ -779,6 +779,17 @@ class TestDemandStrip:
         assert app.budgetVar.get() == peak
         assert int(float(app.budgetSpin.cget("to"))) == peak
 
+    def testBudgetCanRiseWhileReduced(self, app: MidiEditorApp) -> None:
+        """With the reduction on, the spinbox still reaches the song's peak, not the reduced one."""
+        peak = app._ensureSongDemand().peak
+        app.budgetVar.set(peak - 2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app._drawDemand()
+        assert int(float(app.budgetSpin.cget("to"))) == peak
+        app.tk.call("ttk::spinbox::Spin", app.budgetSpin, 1)
+        assert app.budgetVar.get() == peak - 1
+
     def testColumnsMergeIntoRuns(self, app: MidiEditorApp) -> None:
         """Identical neighbouring columns become one run covering them all."""
         runs = app._demandColumns(app.demandCanvas.winfo_width())
