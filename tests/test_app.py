@@ -34,6 +34,7 @@ from montyroll.app import (
     ELLIPSIS,
     KEYS_W,
     LANE_GAP,
+    LANE_PAD,
     MAX_EVENT_ROWS,
     NO_POOL,
     NOTE_HOVER_MIX,
@@ -1139,6 +1140,11 @@ class TestBudget:
         switch = next(w for w in roll.grid_slaves(row=3) if isinstance(w, ttk.Frame))
         assert int(str(switch.cget("padding")[0])) == app.keysW + app.laneGap
         assert app.laneGap == round(app.winfo_fpixels(LANE_GAP))
+
+        # The lit lane stands clear of the rule under it by the lanes' padding.
+        lane = switch.winfo_children()[0]
+        pad = round(app.winfo_fpixels(LANE_PAD))
+        assert app.laneRule.winfo_rooty() - (lane.winfo_rooty() + lane.winfo_height()) >= pad
 
         # The heading has its padding either side within the column, which
         # is never narrower than the keyboard needs.

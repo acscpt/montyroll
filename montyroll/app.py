@@ -44,6 +44,7 @@ DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
 LANES = ("Demand", "Velocity", "Weight")   # what the strip under the roll can show
 LANE_GAP = "4p"      # space between the strip gutter's rule and the first lane
+LANE_PAD = "3p"      # space above the lanes and below them, clear of the rule
 CORNER_PAD = "3p"    # space either side of the strip gutter's Voices heading
 CORNER_FONT_PT = 8   # the Voices heading, the size of the lane switch's text
 BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
@@ -844,14 +845,17 @@ class MidiEditorApp(tk.Tk):
         self.ruler = tk.Canvas(roll, height=self.rulerRows[-1], bg=theme.ROLL["ruler"],
                                highlightthickness=0)
         self.ruler.grid(row=0, column=1, sticky="ew")
+
         # The left column, under the keyboard and the strip's gutter, is as
         # wide as the keys need or, at a large font, as the Voices heading
-        # needs with its padding. The paddings are in points, so they grow
-        # with the display's scaling as the text does.
+        # needs with its padding. That padding, the gap before the lanes and
+        # the space above and below them are in points, so they grow with
+        # the display's scaling as the text does.
         pad = round(self.winfo_fpixels(CORNER_PAD))
         heading = tkfont.Font(self, family=self.uiFamily, size=CORNER_FONT_PT)
         self.keysW = max(KEYS_W, heading.measure("Voices") + 2 * pad + 1)
         self.laneGap = round(self.winfo_fpixels(LANE_GAP))
+        lanePad = round(self.winfo_fpixels(LANE_PAD))
         self.keys = tk.Canvas(roll, width=self.keysW, bg=theme.ROLL["roll"],
                               highlightthickness=0)
         self.keys.grid(row=1, column=0, sticky="ns")
@@ -885,7 +889,7 @@ class MidiEditorApp(tk.Tk):
         # cost is the window width and not the length of the piece. The
         # gutter beside it holds the voice budget.
         gutter = ttk.Frame(roll, width=self.keysW, style="Lane.TFrame")
-        switch = ttk.Frame(roll, padding=(self.keysW + self.laneGap, 3, 0, 3),
+        switch = ttk.Frame(roll, padding=(self.keysW + self.laneGap, lanePad, 0, lanePad + 1),
                            style="Lane.TFrame")
         switch.grid(row=3, column=0, columnspan=2, sticky="ew")
 
