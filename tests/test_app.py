@@ -21,7 +21,6 @@ import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
 from montyroll import analysis, gm, model, player, reduce, smf, theme
-from montyroll import app as appModule
 from montyroll.app import (
     CHANNEL_COLORS,
     DEMAND_MAX_H,
@@ -152,28 +151,50 @@ class TestStartup:
 
 
 class TestTheme:
-    """The window's theme, with and without the sv-ttk package."""
+    """The window's flat look: the theme, the painted elements and the rows."""
 
-    @pytest.mark.skipif(appModule.sv_ttk is None, reason="sv-ttk is not installed")
-    def testSunValleyWhenInstalled(self, app: MidiEditorApp) -> None:
-        """With sv-ttk the ttk theme is Sun Valley dark and the palette is its own."""
-        assert app.tk.call("ttk::style", "theme", "use") == "sun-valley-dark"
-        assert app.palette is theme.SUN_VALLEY
+    def testFlatClam(self, app: MidiEditorApp) -> None:
+        """The ttk theme is clam with its bevels in the background colour."""
+        style = ttk.Style(app)
+        assert style.theme_use() == "clam"
+        assert app.palette is theme.PALETTE
+        assert app.cget("background") == theme.PALETTE["window"]
+        assert style.lookup("TButton", "lightcolor") == theme.PALETTE["raised"]
+        assert style.lookup("TButton", "darkcolor") == theme.PALETTE["raised"]
 
-    def testClamWithoutSunValley(self, songPath: Path,
-                                 monkeypatch: pytest.MonkeyPatch) -> None:
-        """Without sv-ttk the window falls back to clam with the dark palette."""
-        monkeypatch.setattr(player, "findPlayer", lambda: None)
-        monkeypatch.setattr(appModule, "sv_ttk", None)
-        window = MidiEditorApp(str(songPath))
-        window.update()
+    def testSwitchIsPainted(self, app: MidiEditorApp) -> None:
+        """The Reduce switch draws its indicator from the painted images."""
+        style = ttk.Style(app)
+        assert "Switch.indicator" in style.element_names()
+        assert "Switch.indicator" in str(style.layout("Switch.TCheckbutton"))
+        assert app.paintedImages["switchOn"].width() == 40
 
-        try:
-            assert window.tk.call("ttk::style", "theme", "use") == "clam"
-            assert window.palette is theme.CLAM_DARK
-            assert window.cget("background") == theme.CLAM_DARK["window"]
-        finally:
-            window.destroy()
+    def testSlidersArePainted(self, app: MidiEditorApp) -> None:
+        """The toolbar sliders and the row sliders have painted knobs and troughs."""
+        names = set(ttk.Style(app).element_names())
+        assert {"Horizontal.Scale.slider", "Horizontal.Scale.trough",
+                "Row.Horizontal.Scale.slider", "Row.Horizontal.Scale.trough"} <= names
+
+    def testRowHeaderTakesTheChannelColour(self, app: MidiEditorApp) -> None:
+        """A row's header bar is its channel colour with dark text, active or not."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+
+        for ch in (first, second):
+            label = app.nameLabels[ch]
+            assert label.cget("background") == CHANNEL_COLORS[ch]
+            assert label.cget("foreground") == theme.PALETTE["ink"]
+            assert label.master.cget("background") == CHANNEL_COLORS[ch]
+
+    def testRowVolumeSitsOnTheHeader(self, app: MidiEditorApp) -> None:
+        """The row volume slider sits on the channel colour, and moving it writes CC7."""
+        ch = sorted(app.song.channels)[0]
+        scale = next(w for w in app.nameLabels[ch].master.winfo_children()
+                     if isinstance(w, ttk.Scale))
+        style = scale.cget("style")
+        assert ttk.Style(app).lookup(style, "background") == CHANNEL_COLORS[ch]
+        scale.set(33)
+        assert app.song.channels[ch].volume == 33
 
     def testFileDialogPaneIsDark(self, app: MidiEditorApp) -> None:
         """The file dialog's folder pane takes the field colour in place of its white."""
@@ -188,10 +209,11 @@ class TestTheme:
             dialog.destroy()
 
     def testActiveRowTint(self, app: MidiEditorApp) -> None:
-        """The active channel's row takes the palette's tint and the others the panel."""
+        """The active channel's row and detail take the palette's tint and the others the panel."""
         first, second = sorted(app.song.channels)[:2]
         app._setActiveChannel(second)
         assert app.channelRows[second].cget("background") == app.palette["active"]
+        assert app.channelDetails[second].cget("background") == app.palette["active"]
         assert app.channelRows[first].cget("background") == app.palette["panel"]
 
     def testInterfaceFont(self, app: MidiEditorApp) -> None:
@@ -557,17 +579,26 @@ class TestViewport:
         bottom = top + app.canvas.winfo_height()
         assert top <= (127 - middle) * app.rowH <= bottom
 
-    def testNotesHaveALighterEdge(self, app: MidiEditorApp) -> None:
-        """An unselected note's edge is its fill mixed towards white; selection is white."""
+    def testNotesHaveADarkerEdge(self, app: MidiEditorApp) -> None:
+        """An unselected note's edge is its fill mixed towards black; selection is white."""
         note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
         item = app.noteToItem[id(note)]
         fill = app.canvas.itemcget(item, "fill")
-        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#ffffff", 0.3)
+        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#000000", 0.4)
         app.selection = {note}
         app._applySelectionStyle()
         assert app.canvas.itemcget(item, "outline") == "#ffffff"
         app._clearSelection()
-        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#ffffff", 0.3)
+        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#000000", 0.4)
+
+    def testMutedNotesShowOnTheRoll(self, app: MidiEditorApp) -> None:
+        """A muted channel's notes take the muted grey, which differs from the grid."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        app.muteVars[note.channel].set(True)
+        app._channelsChanged()
+        item = app.noteToItem[id(note)]
+        assert app.canvas.itemcget(item, "fill") == theme.ROLL["muted"]
+        assert theme.ROLL["muted"] != theme.ROLL["roll"]
 
     def testMotionUpdatesStatus(self, app: MidiEditorApp) -> None:
         """Moving the pointer reports bar, beat and the note under it."""

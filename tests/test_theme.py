@@ -1,30 +1,78 @@
 # SPDX-FileCopyrightText: 2026 Heisenberg (acscpt)
 # SPDX-License-Identifier: MIT
 
-"""Tests for `theme.py`: the palettes, the colour mixing and the font choice."""
+"""Tests for `theme.py`: the palette, the colour mixing, the font choice and the painter."""
 
 from __future__ import annotations
+
+import base64
+import struct
+import zlib
 
 from montyroll import theme
 
 
-class TestPalettes:
-    """The two palettes describe the same parts of the window."""
+def _decode(data: str) -> tuple[int, int, list[bytes]]:
+    """Read the painter's base64 PNG back into its size and RGBA scanlines.
 
-    def testSameKeys(self) -> None:
-        """Sun Valley and clam name the same colours, so either can stand in."""
-        assert set(theme.SUN_VALLEY) == set(theme.CLAM_DARK)
+    Args:
+        data: the PNG as `theme.png` returns it.
+
+    Returns:
+        tuple[int, int, list[bytes]]: the width, the height, and one row of
+        RGBA bytes per scanline.
+    """
+    raw = base64.b64decode(data)
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+    pos = 8
+    chunks: dict[bytes, bytes] = {}
+
+    while pos < len(raw):
+        length, = struct.unpack(">I", raw[pos:pos + 4])
+        tag = raw[pos + 4:pos + 8]
+        body = raw[pos + 8:pos + 8 + length]
+        crc, = struct.unpack(">I", raw[pos + 8 + length:pos + 12 + length])
+        assert crc == zlib.crc32(tag + body)
+        chunks[tag] = body
+        pos += 12 + length
+
+    width, height = struct.unpack(">II", chunks[b"IHDR"][:8])
+    pixels = zlib.decompress(chunks[b"IDAT"])
+    stride = 1 + 4 * width
+    rows = [pixels[j * stride + 1:(j + 1) * stride] for j in range(height)]
+    decoded = (width, height, rows)
+    return decoded
+
+
+def _alpha(rows: list[bytes], x: int, y: int) -> int:
+    """Read one pixel's alpha.
+
+    Args:
+        rows: RGBA scanlines from `_decode`.
+        x: the column.
+        y: the row.
+
+    Returns:
+        int: the alpha, 0 to 255.
+    """
+    alpha = rows[y][4 * x + 3]
+    return alpha
+
+
+class TestPalettes:
+    """The palette and the roll colours."""
+
+    def testPaletteKeys(self) -> None:
+        """The palette names every colour the window reads from it."""
+        assert set(theme.PALETTE) == {"window", "panel", "raised", "field", "border", "text",
+                                      "muted", "accent", "active", "lcd", "hover", "ink"}
 
     def testColoursAreHex(self) -> None:
         """Every colour is a #rrggbb string."""
-        for palette in (theme.SUN_VALLEY, theme.CLAM_DARK, theme.ROLL):
+        for palette in (theme.PALETTE, theme.ROLL):
             for colour in palette.values():
                 assert len(colour) == 7 and colour[0] == "#"
                 int(colour[1:], 16)
-
-    def testCompactOverrideTargetsSunValley(self) -> None:
-        """The Tcl override changes the Sun Valley dark theme and nothing else."""
-        assert "theme settings sun-valley-dark" in theme.COMPACT_TCL
 
 
 class TestMix:
@@ -59,3 +107,47 @@ class TestPickFont:
     def testNoneInstalled(self) -> None:
         """None when no preferred family is installed."""
         assert theme.pickFont(("Courier",)) is None
+
+
+class TestPainter:
+    """Shapes painted into PNG data."""
+
+    def testSizeAndCrc(self) -> None:
+        """The PNG has the size asked for, and every chunk's CRC checks."""
+        width, height, rows = _decode(theme.png(12, 7, []))
+        assert (width, height, len(rows)) == (12, 7, 7)
+
+    def testCircleIsSolidInsideAndClearOutside(self) -> None:
+        """A circle covers its centre fully, its corners not at all, and blends its edge."""
+        _, _, rows = _decode(theme.png(16, 16, [(theme.circle(8, 7.5, 6.25), "#ffffff")]))
+        assert _alpha(rows, 8, 8) == 255
+        assert _alpha(rows, 0, 0) == 0
+        assert _alpha(rows, 14, 7) == round(0.25 * 255)   # the centre 6.5 px out
+
+    def testColourIsKept(self) -> None:
+        """A solid pixel takes the layer's colour exactly."""
+        _, _, rows = _decode(theme.png(4, 4, [(theme.capsule(0, 4, 2, 4), "#57c8ff")]))
+        assert rows[2][4:8] == bytes((0x57, 0xC8, 0xFF, 255))
+
+    def testOpacity(self) -> None:
+        """A layer's opacity scales the alpha of what it covers."""
+        _, _, rows = _decode(theme.png(4, 4, [(theme.capsule(0, 4, 2, 4), "#000000", 0.35)]))
+        assert _alpha(rows, 2, 2) == round(0.35 * 255)
+
+    def testLaterLayersCover(self) -> None:
+        """A later layer lies over an earlier one."""
+        layers = [(theme.circle(8, 8, 7), "#ff0000"), (theme.circle(8, 8, 3), "#0000ff")]
+        _, _, rows = _decode(theme.png(16, 16, layers))
+        assert rows[7][28:32] == bytes((0, 0, 255, 255))
+        assert rows[7][8:12] == bytes((255, 0, 0, 255))
+
+    def testPaintedImages(self) -> None:
+        """The switch is 40 by 20 in each state, and the images are painted once."""
+        images = theme.paintedImages()
+
+        for name in ("switchOff", "switchOffHover", "switchOffDisabled",
+                     "switchOn", "switchOnHover", "switchOnDisabled"):
+            width, height, _ = _decode(images[name])
+            assert (width, height) == (40, 20)
+
+        assert theme.paintedImages() is images

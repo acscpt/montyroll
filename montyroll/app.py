@@ -30,15 +30,10 @@ from typing import Any
 
 from . import analysis, arrange, export, gm, model, player, reduce, smf, theme
 
-try:
-    import sv_ttk
-except ImportError:              # the theme extra is not installed: ttk clam is used
-    sv_ttk = None
-
 CHANNEL_COLORS = [
-    "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
-    "#29c5ff", "#4b6bff", "#8d4bff", "#c92eff", "#ff2ee0", "#ff2e7c",
-    "#ffb46b", "#96ff96", "#6bd9ff", "#e09bff",
+    "#ff94a6", "#ffa374", "#f8f47c", "#bffb73", "#7ef1a4", "#6ff5e6",
+    "#8bd6ff", "#92a7ff", "#b9a4ff", "#d986ff", "#ff8fe0", "#ff8f9f",
+    "#ffcf8a", "#c8f5a4", "#9be0ff", "#e7b8ff",
 ]
 
 KEYS_W = 52          # piano keyboard gutter width
@@ -144,7 +139,7 @@ class Tooltip:
         x = self.widget.winfo_rootx() + 12
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
         top = self.widget.winfo_toplevel()
-        palette = getattr(top, "palette", theme.CLAM_DARK)
+        palette = getattr(top, "palette", theme.PALETTE)
         family = getattr(top, "uiFamily", "TkDefaultFont")
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
@@ -306,21 +301,15 @@ class MidiEditorApp(tk.Tk):
     def _applyTheme(self):
         """Theme the window before any widget is built.
 
-        With the sv-ttk package installed the ttk widgets take the Sun Valley
-        dark theme at the compact sizes of `theme.COMPACT_TCL`; without it
-        they take the clam theme coloured from `theme.CLAM_DARK`. Either way
-        the option database gives the classic tk widgets the same palette,
-        and the named fonts take the first interface font that is installed.
+        The ttk widgets take the clam theme, styled flat from `theme.PALETTE`
+        by `_styleFlat`, with the painted switch and sliders from
+        `_paintElements`. The option database gives the classic tk widgets
+        the same palette, and the named fonts take the first interface font
+        that is installed.
         """
-        # The ttk theme, and the palette that goes with it.
-        if sv_ttk is not None:
-            sv_ttk.set_theme("dark", root=self)
-            self.tk.eval(theme.COMPACT_TCL)
-            self.palette = theme.SUN_VALLEY
-        else:
-            self.palette = theme.CLAM_DARK
-            self._styleClam()
-
+        self.palette = theme.PALETTE
+        self._styleFlat()
+        self._paintElements()
         p = self.palette
         self.configure(background=p["window"])
 
@@ -334,9 +323,13 @@ class MidiEditorApp(tk.Tk):
                             ("*highlightColor", p["accent"]),
                             ("*insertBackground", p["text"]),
                             ("*selectBackground", p["accent"]),
-                            ("*selectForeground", "#ffffff"),
+                            ("*selectForeground", p["ink"]),
                             ("*disabledForeground", p["muted"])):
             self.option_add(name, value)
+
+        # The combobox drop-down is a classic listbox inside the ttk widget.
+        self.option_add("*TCombobox*Listbox.background", p["field"])
+        self.option_add("*TCombobox*Listbox.foreground", p["text"])
 
         # Tk's file dialog on X11 draws its folder pane on a canvas with a
         # white background of its own, and its text takes the light colour
@@ -345,71 +338,140 @@ class MidiEditorApp(tk.Tk):
         self.tk.eval("bind Canvas <Map> {+if {[string match .__tk_filedialog.* %W]} "
                      f"{{%W configure -background {p['field']}}}}}")
 
-        # The named fonts, and Sun Valley's own, take the interface family.
-        # Widgets given a size of their own use the same family by name.
+        # The named fonts take the interface family. Widgets given a size of
+        # their own use the same family by name.
         family = theme.pickFont(tkfont.families(self))
         self.uiFamily = family or tkfont.nametofont("TkDefaultFont").actual("family")
 
         if family is not None:
-            names = ["TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
-                     "TkCaptionFont", "TkTooltipFont"]
-
-            if sv_ttk is not None:
-                names += theme.SUN_VALLEY_FONTS
-
-            for name in names:
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                         "TkCaptionFont", "TkTooltipFont"):
                 size = theme.UI_CAPTION_PT if "Caption" in name else theme.UI_FONT_PT
                 tkfont.nametofont(name, root=self).configure(family=family, size=size)
 
-    def _styleClam(self):
-        """Colour the ttk clam theme from the palette, for when sv-ttk is absent."""
+    def _styleFlat(self):
+        """Style the ttk clam theme flat from the palette.
+
+        clam draws its bevels in `lightcolor` and `darkcolor`, so giving both
+        a widget's own background flattens it, and `bordercolor` becomes the
+        etched line between the parts of the window. Buttons are a raised
+        grey, lighter under the pointer; the accent button and the toggles
+        that are on take the accent with dark text.
+        """
         p = self.palette
         s = ttk.Style(self)
         s.theme_use("clam")
+        lit = theme.mix(p["accent"], "#ffffff", 0.2)
+
+        def flat(colour: str) -> dict[str, str]:
+            """Give a fill and both bevel colours as one colour."""
+            options = {"background": colour, "lightcolor": colour, "darkcolor": colour}
+            return options
+
+        def flatMap(*spec: tuple) -> dict[str, Any]:
+            """Map a fill and both bevel colours by state alike."""
+            options = {"background": list(spec), "lightcolor": list(spec),
+                       "darkcolor": list(spec)}
+            return options
 
         # Every ttk widget inherits from "."; the styles after it adjust it.
-        s.configure(".", background=p["panel"], foreground=p["text"],
-                    fieldbackground=p["field"], bordercolor=p["border"],
-                    lightcolor=p["raised"], darkcolor=p["panel"], troughcolor=p["window"],
+        s.configure(".", foreground=p["text"], fieldbackground=p["field"],
+                    bordercolor=p["border"], troughcolor=p["window"],
                     focuscolor=p["accent"], selectbackground=p["accent"],
-                    selectforeground="#ffffff", insertcolor=p["text"], arrowcolor=p["text"])
+                    selectforeground=p["ink"], insertcolor=p["text"], arrowcolor=p["muted"],
+                    **flat(p["panel"]))
         s.map(".", foreground=[("disabled", p["muted"])],
               background=[("disabled", p["panel"])])
-        s.configure("TButton", background=p["raised"], padding=(8, 2), borderwidth=1,
-                    width=-6)
-        s.map("TButton", background=[("pressed", p["active"]), ("active", p["border"])])
-        s.configure("Accent.TButton", background=p["accent"], foreground="#ffffff")
-        s.map("Toggle.TButton", background=[("selected", p["accent"]), ("active", p["border"])],
-              foreground=[("selected", "#ffffff")])
-        s.map("Accent.TButton", background=[("pressed", p["active"]),
-                                            ("active", theme.mix(p["accent"], "#ffffff", 0.2))])
-        s.configure("TNotebook", background=p["panel"], borderwidth=0)
-        s.configure("TNotebook.Tab", background=p["window"], foreground=p["muted"],
-                    padding=(12, 4))
-        s.map("TNotebook.Tab", background=[("selected", p["raised"])],
-              foreground=[("selected", p["text"])])
+
+        # Buttons, the accent button, the toggles and the tool buttons.
+        s.configure("TButton", padding=(8, 2), width=-6, relief="flat", **flat(p["raised"]))
+        s.map("TButton", **flatMap(("pressed", p["active"]), ("active", p["hover"])))
+        s.configure("Accent.TButton", foreground=p["ink"], **flat(p["accent"]))
+        s.map("Accent.TButton", **flatMap(("active", lit)))
+        s.map("Toggle.TButton", foreground=[("selected", p["ink"])],
+              **flatMap(("selected", "active", lit), ("selected", p["accent"]),
+                        ("active", p["hover"])))
+        s.configure("Toolbutton", **flat(p["panel"]))
+        s.map("Toolbutton", **flatMap(("pressed", p["active"]), ("active", p["hover"])))
+
+        # Fields: flat on the field colour with an etched edge.
+        for style in ("TCombobox", "TSpinbox"):
+            s.configure(style, background=p["raised"], lightcolor=p["field"],
+                        darkcolor=p["field"])
+
+        s.configure("TEntry", **flat(p["field"]))
         s.map("TCombobox", fieldbackground=[("readonly", p["field"])],
               foreground=[("readonly", p["text"])],
               selectbackground=[("readonly", p["field"])],
               selectforeground=[("readonly", p["text"])])
         s.configure("TCheckbutton", indicatorbackground=p["field"],
-                    indicatorforeground="#ffffff")
+                    indicatorforeground=p["ink"], upperbordercolor=p["border"],
+                    lowerbordercolor=p["border"])
         s.map("TCheckbutton", indicatorbackground=[("selected", p["accent"])],
               background=[("active", p["panel"])])
-        s.configure("TLabelframe", background=p["panel"], bordercolor=p["border"])
-        s.configure("TLabelframe.Label", background=p["panel"], foreground=p["muted"])
-        s.configure("Treeview", background=p["field"], fieldbackground=p["field"],
-                    foreground=p["text"], bordercolor=p["border"])
-        s.configure("Treeview.Heading", background=p["raised"], foreground=p["text"],
-                    relief="flat")
-        s.map("Treeview.Heading", background=[("active", p["border"])])
-        s.configure("TScrollbar", background=p["raised"], troughcolor=p["window"],
-                    bordercolor=p["window"], arrowcolor=p["muted"])
-        s.configure("TPanedwindow", background=p["window"])
 
-        # The combobox drop-down is a classic listbox inside the ttk widget.
-        self.option_add("*TCombobox*Listbox.background", p["field"])
-        self.option_add("*TCombobox*Listbox.foreground", p["text"])
+        # Frames, the drawer's tabs, the event list and the scroll bars.
+        s.configure("TLabelframe", **flat(p["panel"]))
+        s.configure("TLabelframe.Label", background=p["panel"], foreground=p["muted"])
+        s.configure("TNotebook", **flat(p["window"]))
+        s.configure("TNotebook.Tab", foreground=p["muted"], padding=(12, 4),
+                    **flat(p["window"]))
+        s.map("TNotebook.Tab", foreground=[("selected", p["accent"])],
+              **flatMap(("selected", p["panel"])))
+        s.configure("Treeview", foreground=p["text"], **flat(p["field"]),
+                    fieldbackground=p["field"])
+        s.configure("Treeview.Heading", foreground=p["text"], relief="flat",
+                    **flat(p["panel"]))
+        s.map("Treeview.Heading", **flatMap(("active", p["hover"])))
+        s.configure("TScrollbar", bordercolor=p["window"], troughcolor=p["window"],
+                    arrowcolor=p["muted"], **flat(p["raised"]))
+        s.map("TScrollbar", **flatMap(("active", p["hover"])))
+
+        # The sashes between the panes are the etched lines, three pixels wide.
+        s.configure("Sash", sashthickness=3, gripcount=0, **flat(p["border"]))
+        s.configure("TPanedwindow", background=p["border"])
+
+    def _paintElements(self):
+        """Make the painted images into the switch and slider elements.
+
+        `Switch.TCheckbutton` draws its indicator from the switch images,
+        by state. Every horizontal `ttk.Scale` takes the painted knob and
+        trough; `Row.Horizontal.TScale` takes the channel rows' smaller
+        knob and translucent trough, and a style per channel derived from
+        it gives the colour the trough sits on.
+        """
+        s = ttk.Style(self)
+        img = {name: tk.PhotoImage(master=self, data=data)
+               for name, data in theme.paintedImages().items()}
+        self.paintedImages = img
+
+        # The switch: a checkbutton whose indicator is the painted pill.
+        s.element_create("Switch.indicator", "image", img["switchOff"],
+                         ("disabled", "selected", img["switchOnDisabled"]),
+                         ("disabled", img["switchOffDisabled"]),
+                         ("active", "selected", img["switchOnHover"]),
+                         ("selected", img["switchOn"]),
+                         ("active", img["switchOffHover"]), width=46, sticky="w")
+        s.layout("Switch.TCheckbutton", [("Checkbutton.padding", {
+            "sticky": "nswe", "children": [
+                ("Switch.indicator", {"side": "left", "sticky": ""}),
+                ("Checkbutton.label", {"side": "left", "sticky": "w"})]})])
+
+        # The sliders: the toolbar's, then the channel rows'. A trough
+        # stretches along its middle and keeps its ends.
+        s.element_create("Horizontal.Scale.slider", "image", img["knob"],
+                         ("pressed", img["knobHover"]), ("active", img["knobHover"]),
+                         sticky="")
+        s.element_create("Horizontal.Scale.trough", "image", img["trough"],
+                         border=(8, 0), padding=0, sticky="ew")
+        s.element_create("Row.Horizontal.Scale.slider", "image", img["rowKnob"],
+                         ("pressed", img["rowKnobHover"]), ("active", img["rowKnobHover"]),
+                         sticky="")
+        s.element_create("Row.Horizontal.Scale.trough", "image", img["rowTrough"],
+                         border=(6, 0), padding=0, sticky="ew")
+        s.layout("Row.Horizontal.TScale", [("Row.Horizontal.Scale.trough", {
+            "sticky": "nswe", "children": [
+                ("Row.Horizontal.Scale.slider", {"side": "left", "sticky": ""})]})])
 
     # ------------------------------------------------------------------ UI
     def _buildMenu(self):
@@ -1136,35 +1198,39 @@ class MidiEditorApp(tk.Tk):
         figures = analysis.channelDemand(self._ensureSongDemand())
         self.channelFigures = figures
         p = self.palette
+        s = ttk.Style(self)
+        s.configure("Row.Toggle.TButton", padding=(4, 0), width=2,
+                    font=(self.uiFamily, 9, "bold"))
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
-            row = tk.Frame(self.chanHolder, padx=6, pady=3)
+            colour = CHANNEL_COLORS[ch]
+            row = tk.Frame(self.chanHolder, padx=4, pady=3, highlightthickness=1,
+                           highlightbackground=p["border"], highlightcolor=p["border"])
             row.pack(fill="x", padx=2, pady=1)
 
-            # The one-line row: swatch, number and instrument on the left;
-            # volume, solo and mute packed from the right.
-            top = tk.Frame(row)
+            # The one-line row is a header bar in the channel's colour: the
+            # number and instrument in dark text on the left; volume, solo
+            # and mute packed from the right.
+            top = tk.Frame(row, bg=colour)
             top.pack(fill="x")
-            sw = tk.Canvas(top, width=10, height=16, highlightthickness=0)
-            sw.create_rectangle(0, 0, 10, 16, fill=CHANNEL_COLORS[ch], outline="")
-            sw.pack(side="left")
-            tk.Label(top, text=f"Ch {ch + 1}", anchor="w",
+            tk.Label(top, text=f"Ch {ch + 1}", anchor="w", bg=colour, fg=p["ink"],
                      font=(self.uiFamily, 10, "bold")).pack(side="left", padx=(6, 4))
-            name = tk.Label(top, text=info.instrument, anchor="w", font=(self.uiFamily, 10))
+            name = tk.Label(top, text=info.instrument, anchor="w", bg=colour, fg=p["ink"],
+                            font=(self.uiFamily, 10))
             name.pack(side="left", fill="x", expand=True)
             self.nameLabels[ch] = name
 
             # Volume slider starts at the file's CC7 value, or 100 when the
-            # channel has none. set() fires the command once during
-            # construction; _volumeChanged treats that no-op as a no-op.
-            vol = tk.Scale(top, from_=0, to=127, orient="horizontal", showvalue=0,
-                           length=56, width=7, sliderlength=12, bd=0, highlightthickness=0,
-                           bg=_shade(CHANNEL_COLORS[ch], 0.8),
-                           activebackground=CHANNEL_COLORS[ch], troughcolor=p["field"],
-                           command=lambda v, c=ch: self._volumeChanged(c, v))
+            # channel has none. Its style puts the trough on the header
+            # colour. set() fires the command once during construction;
+            # _volumeChanged treats that no-op as a no-op.
+            style = f"Ch{ch}.Row.Horizontal.TScale"
+            s.configure(style, background=colour)
+            vol = ttk.Scale(top, from_=0, to=127, orient="horizontal", length=56, style=style,
+                            command=lambda v, c=ch: self._volumeChanged(c, v))
             vol.set(info.volume if info.volume >= 0 else 100)
-            vol.pack(side="right", padx=(6, 0))
+            vol.pack(side="right", padx=(6, 4))
             Tooltip(vol, f"Channel {ch + 1} volume (MIDI CC7, 0-127).\n"
                     "Writes a volume event into the file (saved on\n"
                     "Ctrl+S). Applies live while playing.")
@@ -1179,11 +1245,9 @@ class MidiEditorApp(tk.Tk):
                      "soloed,\nonly soloed channels play (solo overrides mute)"),
                     ("M", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
                      "playback\nand dim its notes in the piano roll")):
-                b = tk.Checkbutton(top, text=text, variable=var, indicatoron=False, width=2,
-                                   bd=0, relief="flat", offrelief="flat", bg=p["raised"],
-                                   selectcolor=p["accent"], font=(self.uiFamily, 9, "bold"),
-                                   command=self._channelsChanged)
-                b.pack(side="right", padx=(3, 0))
+                b = ttk.Checkbutton(top, text=text, variable=var, style="Row.Toggle.TButton",
+                                    command=self._channelsChanged)
+                b.pack(side="right", padx=(2, 0))
                 Tooltip(b, tip)
 
             # The detail, shown under the active row: summary, figures, and
@@ -1274,13 +1338,13 @@ class MidiEditorApp(tk.Tk):
 
     @staticmethod
     def _rowSurfaces(row: tk.Frame) -> list[tk.Misc]:
-        """List a row's frames, labels and swatch: the parts a click or a tint applies to.
+        """List a row's frames and labels: the parts a click or a tint applies to.
 
         Args:
-            row: a channel row.
+            row: a channel row, or the detail under one.
 
         Returns:
-            list[tk.Misc]: the row and every frame, label and canvas inside it.
+            list[tk.Misc]: the frame and every frame, label and canvas inside it.
         """
         surfaces: list[tk.Misc] = []
         stack: list[tk.Misc] = [row]
@@ -1463,19 +1527,26 @@ class MidiEditorApp(tk.Tk):
         self._setStatus(f"Active channel: {ch + 1} - double-click the roll to add notes")
 
     def _highlightActiveRow(self):
-        """Tint the active channel's row and show its detail; reset every other row."""
+        """Tint the active channel's row and show its detail; reset every other row.
+
+        The header bar keeps its channel colour; the row around it and the
+        detail take the tint.
+        """
         for ch, row in self.channelRows.items():
             active = ch == self.activeChannel
             colour = self.palette["active"] if active else self.palette["panel"]
-
-            for w in self._rowSurfaces(row):
-                w.configure(bg=colour)
-
+            row.configure(bg=colour)
             detail = self.channelDetails.get(ch)
 
-            if detail is not None and active:
+            if detail is None:
+                continue
+
+            for w in self._rowSurfaces(detail):
+                w.configure(bg=colour)
+
+            if active:
                 detail.pack(fill="x")
-            elif detail is not None:
+            else:
                 detail.pack_forget()
 
     def _programChanged(self, ch: int, var: tk.StringVar):
@@ -1930,13 +2001,13 @@ class MidiEditorApp(tk.Tk):
             base = CHANNEL_COLORS[note.channel]
 
             if note.channel not in audible:
-                fill, outline = "#3a3a40", "#2c2c31"
+                fill, outline = theme.ROLL["muted"], theme.ROLL["mutedEdge"]
             elif weights is not None:
                 fill = _shade(base, 0.3 + 0.7 * weights[id(note)] / heaviest)
-                outline = theme.mix(fill, "#ffffff", 0.3)
+                outline = theme.mix(fill, "#000000", 0.4)
             else:
                 fill = _shade(base, 0.65 + 0.35 * note.velocity / 127)
-                outline = theme.mix(fill, "#ffffff", 0.3)
+                outline = theme.mix(fill, "#000000", 0.4)
 
             # With the reduction on, a note is drawn as the segments that
             # sound, over a stippled ghost of its original extent wherever
@@ -2494,13 +2565,14 @@ class MidiEditorApp(tk.Tk):
         visible.sort(key=lambda n: (id(n) in dropped, value(n)))
         scale = (height - 8) / top
         base = height - 2
+        muted = theme.ROLL["muted"]
         self.laneBars = []
 
         for note in visible:
             xa = note.start * self.ppt - x0
             xb = xa + 4
             y = base - value(note) * scale
-            colour = CHANNEL_COLORS[note.channel] if note.channel in audible else "#4a4a50"
+            colour = CHANNEL_COLORS[note.channel] if note.channel in audible else muted
 
             if id(note) in dropped:
                 c.create_rectangle(xa, y, xb, base, outline=colour, fill="")
