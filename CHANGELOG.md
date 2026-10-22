@@ -24,19 +24,21 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **The file summary on a line of its own.** The summary moved from the end of the toolbar to a header line under it, so it shows in full on a narrow window.
 
-- **The Reduce panel.** The reduction is a switch, and the transforms and the weight shading are toggle buttons: **Unisons**, **Octaves**, **Top line** and **Shade**.
+- **The Reduce panel.** The reduction is a switch, with **Shade**, the roll's shading by weight, beside it. Under the pools table, a display in the strip's dark shows the selected pool: its name on a blue tag, then **Tier**, **Sound** and **Overlap**, the transforms as toggles, and the three gaps as values that drag, step and take typing, reading `off` or `all` at 0.
 
 - **The roll.** A file opens scrolled to the middle of its pitches, notes have an edge a little darker than their fill, and the playback cursor is drawn in the accent colour. The bar under the pointer is lit faintly through the ruler and the roll, the beat within it a step more, and the slot a double click would fill a step more again, as is the note under the pointer.
 
 - **The voice budget.** The budget beside the strip is a number between two slim arrows, in place of a spinbox. The arrows and the mouse wheel step it, a drag up or down changes it, and a double click opens it for typing. Every budget line on the strip can be dragged as well. The reduction is worked out again once the budget stops changing, so stepping through budgets stays quick on a large file.
 
-- **The pools table.** The Reduce panel shows every pool on a line of its own, with its tier, its voices in a value box that drags, steps and takes typing, its peak, amber while it is above its voices, and its channel count, in place of the pool box and its Voices spinbox. A click selects the pool for the controls below it, and a double click on the name renames it. A pool takes no more voices than its tier has left.
+- **The pools table.** The Reduce panel shows every pool on a line of its own, with its tier, its voices in a value box that drags, steps and takes typing, its peak, amber while it is above its voices, and its channel count, in place of the pool box and its Voices spinbox. A click selects the pool for the display below it, and a double click on the name renames it. A pool takes no more voices than its tier has left.
 
 - **Budget lines.** The lines on the strip are solid and two pixels wide over a dark edge, with their labels on tags, so they read across the stack. Each one moves a pool when dragged, a tier's line the selected pool on that tier, and it turns blue with the pool's name on its tag while it is under the pointer or dragged.
 
 ### Fixed
 
 - **Raising the budget with the reduction on.** While **Reduce to the voice budget** was on, the budget beside the strip could be lowered but not raised, as its limit followed the reduced demand, which the budget itself caps. The limit is now the peak of the file as written.
+
+- **The Sound box offers the pool's own chip.** The box listed the sounds of every chip of the target, so a YM2151 pool was offered PSG waveforms, which its export ignored. It now lists only the sounds of the chip that the pool's tier names, and `Chip` carries those names as `sounds`.
 
 ## [0.3.0] - 2026-10-20
 

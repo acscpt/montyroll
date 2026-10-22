@@ -24,7 +24,7 @@ import time
 import tkinter as tk
 from bisect import bisect_right
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from typing import Any
@@ -51,6 +51,7 @@ CORNER_FONT_PT = 8   # the Voices heading, the size of the lane switch's text
 BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
 BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
+GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
 NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
 HOVER_LEVELS = ("bar", "beat", "cell")   # the lit areas under the pointer, outermost first
 BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
@@ -116,6 +117,17 @@ def _elide(text: str, font: tkfont.Font, width: int) -> str:
 
     elided = cut.rstrip() + ELLIPSIS
     return elided
+
+
+@dataclass(eq=False)
+class GapReadout:
+    """A pool's gap on the Reduce panel's display: its value's label, variable and range."""
+
+    label: tk.Label
+    var: tk.IntVar
+    limit: int          # the largest value
+    step: int           # what a drag step, a wheel turn or an arrow key moves it by
+    zero: str           # shown for 0, which turns the gap off
 
 
 class Tooltip:
@@ -321,6 +333,8 @@ class MidiEditorApp(tk.Tk):
         self._settleAfter: str | None = None  # a pending recompute of the reduction
         self._lineDrag: tuple[reduce.Pool, int, int] | None = None   # (pool, voices, level)
         self._poolDrag: tuple[reduce.Pool, int, int] | None = None   # (pool, pointer y, voices)
+        self.gapReadouts: list[GapReadout] = []   # the display's Tremolo, Legato and Chord
+        self._gapDrag: tuple[GapReadout, int, int] | None = None   # (gap, pointer y, value)
         self._poolEditor: ttk.Entry | None = None
         self._poolTableKey: tuple = ()        # the pools the table was built for
         self.poolRows: dict[int, dict[str, Any]] = {}   # id(pool) -> its line's widgets
@@ -525,6 +539,20 @@ class MidiEditorApp(tk.Tk):
               **flatMap(("selected", "active", lit), ("selected", p["accent"]),
                         ("active", theme.mix(dark, p["accent"], 0.15))))
 
+        # The Reduce panel's display shares the strip's dark: labels in the
+        # text colour over cyan values, a readout in amber, and drop-downs
+        # drawn as cyan text, with the arrow `_paintElements` gives them.
+        # Each map matches every state, as the parent styles map theirs.
+        s.configure("Lcd.TFrame", background=dark)
+        s.configure("Lcd.TLabel", background=dark, foreground=p["text"],
+                    font=(self.uiFamily, 8))
+        s.configure("Readout.Lcd.TLabel", foreground=p["warn"], font=(self.uiFamily, 9))
+        s.configure("Lcd.TCombobox", padding=0)
+        s.map("Lcd.TCombobox", fieldbackground=[("", dark)], background=[("", dark)],
+              foreground=[("disabled", p["muted"]), ("", p["accent"])],
+              selectbackground=[("", dark)], selectforeground=[("", p["accent"])],
+              lightcolor=[("", dark)], darkcolor=[("", dark)], bordercolor=[("", dark)])
+
     def _paintElements(self):
         """Make the painted images into the switch and slider elements.
 
@@ -534,7 +562,7 @@ class MidiEditorApp(tk.Tk):
         knob and translucent trough, and a style per channel derived from
         it gives the colour the trough sits on. `Mute.Row.TCheckbutton` and
         `Solo.Row.TCheckbutton` are the rows' icons, given the colour the
-        same way.
+        same way. `Lcd.TCombobox` opens from the pools table's down arrow.
         """
         s = ttk.Style(self)
         img = {name: tk.PhotoImage(master=self, data=data)
@@ -581,6 +609,16 @@ class MidiEditorApp(tk.Tk):
                              ("active", img[f"{name}OffHover"]), sticky="")
             s.layout(f"{key}.Row.TCheckbutton", [("Checkbutton.padding", {
                 "sticky": "nswe", "children": [(f"{key}.indicator", {"sticky": ""})]})])
+
+        # The display's drop-downs: the text, then the pools table's down
+        # arrow, filled while pressed.
+        s.element_create("Lcd.Combobox.downarrow", "image", img["poolDown"],
+                         ("pressed", img["poolDownPressed"]), sticky="", padding=(4, 0, 0, 0))
+        s.layout("Lcd.TCombobox", [
+            ("Lcd.Combobox.downarrow", {"side": "right", "sticky": "ns"}),
+            ("Combobox.field", {"sticky": "nswe", "children": [
+                ("Combobox.padding", {"sticky": "nswe", "children": [
+                    ("Combobox.textarea", {"sticky": "nswe"})]})]})])
 
     # ------------------------------------------------------------------ UI
     def _buildMenu(self):
@@ -3244,10 +3282,10 @@ class MidiEditorApp(tk.Tk):
         """Create the reduction controls under the channel strip.
 
         Top to bottom: the title bar; the switch that turns the reduction
-        on and the result label; the pool the panel edits, with its add, remove and
-        tiers buttons; the pool's voices, tier and sound; how much its
-        channels overlap; the transforms as toggle buttons; and the three
-        gaps.
+        on, with the roll's shading beside it, and the result label; the
+        pools table, with its add, remove and tiers buttons; then a display
+        of the selected pool, its name on a tag over its tier, sound and
+        overlap, its transforms as lane toggles, and its three gaps.
 
         Args:
             parent: the left column frame.
@@ -3260,11 +3298,21 @@ class MidiEditorApp(tk.Tk):
                   font=(self.uiFamily, 10, "bold")).pack(side="left")
         panel = ttk.Frame(box, padding=(8, 4))
         panel.pack(fill="x")
-        cb = ttk.Checkbutton(panel, text="Reduce to the voice budget", variable=self.reduceVar,
+        # The reduction's switch, and beside it the roll's shading by weight,
+        # which colours every note.
+        top = ttk.Frame(panel)
+        top.pack(fill="x")
+        cb = ttk.Checkbutton(top, text="Reduce to the voice budget", variable=self.reduceVar,
                              style="Switch.TCheckbutton", command=self._reductionChanged)
-        cb.pack(anchor="w")
+        cb.pack(side="left")
         Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
                     "Dropped notes are stippled; the file is not changed.")
+        shade = ttk.Checkbutton(top, text="Shade", variable=self.shadeVar, style="Toggle.TButton",
+                                command=self.redraw)
+        shade.pack(side="right")
+        Tooltip(shade, "Shade by weight: colour notes by their reduction weight\n"
+                       "instead of velocity; the brighter a note, the harder\n"
+                       "the reduction tries to keep it")
         self.lossLbl = ttk.Label(panel, text="", font=(self.uiFamily, 9), wraplength=350,
                                  justify="left", foreground=self.palette["muted"])
         self.lossLbl.pack(fill="x", pady=(2, 4))
@@ -3294,73 +3342,228 @@ class MidiEditorApp(tk.Tk):
         self.poolTable = tk.Frame(panel, bg=self.palette["border"])
         self.poolTable.pack(fill="x", pady=(0, 4))
 
-        # The selected pool's tier, then its sound on a line of its own, as
-        # the sound names are long.
-        budget = ttk.Frame(panel)
-        budget.pack(fill="x", pady=(0, 3))
-        ttk.Label(budget, text="Tier", font=(self.uiFamily, 9)).pack(side="left")
-        self.tierCombo = ttk.Combobox(budget, textvariable=self.poolTierVar, state="readonly",
-                                      width=8)
-        self.tierCombo.pack(side="left", padx=(3, 0))
+        # The selected pool's settings on a display in the strip's dark: its
+        # name on a cyan tag, then each setting as a label over its value.
+        p = self.palette
+        display = ttk.Frame(panel, style="Lcd.TFrame", padding=(8, 6))
+        display.pack(fill="x", pady=(2, 0))
+        self.poolHeading = tk.Label(display, text="", bg=p["accent"], fg=p["ink"], padx=6,
+                                    font=(self.uiFamily, 9, "bold"))
+        self.poolHeading.pack(anchor="w")
+        tk.Frame(display, height=1, bg=p["raised"]).pack(fill="x", pady=4)
+
+        # Tier and Sound as drop-downs, and the overlap in amber: how much
+        # the pool's channels play at the same time, low being what makes
+        # sharing its voices work.
+        row = ttk.Frame(display, style="Lcd.TFrame")
+        row.pack(fill="x")
+        self.tierCombo = ttk.Combobox(self._lcdColumn(row, "Tier"), width=5,
+                                      textvariable=self.poolTierVar, state="readonly",
+                                      style="Lcd.TCombobox", font=(self.uiFamily, 9))
+        self.tierCombo.pack(anchor="w")
         self.tierCombo.bind("<<ComboboxSelected>>", lambda e: self._reductionChanged())
         Tooltip(self.tierCombo, "The chip this pool's voices come from")
-        sound = ttk.Frame(panel)
-        sound.pack(fill="x", pady=(0, 3))
-        ttk.Label(sound, text="Sound", font=(self.uiFamily, 9)).pack(side="left")
-        self.soundCombo = ttk.Combobox(sound, textvariable=self.poolSoundVar, state="readonly",
-                                       width=18)
-        self.soundCombo.pack(side="left", padx=(3, 0))
+        self.soundCombo = ttk.Combobox(self._lcdColumn(row, "Sound"), width=14,
+                                       textvariable=self.poolSoundVar, state="readonly",
+                                       style="Lcd.TCombobox", font=(self.uiFamily, 9))
+        self.soundCombo.pack(anchor="w")
         self.soundCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSoundChanged())
-        Tooltip(self.soundCombo, "The sound this pool's voices play on export: a patch\n"
-                                 "or waveform from the target's library, or one chosen\n"
-                                 "for each part from its GM instrument")
-
-        # How much the edited pool's channels play at the same time: low is
-        # what makes sharing its voices work.
-        self.overlapLbl = ttk.Label(panel, text="", font=(self.uiFamily, 9),
-                                    foreground=self.palette["muted"])
-        self.overlapLbl.pack(fill="x")
+        Tooltip(self.soundCombo, "The sound this pool's voices play on export: one from\n"
+                                 "its chip's library, or one chosen for each part from\n"
+                                 "its GM instrument")
+        self.overlapLbl = ttk.Label(self._lcdColumn(row, "Overlap"), text="",
+                                    style="Readout.Lcd.TLabel")
+        self.overlapLbl.pack(anchor="w")
         self.overlapTip = Tooltip(self.overlapLbl, "")
+        tk.Frame(display, height=1, bg=p["raised"]).pack(fill="x", pady=4)
 
-        # Transform switches as toggle buttons, each one a pool setting, and
-        # the weight shading of the roll beside them.
-        switches = ttk.Frame(panel)
-        switches.pack(fill="x", pady=(4, 3))
+        # The transforms as lane toggles, each one a pool setting.
+        switches = ttk.Frame(display, style="Lcd.TFrame")
+        switches.pack(fill="x", pady=(0, 4))
 
-        for text, var, command, tip in (
-                ("Unisons", self.dedupUnisonVar, self._reductionChanged,
+        for text, var, tip in (
+                ("Unisons", self.dedupUnisonVar,
                  "Merge unisons: the same pitch struck together on two\n"
                  "parts costs one voice"),
-                ("Octaves", self.dedupOctaveVar, self._reductionChanged,
+                ("Octaves", self.dedupOctaveVar,
                  "Fold octaves: an octave doubling struck together with\n"
                  "its note is dropped"),
-                ("Top line", self.monoTopVar, self._reductionChanged,
-                 "Each channel keeps only its highest sounding note"),
-                ("Shade", self.shadeVar, self.redraw,
-                 "Shade by weight: colour notes by their reduction weight\n"
-                 "instead of velocity; the brighter a note, the harder\n"
-                 "the reduction tries to keep it")):
-            w = ttk.Checkbutton(switches, text=text, variable=var, style="Toggle.TButton",
-                                command=command)
-            w.pack(side="left", padx=(0, 4))
+                ("Top line", self.monoTopVar,
+                 "Each channel keeps only its highest sounding note")):
+            w = ttk.Checkbutton(switches, text=text, variable=var, style="Lane.Toggle.TButton",
+                                command=self._reductionChanged)
+            w.pack(side="left", padx=(0, 2))
             Tooltip(w, tip)
 
-        gaps = ttk.Frame(panel)
-        gaps.pack(fill="x", pady=(0, 2))
+        # The three gaps as cyan readouts.
+        gaps = ttk.Frame(display, style="Lcd.TFrame")
+        gaps.pack(fill="x")
 
-        for text, var, limit, tip in (
-                ("Tremolo", self.tremoloVar, 480,
-                 "Ticks: a pitch re-struck within this gap continues; 0 is off"),
-                ("Legato", self.legatoVar, 960,
-                 "Ticks: a note reaches the next onset within this gap; 0 is off"),
-                ("Chord", self.maxChordVar, 8,
-                 "Notes kept per chord on a channel, outer voices first; 0 is all")):
-            ttk.Label(gaps, text=text, font=(self.uiFamily, 9)).pack(side="left")
-            sp = ttk.Spinbox(gaps, from_=0, to=limit, width=3, textvariable=var,
-                             command=self._reductionChanged)
-            sp.pack(side="left", padx=(3, 8))
-            sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
-            Tooltip(sp, tip)
+        for text, var, limit, step, zero, tip in (
+                ("Tremolo", self.tremoloVar, 480, GAP_STEP, "off",
+                 "Ticks: a pitch re-struck within this gap continues"),
+                ("Legato", self.legatoVar, 960, GAP_STEP, "off",
+                 "Ticks: a note reaches the next onset within this gap"),
+                ("Chord", self.maxChordVar, 8, 1, "all",
+                 "Notes kept per chord on a channel, outer voices first")):
+            self._buildGap(self._lcdColumn(gaps, text), var, limit, step, zero, tip)
+
+    def _lcdColumn(self, row: ttk.Frame, label: str) -> ttk.Frame:
+        """Add a column to a row of the Reduce panel's display, with its label at the top.
+
+        Args:
+            row: the display's row.
+            label: the setting's name.
+
+        Returns:
+            ttk.Frame: the column, for the value under the label.
+        """
+        column = ttk.Frame(row, style="Lcd.TFrame")
+        column.pack(side="left", anchor="n", padx=(0, 14))
+        ttk.Label(column, text=label, style="Lcd.TLabel").pack(anchor="w")
+        return column
+
+    def _buildGap(self, column: ttk.Frame, var: tk.IntVar, limit: int, step: int, zero: str,
+                  tip: str):
+        """Put a gap's readout in its column, following its variable.
+
+        The readout drags up or down, steps with the wheel and the Up and
+        Down keys, and opens for typing with a double click.
+
+        Args:
+            column: the gap's column on the display.
+            var: the gap's variable, which the panel stores into the pool.
+            limit: the largest value.
+            step: what a drag step, a wheel turn or an arrow key moves it by.
+            zero: the word shown for 0.
+            tip: what the gap does.
+        """
+        label = tk.Label(column, bg=theme.ROLL["strip"], fg=self.palette["accent"],
+                         font=(self.uiFamily, 9), anchor="w", width=4,
+                         cursor="sb_v_double_arrow", takefocus=1)
+        label.pack(anchor="w")
+        gap = GapReadout(label, var, limit, step, zero)
+        var.trace_add("write", lambda *a: self._showGap(gap))
+        self._showGap(gap)
+        self.gapReadouts.append(gap)
+
+        for seq, handler in (
+                ("<ButtonPress>", lambda e: self._onGapPress(e, gap)),
+                ("<B1-Motion>", lambda e: self._onGapDrag(e, gap)),
+                ("<ButtonRelease-1>", self._onGapRelease),
+                ("<Double-Button-1>", lambda e: self._editGap(gap)),
+                ("<Button-4>", lambda e: self._stepGap(gap, 1)),
+                ("<Button-5>", lambda e: self._stepGap(gap, -1)),
+                ("<MouseWheel>", lambda e: self._stepGap(gap, 1 if e.delta > 0 else -1)),
+                ("<Up>", lambda e: self._stepGap(gap, 1)),
+                ("<Down>", lambda e: self._stepGap(gap, -1))):
+            gap.label.bind(seq, handler, add="+")
+
+        Tooltip(label, f"{tip}; {zero} at 0.\n"
+                       "Drag up or down, use the wheel, or double-click to type")
+
+    def _gapValue(self, gap: GapReadout) -> int:
+        """Read a gap's value, 0 while its variable holds no number.
+
+        Args:
+            gap: the gap.
+
+        Returns:
+            int: the value.
+        """
+        try:
+            value = gap.var.get()
+        except tk.TclError:
+            value = 0
+
+        return value
+
+    def _showGap(self, gap: GapReadout):
+        """Show a gap's value on its readout, or its word for 0.
+
+        Args:
+            gap: the gap.
+        """
+        value = self._gapValue(gap)
+        gap.label.configure(text=str(value) if value else gap.zero)
+
+    def _setGap(self, gap: GapReadout, value: int):
+        """Set a gap's value within its range; the readout follows its variable.
+
+        Args:
+            gap: the gap.
+            value: the value asked for.
+        """
+        gap.var.set(max(0, min(gap.limit, value)))
+
+    def _stepGap(self, gap: GapReadout, delta: int):
+        """Step a gap, and recompute the reduction once the steps pause.
+
+        Args:
+            gap: the gap.
+            delta: +1 or -1, in the gap's steps.
+        """
+        self._setGap(gap, self._gapValue(gap) + delta * gap.step)
+        self._settleReduction()
+
+    def _onGapPress(self, event, gap: GapReadout):
+        """Start dragging a gap, filled with the accent, and take the focus.
+
+        Args:
+            event: the press, at `y_root`; only the first button drags.
+            gap: the gap.
+        """
+        if event.num != 1:
+            return
+
+        gap.label.focus_set()
+        gap.label.configure(bg=self.palette["accent"], fg=self.palette["ink"])
+        self._gapDrag = (gap, event.y_root, self._gapValue(gap))
+
+    def _onGapDrag(self, event, gap: GapReadout):
+        """Move a gap with the pointer: up for more.
+
+        Args:
+            event: the motion, at `y_root`.
+            gap: the gap.
+        """
+        drag = self._gapDrag
+
+        if drag is not None and drag[0] is gap:
+            steps = round((drag[1] - event.y_root) / BUDGET_DRAG_PX)
+            self._setGap(gap, drag[2] + steps * gap.step)
+
+    def _onGapRelease(self, _event=None):
+        """End a drag of a gap, recomputing the reduction if it moved.
+
+        Args:
+            _event: the release; unused.
+        """
+        drag, self._gapDrag = self._gapDrag, None
+
+        if drag is None:
+            return
+
+        gap = drag[0]
+        gap.label.configure(bg=theme.ROLL["strip"], fg=self.palette["accent"])
+
+        if self._gapValue(gap) != drag[2]:
+            self._reductionChanged()
+
+    def _editGap(self, gap: GapReadout):
+        """Open a gap for typing.
+
+        Args:
+            gap: the gap.
+        """
+        self._gapDrag = None
+
+        def done(typed: str | None):
+            if typed is not None and typed.isdigit():
+                self._setGap(gap, int(typed))
+                self._reductionChanged()
+
+        self._openPoolEditor(gap.label, str(self._gapValue(gap)), done)
 
     # ------------------------------------------------------------ pools table
     def _refreshPoolTable(self):
@@ -4148,9 +4351,11 @@ class MidiEditorApp(tk.Tk):
 
         if pool is None:
             self.poolVar.set("")
+            self.poolHeading.configure(text="")
             return
 
         self.poolVar.set(pool.name)
+        self.poolHeading.configure(text=pool.name)
         self.poolVoicesVar.set(pool.voices)
         self.poolTierVar.set(pool.tier or NO_TIER)
         self._loadSoundBox(pool)
@@ -4173,8 +4378,9 @@ class MidiEditorApp(tk.Tk):
 
         A card's figure is the share of that channel's playing time during
         which the rest of the edited pool already sounds, so a low figure
-        marks a channel that could share the pool's voices; the panel's line
-        is the worst of the pool's own members.
+        marks a channel that could share the pool's voices; the panel's
+        readout is the worst of the pool's own members, and "-" for a pool
+        of fewer than two.
         """
         self._overlapAfter = None
         pool = self.editPool
@@ -4199,14 +4405,16 @@ class MidiEditorApp(tk.Tk):
         members = [ch for ch in pool.channels if ch in shares]
 
         if len(members) < 2:
-            text = f"{pool.name}: {'one channel' if members else 'no channels'}"
-            self.overlapTip.text = "A pool of one channel has nothing to share"
+            text = "-"
+            self.overlapTip.text = ("A pool of one channel has nothing to share" if members
+                                    else "A pool with no channels has nothing to share")
         else:
             worst = max(shares[ch] for ch in members)
-            text = f"{pool.name}: its channels overlap {worst:.0%} at most"
+            text = f"{worst:.0%}"
             lines = "\n".join(f"ch {ch + 1}: {shares[ch]:.0%}" for ch in members)
-            self.overlapTip.text = ("Share of each channel's playing time during which\n"
-                                    "the rest of the pool already sounds:\n" + lines)
+            self.overlapTip.text = ("The most of a channel's playing time during which\n"
+                                    "the rest of the pool already sounds; the lower,\n"
+                                    "the better its channels share voices:\n" + lines)
 
         self.overlapLbl.config(text=text)
         self._refreshInspector()
@@ -4227,7 +4435,10 @@ class MidiEditorApp(tk.Tk):
         return key
 
     def _loadSoundBox(self, pool: reduce.Pool):
-        """Fill the Sound box with a pool's target's sounds and show its choice.
+        """Fill the Sound box with the sounds of a pool's chip and show its choice.
+
+        A choice the chip has no sound for shows as `BY_INSTRUMENT`, which
+        is what the export plays for it.
 
         Args:
             pool: the edited pool.
@@ -4239,7 +4450,9 @@ class MidiEditorApp(tk.Tk):
             self.poolSoundVar.set(BY_INSTRUMENT)
             return
 
-        names = [BY_INSTRUMENT] + list(export.TARGETS[key].SOUNDS)
+        chip = self.plan.tierOf(pool.tier).chip
+        sounds = next(c.sounds for c in export.TARGETS[key].CHIPS if c.name == chip)
+        names = [BY_INSTRUMENT] + list(sounds)
         chosen = self.planTargets.get(key, {}).get("sounds", {}).get(pool.name, BY_INSTRUMENT)
         self.soundCombo.configure(values=names, state="readonly")
         self.poolSoundVar.set(chosen if chosen in names else BY_INSTRUMENT)

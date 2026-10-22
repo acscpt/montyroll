@@ -82,7 +82,7 @@ The result label under the switch sums up the reduction. Its first line counts t
 
 **Play** now plays the reduction. Switch it off and **Play** plays the original again, so the two can be compared by ear.
 
-When a channel loses notes that matter to the music, click its row and raise **Pri** under it. The notes of that channel then weigh more, and the other channels give way first. The **Weight** lane under the roll shows the effect as bars, and **Shade** at the foot of the Reduce panel colours the notes on the roll by their weight in place of their velocity.
+When a channel loses notes that matter to the music, click its row and raise **Pri** under it. The notes of that channel then weigh more, and the other channels give way first. The **Weight** lane under the roll shows the effect as bars, and **Shade**, beside the switch at the top of the Reduce panel, colours the notes on the roll by their weight in place of their velocity.
 
 Once the reduction sounds right, **File > Save Reduced As...** writes it out as a MIDI file of its own.
 
@@ -90,7 +90,7 @@ Once the reduction sounds right, **File > Save Reduced As...** writes it out as 
 
 A pool is a set of channels that share a number of voices. A new file has one pool, `all`, which holds every channel and the whole budget. Stealing happens inside one pool, so a second pool gives a group of channels voices that the rest of the file cannot take.
 
-1. Click **+** on the Reduce panel. A new pool appears in the pools table with a name such as `pool 2`, selected, so the panel now edits it.
+1. Click **+** on the Reduce panel. A new pool appears in the pools table with a name such as `pool 2`, selected, and its name heads the controls under the table, which now edit it.
 
 2. Double-click the name in the table, type a name for the pool, and press Return.
 
@@ -120,7 +120,7 @@ The strip then draws one budget line for each tier, and the reducer holds each v
 
 ## Smooth or thin a pool
 
-The toggle buttons and the three gaps at the foot of the Reduce panel belong to the pool selected in the pools table. Each one removes demand before any note competes for a voice, at a different cost to the music.
+The toggles and the three gaps on the display under the pools table belong to the pool selected in the table. Each one removes demand before any note competes for a voice, at a different cost to the music. A gap's value changes with a drag up or down, the mouse wheel, or a double click to type, and a value of 0 reads `off`, or `all` on **Chord**.
 
 - **Unisons**, merging unisons, is on in a new pool. Two channels that start the same pitch together then share one voice. With it off, every doubling plays for as long as there are voices free.
 
@@ -168,7 +168,7 @@ A plan can also be opened directly with **File > Load Plan...**, and MontyRoll t
 
 An export writes the reduction as register data for the chips that the tiers name. Each pool plays on the chip of its tier, so every pool needs [a tier](#describe-the-hardware-with-tiers) first.
 
-1. Decide on the sound of each pool with the **Sound** box on the Reduce panel. A sound picked there plays every channel of the pool. With the box left at `(by instrument)`, each channel takes a sound that matches its own instrument.
+1. Decide on the sound of each pool with the **Sound** box on the Reduce panel, which lists the sounds of the chip that the pool's tier names. A sound picked there plays every channel of the pool. With the box left at `(by instrument)`, each channel takes a sound that matches its own instrument.
 
 2. Set the level of the export with **Vol** on the toolbar.
 

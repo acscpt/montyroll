@@ -66,7 +66,7 @@ A pool is a set of channels that share voices, and each pool draws its voices fr
 
 5. Click the `Ch 3` row and set **Pool** under it to `bass`.
 
-The overlap line under **Sound** now reads `bass: one channel`.
+**Overlap** on the display under the table now reads `-`, as the pool has a single channel.
 
 ## Put the keyboards on the YM2151
 

@@ -841,6 +841,9 @@ class TestTarget:
         assert (target.NAME, target.SUFFIX) == ("Commander X16 (ZSM)", ".zsm")
         assert target.FRAME_RATE == 60
         assert [c.name for c in target.CHIPS] == ["opm", "psg"]
+        assert target.CHIPS[0].sounds == ("strings", "flute", "reed", "brass", "bass", "piano")
+        assert target.CHIPS[1].sounds == ("square", "pulse", "saw", "triangle")
+        assert target.SOUNDS == target.CHIPS[0].sounds + target.CHIPS[1].sounds
         assert export.presetTiers(target) == [reduce.Tier("opm", 8, 0, 300.0, "opm"),
                                               reduce.Tier("psg", 16, 4, 0.0, "psg")]
 

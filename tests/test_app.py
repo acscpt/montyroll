@@ -25,6 +25,7 @@ from montyroll.app import (
     BUDGET_DRAG_PX,
     BUDGET_GRAB,
     BUDGET_SETTLE_MS,
+    BY_INSTRUMENT,
     CHANNEL_COLORS,
     CORNER_PAD,
     DEMAND_MAX_H,
@@ -32,6 +33,7 @@ from montyroll.app import (
     DRAWER_CLOSE_GLYPH,
     DRAWER_OPEN_GLYPH,
     ELLIPSIS,
+    GAP_STEP,
     KEYS_W,
     LANE_GAP,
     LANE_PAD,
@@ -114,6 +116,25 @@ def _noteCentre(app: MidiEditorApp, note: model.Note) -> tuple[float, float]:
     x1, y1, x2, y2 = app.canvas.coords(app.noteToItem[id(note)])
     centre = _toWidget(app, (x1 + x2) / 2, (y1 + y2) / 2)
     return centre
+
+
+def _typeIntoEditor(app: MidiEditorApp, text: str) -> None:
+    """Replace the text of the open typing field and press Return in it.
+
+    Tk sends a generated key to the window that has the focus, so the
+    field takes it by force first: on a shared display another window may
+    hold it.
+
+    Args:
+        app: the application, with a field open.
+        text: what to type.
+    """
+    editor = app._poolEditor
+    editor.focus_force()
+    app.update()
+    editor.delete(0, "end")
+    editor.insert(0, text)
+    editor.event_generate("<Return>")
 
 
 class TestStartup:
@@ -1339,8 +1360,10 @@ class TestPoolTable:
         """A click on a line selects its pool: the bar lights and the panel edits it."""
         first, bass = self._twoChips(app)
         row = app.poolRows[id(bass)]
+        assert app.poolHeading.cget("text") == first.name
         app._selectPool(bass)
         assert app.editPool is bass
+        assert app.poolHeading.cget("text") == "bass"
         assert app.poolTierVar.get() == "psg"
         assert str(row["bar"].cget("background")) == theme.PALETTE["accent"]
         assert str(app.poolRows[id(first)]["bar"].cget("background")) != theme.PALETTE["accent"]
@@ -1364,10 +1387,7 @@ class TestPoolTable:
         app._onPoolRelease()
         assert recomputes == [5]
         app._editPoolVoices(bass)
-        app.update()
-        app._poolEditor.delete(0, "end")
-        app._poolEditor.insert(0, "4")
-        app._poolEditor.event_generate("<Return>")
+        _typeIntoEditor(app, "4")
         assert bass.voices == 4 and app._poolEditor is None
 
     def testATierCapsItsPools(self, app: MidiEditorApp) -> None:
@@ -1381,13 +1401,27 @@ class TestPoolTable:
         """A double click on a pool's name opens it for typing; Return renames the pool."""
         _, bass = self._twoChips(app)
         app._editPoolName(bass)
-        app.update()
         assert app.editPool is bass
-        app._poolEditor.delete(0, "end")
-        app._poolEditor.insert(0, "low")
-        app._poolEditor.event_generate("<Return>")
+        _typeIntoEditor(app, "low")
         assert bass.name == "low"
         assert app.poolRows[id(bass)]["name"].cget("text") == "low"
+        assert app.poolHeading.cget("text") == "low"
+
+    def testSoundBoxOffersItsChipsSounds(self, app: MidiEditorApp) -> None:
+        """The Sound box lists the sounds of the selected pool's chip and no other's."""
+        first, bass = self._twoChips(app)
+        assert app.soundCombo.cget("values") == (BY_INSTRUMENT,) + zsm.CHIPS[0].sounds
+        app._selectPool(bass)
+        assert app.soundCombo.cget("values") == (BY_INSTRUMENT,) + zsm.CHIPS[1].sounds
+        app.poolSoundVar.set("saw")
+        app._poolSoundChanged()
+
+        # Moved to the YM2151, the pool shows the instrument's patch, which
+        # is what the export plays for a waveform there.
+        app.poolTierVar.set("opm")
+        app._storePoolControls()
+        assert "saw" not in app.soundCombo.cget("values")
+        assert app.poolSoundVar.get() == BY_INSTRUMENT
 
     def testChipLinesMoveTheirPools(self, app: MidiEditorApp) -> None:
         """Each chip's line moves the selected pool on that chip, or the chip's last pool."""
@@ -1486,6 +1520,43 @@ class TestReduction:
                 pool.maxChord) == (True, True, 8, 120, 3)
         assert app._currentPlan().priorityOf(0) == 2.5
         assert pool.voices == app.budgetVar.get()
+
+    def testGapReadouts(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The gaps show a word at 0, step, drag and take typing, held to their range."""
+        tremolo, legato, chord = app.gapReadouts
+        assert [g.label.cget("text") for g in app.gapReadouts] == ["off", "off", "all"]
+
+        # A step moves a tick gap by GAP_STEP and the chord by one; the
+        # reduction waits for the steps to pause.
+        settles: list[int] = []
+        monkeypatch.setattr(app, "_settleReduction", lambda: settles.append(1))
+        app._stepGap(tremolo, 1)
+        app._stepGap(chord, 1)
+        app._stepGap(chord, -1)
+        app._stepGap(chord, -1)
+        assert (app.tremoloVar.get(), tremolo.label.cget("text")) == (GAP_STEP, str(GAP_STEP))
+        assert (app.maxChordVar.get(), chord.label.cget("text")) == (0, "all")
+        assert len(settles) == 4
+
+        # A drag up moves by a step per BUDGET_DRAG_PX, filled while held,
+        # and recomputes on release.
+        recomputes: list[int] = []
+        original = app._reductionChanged
+        monkeypatch.setattr(app, "_reductionChanged",
+                            lambda: (recomputes.append(app.legatoVar.get()), original()))
+        app._onGapPress(FakeEvent(y=500, num=1), legato)
+        assert str(legato.label.cget("background")) == theme.PALETTE["accent"]
+        app._onGapDrag(FakeEvent(y=500 - 3 * BUDGET_DRAG_PX), legato)
+        app._onGapRelease()
+        assert recomputes == [3 * GAP_STEP]
+        assert str(legato.label.cget("background")) == theme.ROLL["strip"]
+        assert app._currentPlan().pools[0].legatoGap == 3 * GAP_STEP
+
+        # Typing past the range holds to the limit.
+        app._editGap(chord)
+        _typeIntoEditor(app, "99")
+        assert app.maxChordVar.get() == chord.limit
+        assert chord.label.cget("text") == str(chord.limit)
 
     def testPriorityMovesTheLoss(self, app: MidiEditorApp) -> None:
         """Raising a channel's priority keeps more of its notes."""
@@ -1911,7 +1982,8 @@ class TestPlanControls:
         """Cards show their overlap with the edited pool; the panel shows the pool's worst."""
         shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 1, 9])
         worst = max(shares[ch] for ch in (0, 1, 9))
-        assert app.overlapLbl.cget("text") == f"all: its channels overlap {worst:.0%} at most"
+        assert app.overlapLbl.cget("text") == f"{worst:.0%}"
+        assert all(f"ch {ch + 1}: {shares[ch]:.0%}" in app.overlapTip.text for ch in (0, 1, 9))
 
         for ch in (0, 1, 9):
             assert app.usageLabels[ch].cget("text").endswith(f"| overlaps all {shares[ch]:.0%}")
@@ -1922,14 +1994,16 @@ class TestPlanControls:
         app._channelPoolChanged(1)
         shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 9])
         assert app.usageLabels[1].cget("text").endswith(f"| overlaps all {shares[1]:.0%}")
-        assert f"{max(shares[0], shares[9]):.0%}" in app.overlapLbl.cget("text")
+        assert app.overlapLbl.cget("text") == f"{max(shares[0], shares[9]):.0%}"
 
         # An empty new pool, then one channel in it.
         app.addPool()
-        assert app.overlapLbl.cget("text") == "pool 2: no channels"
+        assert app.overlapLbl.cget("text") == "-"
+        assert "no channels" in app.overlapTip.text
         app.poolVars[1].set("pool 2")
         app._channelPoolChanged(1)
-        assert app.overlapLbl.cget("text") == "pool 2: one channel"
+        assert app.overlapLbl.cget("text") == "-"
+        assert "one channel" in app.overlapTip.text
         against = analysis.poolOverlap(app._ensureSongDemand(), [1])
         assert app.usageLabels[0].cget("text").endswith(f"| overlaps pool 2 {against[0]:.0%}")
 

@@ -259,27 +259,30 @@ The **Original** sub-tab reports on the song. The **Reduced** sub-tab reports on
 
 ## Reduce panel
 
-The Reduce panel sits under the channel rows. Its first rows switch the reduction on and report the result. A table of the pools follows, and the controls under it edit the pool selected in the table.
+The Reduce panel sits under the channel rows. Its first rows switch the reduction on, set the shading of the roll, and report the result. A table of the pools follows. Under it, a display shows the pool selected in the table: its name on a blue tag, then each setting of that pool as a label over its value.
 
 | Control | Values | Effect |
 | --- | --- | --- |
 | **Reduce to the voice budget** | on, off | A switch that draws and plays the reduction. |
+| **Shade** | on, off | Colours each note on the roll by its weight in place of its velocity. |
 | Result label | | Shows the notes kept, the notes cut, the tails clipped, and the loss, then the drops by reason. |
 | **+**, **-** | | Add a pool and remove the selected pool. |
 | **Tiers...** | | Opens the tiers dialog. |
 | Pools table | | One line for each pool: its name, its tier, its voices, its peak, and its channel count. A click selects the pool for the controls below, and a double click on the name opens it for renaming. |
 | Voices, in the table | 0 to what the tier has left | The voices that the pool owns. A drag on the number up or down, its arrows, and the mouse wheel change it, and a double click opens it for typing. |
 | Peak, in the table | | The most notes that the pool's channels sound at once in the file, in amber while it is above the pool's voices, when the pool must drop notes. |
+| Name tag | | Names the selected pool at the top of the display. |
 | **Tier** | Tier names, `(none)` | The tier that the selected pool's voices come from. |
-| **Sound** | Sound names, `(by instrument)` | The sound of the pool in an export. |
-| Overlap line | | Shows the highest overlap among the channels of the pool. |
+| **Sound** | The sounds of the pool's chip, `(by instrument)` | The sound of the pool in an export. A pool with no chip has no sounds to choose. |
+| **Overlap** | | The highest overlap among the channels of the pool, in amber. `-` for a pool of fewer than two channels. |
 | **Unisons** | on, off | Merges unisons: drops a note that starts with the same pitch on another channel. On by default. |
 | **Octaves** | on, off | Folds octaves: drops a note that starts with its octave on another channel. |
 | **Top line** | on, off | Keeps the highest sounding note of each channel. |
-| **Shade** | on, off | Colours each note on the roll by its weight in place of its velocity. |
-| **Tremolo** | 0 to 480 ticks | Continues a pitch that is struck again within the gap. 0 is off. |
-| **Legato** | 0 to 960 ticks | Extends a note to the next onset within the gap. 0 is off. |
-| **Chord** | 0 to 8 notes | Keeps that many notes of each chord, the top and the bottom first. 0 keeps every note. |
+| **Tremolo** | 0 to 480 ticks | Continues a pitch that is struck again within the gap. Reads `off` at 0. |
+| **Legato** | 0 to 960 ticks | Extends a note to the next onset within the gap. Reads `off` at 0. |
+| **Chord** | 0 to 8 notes | Keeps that many notes of each chord, the top and the bottom first. Reads `all` at 0, which keeps every note. |
+
+The values of **Tremolo**, **Legato** and **Chord** change as the voices in the table do: a drag up or down, the mouse wheel, the Up and Down keys, or a double click to type. A step is 10 ticks on the two gaps and one note on **Chord**.
 
 ## Reduction order and drop reasons
 
@@ -486,7 +489,7 @@ The target writes a ZSM version 1 file for the YM2151 and the VERA PSG at 60 fra
 | `opm` | YM2151 | 8 | 0 | 300 ms |
 | `psg` | VERA PSG | 16 | 4 | 0 ms |
 
-The **Sound** box offers six YM2151 patches and four PSG waveforms.
+The **Sound** box offers six YM2151 patches to a pool on `opm` and four PSG waveforms to a pool on `psg`.
 
 | Sound | Chip | Definition |
 | --- | --- | --- |
