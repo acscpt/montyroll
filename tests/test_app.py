@@ -11,25 +11,46 @@ nothing blocks and nothing makes a sound.
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Any
 
 import pytest
 
 from conftest import TRACK_NAMES, needsDisplay
-from montyroll import analysis, model, player, reduce, smf
+from montyroll import analysis, gm, model, player, reduce, smf, theme
 from montyroll.app import (
+    BUDGET_DRAG_PX,
+    BUDGET_GRAB,
+    BUDGET_SETTLE_MS,
+    BY_INSTRUMENT,
     CHANNEL_COLORS,
+    CORNER_PAD,
     DEMAND_MAX_H,
     DEMAND_MIN_H,
+    DRAWER_CLOSE_GLYPH,
+    DRAWER_OPEN_GLYPH,
+    ELLIPSIS,
+    GAP_STEP,
+    KEYS_W,
+    LANE_GAP,
+    LANE_PAD,
+    MASTER_MAX,
     MAX_EVENT_ROWS,
+    NO_CHIP,
     NO_POOL,
+    NO_TIER,
+    NOTE_HOVER_MIX,
     PLAY_GLYPH,
+    REDUCE_SWITCH_S,
     STOP_GLYPH,
+    TEMPO_GLYPH,
     X16_TIERS,
     MidiEditorApp,
+    _elide,
     _shade,
 )
 from montyroll.export import zsm, zsmcheck, zsmdecode
@@ -71,26 +92,79 @@ def app(songPath: Path, monkeypatch: pytest.MonkeyPatch) -> MidiEditorApp:
     application.destroy()
 
 
+def _toWidget(app: MidiEditorApp, x: float, y: float) -> tuple[float, float]:
+    """Convert canvas coordinates to the widget coordinates an event carries.
+
+    Args:
+        app: the application.
+        x: canvas x.
+        y: canvas y.
+
+    Returns:
+        tuple[float, float]: (x, y) relative to the visible part of the roll.
+    """
+    position = (x - app.canvas.canvasx(0), y - app.canvas.canvasy(0))
+    return position
+
+
 def _noteCentre(app: MidiEditorApp, note: model.Note) -> tuple[float, float]:
-    """Canvas coordinates at the middle of a note's rectangle.
+    """The point an event would carry at the middle of a note's rectangle.
 
     Args:
         app: the application.
         note: the note.
 
     Returns:
-        tuple[float, float]: (x, y) on the canvas.
+        tuple[float, float]: (x, y) in widget coordinates, allowing for the
+        roll's scroll position.
     """
     x1, y1, x2, y2 = app.canvas.coords(app.noteToItem[id(note)])
-    centre = ((x1 + x2) / 2, (y1 + y2) / 2)
+    centre = _toWidget(app, (x1 + x2) / 2, (y1 + y2) / 2)
     return centre
+
+
+def _settle(app: MidiEditorApp) -> None:
+    """Let a reduction or weights being worked out off the main thread land, and draw them.
+
+    Args:
+        app: the application.
+    """
+    while app._reduceJob is not None:
+        for pending in (app._reducePoll, app._reduceStart):
+            if pending is not None:
+                app.after_cancel(pending)
+
+        app._reducePoll = app._reduceStart = None
+        app._reduceJob.join()
+        app._pollReduceJob()
+
+    app.update()
+
+
+def _typeIntoEditor(app: MidiEditorApp, text: str) -> None:
+    """Replace the text of the open typing field and press Return in it.
+
+    Tk sends a generated key to the window that has the focus, so the
+    field takes it by force first: on a shared display another window may
+    hold it.
+
+    Args:
+        app: the application, with a field open.
+        text: what to type.
+    """
+    editor = app._poolEditor
+    editor.focus_force()
+    app.update()
+    editor.delete(0, "end")
+    editor.insert(0, text)
+    editor.event_generate("<Return>")
 
 
 class TestStartup:
     """The window after opening a file."""
 
     def testNotesAreDrawn(self, app: MidiEditorApp) -> None:
-        """Every note has a canvas item and every item maps back to its note."""
+        """Every note of a song shorter than the drawn span has an item, mapping back to it."""
         assert len(app.noteToItem) == len(app.song.notes)
         assert set(app.itemToNote.values()) == set(app.song.notes)
 
@@ -103,7 +177,7 @@ class TestStartup:
         """The title names the file and the summary counts tracks and notes."""
         assert app.title().startswith("MontyRoll - ")
         summary = app.infoLbl.cget("text")
-        assert f"{len(TRACK_NAMES)} trk" in summary
+        assert f"{len(TRACK_NAMES)} tracks" in summary
         assert f"{len(app.song.notes)} notes" in summary
 
     def testEmptyStart(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,6 +202,287 @@ class TestStartup:
         app.openFile(str(bad))
         assert shown and shown[0][0] == "Open failed"
         assert app.song is before
+
+
+class TestTheme:
+    """The window's flat look: the theme, the painted elements and the rows."""
+
+    def testFlatClam(self, app: MidiEditorApp) -> None:
+        """The ttk theme is clam with its bevels in the background colour."""
+        style = ttk.Style(app)
+        assert style.theme_use() == "clam"
+        assert app.palette is theme.PALETTE
+        assert app.cget("background") == theme.PALETTE["window"]
+        assert style.lookup("TButton", "lightcolor") == theme.PALETTE["raised"]
+        assert style.lookup("TButton", "darkcolor") == theme.PALETTE["raised"]
+
+    def testSwitchIsPainted(self, app: MidiEditorApp) -> None:
+        """The Reduce switch draws its indicator from the painted images."""
+        style = ttk.Style(app)
+        assert "Switch.indicator" in style.element_names()
+        assert "Switch.indicator" in str(style.layout("Switch.TCheckbutton"))
+        assert app.paintedImages["switchOn"].width() == 40
+
+    def testSlidersArePainted(self, app: MidiEditorApp) -> None:
+        """The toolbar sliders and the row sliders have painted knobs and troughs."""
+        names = set(ttk.Style(app).element_names())
+        assert {"Horizontal.Scale.slider", "Horizontal.Scale.trough",
+                "Row.Horizontal.Scale.slider", "Row.Horizontal.Scale.trough"} <= names
+
+    def testMenusAreFlat(self, app: MidiEditorApp) -> None:
+        """The menus have a plain edge and the accent on the active entry; the bar is flat."""
+        bar = app.nametowidget(app.cget("menu"))
+        fileMenu = app.nametowidget(bar.entrycget("File", "menu"))
+        assert str(bar.cget("relief")) == "flat"
+        assert str(fileMenu.cget("relief")) == "solid"
+        assert str(fileMenu.cget("activeborderwidth")) == "0"
+        assert str(fileMenu.cget("activebackground")) == theme.PALETTE["accent"]
+        assert str(fileMenu.cget("activeforeground")) == theme.PALETTE["ink"]
+
+    def testRowsAreOnePixelApart(self, app: MidiEditorApp) -> None:
+        """The channel rows are packed with a one-pixel etched line between them."""
+        app.update_idletasks()
+        rows = [app.channelRows[ch] for ch in sorted(app.song.channels)]
+
+        for upper, lower in zip(rows, rows[1:]):
+            assert lower.winfo_y() - (upper.winfo_y() + upper.winfo_height()) == 1
+
+        assert str(app.chanHolder.cget("style")) == "Etch.TFrame"
+        assert ttk.Style(app).lookup("Etch.TFrame", "background") == theme.PALETTE["border"]
+
+    def testLaneSwitchOnTheDarkStrip(self, app: MidiEditorApp) -> None:
+        """The lanes are accent text on the strip's dark; the lane on view is filled."""
+        style = ttk.Style(app)
+        dark = theme.ROLL["strip"]
+        assert str(app.demandCanvas.cget("background")) == dark
+        assert style.lookup("Lane.Toggle.TButton", "background") == dark
+        assert style.lookup("Lane.Toggle.TButton", "foreground") == theme.PALETTE["accent"]
+        assert (style.lookup("Lane.Toggle.TButton", "background", ["selected"])
+                == theme.PALETTE["accent"])
+        assert (style.lookup("Lane.Toggle.TButton", "foreground", ["selected"])
+                == theme.PALETTE["ink"])
+
+    def testMuteAndSoloIconsFollowTheName(self, app: MidiEditorApp) -> None:
+        """Mute then solo sit right of the name, on the bar's grey in every state."""
+        style = ttk.Style(app)
+        assert {"Mute.indicator", "Solo.indicator"} <= set(style.element_names())
+        app.update_idletasks()
+
+        for ch in sorted(app.song.channels):
+            bar = app.rowBars[ch]
+            icons = sorted((w for w in bar.winfo_children() if isinstance(w, ttk.Checkbutton)),
+                           key=lambda w: w.winfo_x())
+            assert [str(w.cget("style")) for w in icons] == [
+                f"Ch{ch}.Mute.Row.TCheckbutton", f"Ch{ch}.Solo.Row.TCheckbutton"]
+            assert str(icons[0].cget("variable")) == str(app.muteVars[ch])
+            assert icons[0].winfo_x() > app.nameLabels[ch].winfo_x()
+
+            # The icon stays on its bar's grey under the pointer and when on,
+            # not the checkbutton's hover grey.
+            for state in ([], ["active"], ["active", "selected"], ["pressed"]):
+                for icon in icons:
+                    assert (style.lookup(icon.cget("style"), "background", state)
+                            == str(bar.cget("background")))
+
+    def testIconsHaveSeparators(self, app: MidiEditorApp) -> None:
+        """A one-pixel etched line sits just left of each icon."""
+        app.update_idletasks()
+        bar = app.rowBars[sorted(app.song.channels)[0]]
+
+        for icon in (w for w in bar.winfo_children() if isinstance(w, ttk.Checkbutton)):
+            line = next(w for w in bar.winfo_children() if isinstance(w, tk.Frame)
+                        and w.winfo_x() + w.winfo_width() == icon.winfo_x())
+            assert int(line.cget("width")) == 1
+            assert str(line.cget("background")) == theme.PALETTE["border"]
+
+    def testNameGivesWayOnANarrowStrip(self, app: MidiEditorApp) -> None:
+        """Narrowed, a long name ends in an ellipsis and the slider stays clear of it."""
+        ch = next(c for c, name in app.rowNames.items() if len(name) > 12)
+        label = app.nameLabels[ch]
+
+        # Narrow the strip by enough to leave the name about half its width,
+        # measured, so the test holds at any font size.
+        app.update_idletasks()
+        full = app.rowNameFont.measure(app.rowNames[ch])
+        squeeze = label.winfo_width() - full // 2
+        wide = app.paned.sashpos(0)
+        app.paned.sashpos(0, wide - squeeze)
+        app.update()
+        assert label.cget("text").endswith(ELLIPSIS)
+        font = app.rowNameBoldFont if ch == app.activeChannel else app.rowNameFont
+        assert font.measure(label.cget("text")) <= label.winfo_width()
+        controls = [w for w in label.master.winfo_children() if w.winfo_x() > label.winfo_x()]
+        assert label.winfo_x() + label.winfo_width() <= min(w.winfo_x() for w in controls)
+        app.paned.sashpos(0, wide)
+        app.update()
+        assert label.cget("text") == app.rowNames[ch]
+
+    def testElide(self, app: MidiEditorApp) -> None:
+        """Text that fits is kept; text that does not is cut to fit with an ellipsis."""
+        font = app.rowNameFont
+        text = "Acoustic Grand Piano"
+        assert _elide(text, font, font.measure(text)) == text
+        cut = _elide(text, font, font.measure("Acoustic"))
+        assert cut.endswith(ELLIPSIS) and font.measure(cut) <= font.measure("Acoustic")
+        assert _elide(text, font, 1) == ELLIPSIS
+
+    def testPanelTitleBars(self, app: MidiEditorApp) -> None:
+        """Channels, Reduce and the inspector each have a title bar in the title colour."""
+        style = ttk.Style(app)
+        assert style.lookup("Title.TFrame", "background") == theme.PALETTE["title"]
+        titles = []
+        stack: list[tk.Misc] = [app]
+
+        while stack:
+            w = stack.pop()
+            stack.extend(w.winfo_children())
+
+            if isinstance(w, ttk.Label) and str(w.cget("style")) == "Title.TLabel":
+                titles.append(str(w.cget("text")))
+
+        assert {"Channels", "Reduce", "Inspector"} <= set(titles)
+
+    def testRuleUnderTheLanes(self, app: MidiEditorApp) -> None:
+        """A one-pixel rule runs under the lane switch, flush on top of the strip."""
+        app.update_idletasks()
+        rule = app.laneRule
+        assert rule.winfo_height() == 1
+        assert str(rule.cget("background")) == theme.PALETTE["raised"]
+        assert rule.winfo_y() + 1 == app.demandCanvas.winfo_y()
+        assert rule.winfo_width() >= app.demandCanvas.winfo_width()
+
+    def testRowSwatchAndBar(self, app: MidiEditorApp) -> None:
+        """A row opens with its number on a swatch of its colour, on a grey bar."""
+        app.update_idletasks()
+        digits = max(len(str(ch + 1)) for ch in app.song.channels)
+        widths = set()
+
+        for ch in sorted(app.song.channels):
+            swatch = min((w for w in app.rowBars[ch].winfo_children()), key=lambda w: w.winfo_x())
+            assert isinstance(swatch, tk.Label)
+            assert swatch.cget("text") == str(ch + 1)
+            assert swatch.cget("background") == CHANNEL_COLORS[ch]
+            assert swatch.cget("foreground") == theme.PALETTE["ink"]
+            assert int(swatch.cget("width")) == digits
+            assert swatch.winfo_height() == app.rowBars[ch].winfo_height()
+            assert app.nameLabels[ch].cget("foreground") == theme.PALETTE["text"]
+            widths.add(swatch.winfo_width())
+
+        # Every swatch is as wide, so the names line up.
+        assert len(widths) == 1
+
+    def testActiveRowBarIsLitAndBold(self, app: MidiEditorApp) -> None:
+        """The active row's bar takes the tint of its detail and a bold name; the rest are grey."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        style = ttk.Style(app)
+
+        for ch, colour, font in ((second, app.palette["active"], app.rowNameBoldFont),
+                                 (first, app.palette["raised"], app.rowNameFont)):
+            assert app.rowBars[ch].cget("background") == colour
+            assert app.nameLabels[ch].cget("background") == colour
+            assert str(app.nameLabels[ch].cget("font")) == str(font)
+            assert style.lookup(f"Ch{ch}.Mute.Row.TCheckbutton", "background") == colour
+            assert style.lookup(f"Ch{ch}.Row.Horizontal.TScale", "background") == colour
+
+        assert app.channelDetails[second].cget("background") == app.palette["active"]
+
+    def testRowVolumeSitsOnTheBar(self, app: MidiEditorApp) -> None:
+        """The row volume slider sits on the bar's grey, and moving it writes CC7."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        scale = next(w for w in app.rowBars[first].winfo_children() if isinstance(w, ttk.Scale))
+        style = scale.cget("style")
+        assert ttk.Style(app).lookup(style, "background") == app.palette["raised"]
+        scale.set(33)
+        assert app.song.channels[first].volume == 33
+
+    def testFileDialogPaneIsDark(self, app: MidiEditorApp) -> None:
+        """The file dialog's folder pane takes the field colour in place of its white."""
+        dialog = tk.Toplevel(app, name="__tk_filedialog")
+        pane = tk.Canvas(dialog, background="white")
+        pane.pack()
+        app.update()
+
+        try:
+            assert pane.cget("background") == app.palette["field"]
+        finally:
+            dialog.destroy()
+
+    def testActiveRowTint(self, app: MidiEditorApp) -> None:
+        """The active channel's row and detail take the palette's tint and the others the panel."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        assert app.channelRows[second].cget("background") == app.palette["active"]
+        assert app.channelDetails[second].cget("background") == app.palette["active"]
+        assert app.channelRows[first].cget("background") == app.palette["panel"]
+
+    def testInterfaceFont(self, app: MidiEditorApp) -> None:
+        """The named default font uses the interface family the theme chose."""
+        family = tkfont.nametofont("TkDefaultFont", root=app).actual("family")
+        assert family == app.uiFamily
+
+
+class TestInspector:
+    """The inspector: the active channel, the selected note, and the fold."""
+
+    def testShowsTheActiveChannel(self, app: MidiEditorApp) -> None:
+        """The channel card follows the active channel."""
+        ch = sorted(app.song.channels)[1]
+        app._setActiveChannel(ch)
+        info = app.song.channels[ch]
+        assert app.inspTitle.cget("text") == f"Ch {ch + 1}  {info.instrument}"
+        assert app.inspChannelFields["Notes"].cget("text") == f"{info.noteCount:,}"
+        assert app.inspChannelFields["Pool"].cget("text") == app._poolNameOf(ch)
+
+    def testShowsOneSelectedNote(self, app: MidiEditorApp) -> None:
+        """One selected note is described; none or several are counted."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        app.selection = {note}
+        app._applySelectionStyle()
+        assert app.inspPitch.cget("text") == gm.noteName(note.pitch)
+        assert app.inspNoteFields["Velocity"].cget("text") == str(note.velocity)
+        assert app.inspNoteFields["Reduction"].cget("text") == "reduction off"
+        app.selectAll()
+        assert app.inspPitch.cget("text") == f"{len(app.song.notes)} notes selected"
+        app._clearSelection()
+        assert app.inspPitch.cget("text") == "No note selected"
+
+    def testVerdictFollowsTheReduction(self, app: MidiEditorApp) -> None:
+        """With the reduction on, a dropped note shows its reason."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        reduction = app._ensureReduction()
+        dropped = next(n for n in app.song.notes if id(n) in reduction.dropped)
+        app.selection = {dropped}
+        app._applySelectionStyle()
+        assert app.inspNoteFields["Reduction"].cget("text") == reduction.dropped[id(dropped)]
+
+    def testPickerChangesTheActiveChannel(self, app: MidiEditorApp) -> None:
+        """The inspector's instrument picker writes a program change on the active channel."""
+        ch = next(c for c in sorted(app.song.channels) if c != model.DRUM_CHANNEL)
+        app._setActiveChannel(ch)
+        app.inspProgramVar.set(" 40  Violin")
+        app._programChanged(app.activeChannel, app.inspProgramVar)
+        assert app.song.channels[ch].program == 40
+        assert app.inspTitle.cget("text").endswith("Violin")
+
+    def testFoldGivesTheRollTheWidth(self, app: MidiEditorApp) -> None:
+        """Folding shows the strip, hides the cards, and widens the roll; opening reverses it."""
+        app.update()
+        before = app.canvas.winfo_width()
+        app.toggleInspector()
+        app.update()
+        assert app.inspectorFolded
+        assert app.inspectorStrip.winfo_ismapped()
+        assert not app.inspectorBody.winfo_ismapped()
+        assert app.canvas.winfo_width() > before
+        app.toggleInspector()
+        app.update()
+        assert not app.inspectorFolded
+        assert app.inspectorBody.winfo_ismapped()
+        assert app.canvas.winfo_width() == pytest.approx(before, abs=4)
 
 
 class TestSelection:
@@ -225,10 +580,10 @@ class TestEditing:
         start, end = note.start, note.end
         snap = app._snapTicks()
         x1, y1, x2, y2 = app.canvas.coords(app.noteToItem[id(note)])
-        y = (y1 + y2) / 2
-        app.onPress(FakeEvent(x2 - 2, y))
+        x, y = _toWidget(app, x2 - 2, (y1 + y2) / 2)
+        app.onPress(FakeEvent(x, y))
         assert app.drag["mode"] == "resize"
-        app.onDrag(FakeEvent(x2 - 2 + snap * app.ppt, y))
+        app.onDrag(FakeEvent(x + snap * app.ppt, y))
         app.onRelease(FakeEvent())
         assert (note.start, note.end) == (start, end + snap)
         assert app.status.cget("text") == "Resized 1 note"
@@ -239,7 +594,7 @@ class TestEditing:
         app._setActiveChannel(1)
         x = 20 * app.ppt * app.song.mf.division   # bar 5 and a bit
         y = (127 - 100) * app.rowH + 2           # pitch 100, nothing there
-        app.onDouble(FakeEvent(x, y))
+        app.onDouble(FakeEvent(*_toWidget(app, x, y)))
         assert len(app.song.notes) == before + 1
         added = next(iter(app.selection))
         assert added.channel == 1
@@ -286,6 +641,92 @@ class TestEditing:
         assert not app.song.dirty
 
 
+class TestChordCache:
+    """The chord row names again only the beats an edit touched, and stays exact."""
+
+    def _fresh(self, app: MidiEditorApp) -> list[tuple[int, int, str]]:
+        """The chord row as a full pass names it."""
+        beat = app.song.mf.division * 4 // app.song.timeSigs[0][2]
+        runs = analysis.chordTrack(app.song, beat)
+        return runs
+
+    def testEditsKeepTheRowExact(self, app: MidiEditorApp,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """After an add, a drag and a delete, the row matches a full pass, naming few beats."""
+        app._ensureChords()
+        named: list[int] = []
+        original = analysis.chordAt
+        monkeypatch.setattr(analysis, "chordAt",
+                            lambda song, index, t0, t1: (named.append(t0),
+                                                         original(song, index, t0, t1))[1])
+
+        # A note added past the end grows the song, and the new beats are
+        # named too.
+        app._setActiveChannel(0)
+        x = (app.song.maxTick + 960) * app.ppt
+        app.onDouble(FakeEvent(*_toWidget(app, x, (127 - 50) * app.rowH + 2)))
+        rows = app._ensureChords()
+        assert 0 < len(named) <= 4
+        assert rows == self._fresh(app)
+        added = next(iter(app.selection))
+
+        named.clear()
+        x, y = _noteCentre(app, added)
+        app.onPress(FakeEvent(x, y))
+        app.onDrag(FakeEvent(x, y - 3 * app.rowH))
+        app.onRelease(FakeEvent(x, y - 3 * app.rowH))
+        rows = app._ensureChords()
+        assert 0 < len(named) <= 4
+        assert rows == self._fresh(app)
+
+        named.clear()
+        app.deleteSelection()
+        rows = app._ensureChords()
+        assert 0 < len(named) <= 4
+        assert rows == self._fresh(app)
+
+    def _chordLabels(self, app: MidiEditorApp) -> list[str]:
+        """The chord names drawn on the ruler's bottom row."""
+        r3 = app.rulerRows[3]
+        labels = [app.ruler.itemcget(i, "text") for i in app.ruler.find_withtag("scale")
+                  if app.ruler.type(i) == "text" and app.ruler.coords(i)[1] == r3 + 1]
+        return labels
+
+    def testANewFileNamesItsBeatsAfterDrawing(self, app: MidiEditorApp, songPath: Path) -> None:
+        """A file opens with its chord row empty; idle slices name the beats and draw it."""
+        app.openFile(str(songPath))
+        assert app._chordsPending and not self._chordLabels(app)
+        app.update()
+        assert not app._chordsPending
+        assert app._ensureChords() == self._fresh(app)
+        assert self._chordLabels(app)
+
+    def testAnEarlyReaderNamesTheRest(self, app: MidiEditorApp, songPath: Path) -> None:
+        """The chord under the pointer before the slices finish names every beat at once."""
+        app.openFile(str(songPath))
+        assert app._chordAt(0) == "Am"
+        assert not app._chordsPending and app._chordAfter is None
+        app.update()
+        assert self._chordLabels(app)
+
+    def testAnEditWhileNamingKeepsTheRowExact(self, app: MidiEditorApp, songPath: Path) -> None:
+        """A note added while the beats are being named is named in its beat too."""
+        app.openFile(str(songPath))
+        app._nameChordSlice()
+        note = app.song.addNote(0, 50, 100, 0, 960)
+        app._invalidateDemand((note.start, note.end))
+        app.update()
+        assert app._ensureChords() == self._fresh(app)
+
+    def testTempoEditNamesNoBeat(self, app: MidiEditorApp) -> None:
+        """A tempo change moves no note, so every beat keeps its name."""
+        app._ensureChords()
+        names = app.chordNames
+        app._applyTempo(960, 90)
+        app._ensureChords()
+        assert app.chordNames == names
+
+
 class TestChannelStrip:
     """Mute, solo, instrument and volume controls."""
 
@@ -318,6 +759,24 @@ class TestChannelStrip:
         assert programs == {40}
         assert app.song.dirty
         assert "Violin" in app.status.cget("text")
+
+    def testOnlyTheActiveRowShowsItsDetail(self, app: MidiEditorApp) -> None:
+        """The active row shows its figures and controls; the others are one line."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        app.update()
+        assert app.channelDetails[second].winfo_ismapped()
+        assert not app.channelDetails[first].winfo_ismapped()
+
+        # Every channel keeps its controls, shown or not.
+        assert set(app.poolVars) >= {first, second}
+        assert set(app.priorityVars) >= {first, second}
+
+    def testRowNamesTheInstrument(self, app: MidiEditorApp) -> None:
+        """The row's instrument name follows a program change."""
+        var = tk.StringVar(value=" 56  Trumpet")
+        app._programChanged(0, var)
+        assert app.nameLabels[0].cget("text") == "Trumpet"
 
     def testProgramChangeRefreshesTheFamily(self, app: MidiEditorApp) -> None:
         """Picking an instrument updates the card's family text, not just the picker."""
@@ -355,6 +814,76 @@ class TestChannelStrip:
         assert played
         channels = {e.channel for t in played[0].tracks for e in t if e.isNoteOn}
         assert channels == {9}
+
+
+class TestDrawnSpan:
+    """Only the notes in and around the view are drawn, and a scroll draws the rest."""
+
+    def _farNote(self, app: MidiEditorApp) -> model.Note:
+        """Add a note well past every view width of the song, and redraw.
+
+        Returns:
+            model.Note: the note.
+        """
+        start = app.song.maxTick + int(20 * app.canvas.winfo_width() / app.ppt)
+        note = app.song.addNote(0, 60, 100, start, start + 480)
+        app._invalidateDemand((start, start + 480))
+        app.redraw()
+        app.update()
+        return note
+
+    def testAFarNoteIsDrawnOnlyWhenScrolledTo(self, app: MidiEditorApp) -> None:
+        """A note far past the view has no item until the view reaches it."""
+        far = self._farNote(app)
+        first = app.song.notes[0]
+        assert id(far) not in app.noteToItem and id(first) in app.noteToItem
+        app._xview("moveto", 1.0)
+        app.update()
+        assert id(far) in app.noteToItem and id(first) not in app.noteToItem
+        t0, t1 = app._drawnSpan
+        assert t0 <= far.start and far.end <= t1
+
+    def testGridAndRulerFollowTheSpan(self, app: MidiEditorApp) -> None:
+        """Bar lines and bar numbers are drawn across the span, and a scroll moves them."""
+        far = self._farNote(app)
+
+        def drawn() -> tuple[float, float]:
+            xs = [app.canvas.coords(i)[0] for i in app.canvas.find_withtag("grid")]
+            return min(xs), max(xs)
+
+        def barNumbers() -> set[int]:
+            return {int(app.ruler.itemcget(i, "text")) for i in app.ruler.find_withtag("scale")
+                    if app.ruler.type(i) == "text" and app.ruler.itemcget(i, "text").isdigit()}
+
+        assert drawn()[1] < far.start * app.ppt
+        app._xview("moveto", 1.0)
+        app.update()
+        low, high = drawn()
+        assert low <= far.start * app.ppt <= high
+        assert 1 not in barNumbers()
+        assert int(far.start // (app.song.mf.division * 4)) + 1 in barNumbers()
+
+    def testSelectionSurvivesAScroll(self, app: MidiEditorApp) -> None:
+        """A selected note scrolled out of the span and back is outlined again."""
+        far = self._farNote(app)
+        first = app.song.notes[0]
+        app.selection = {first}
+        app._applySelectionStyle()
+        app._xview("moveto", 1.0)
+        app.update()
+        app._xview("moveto", 0.0)
+        app.update()
+        item = app.noteToItem[id(first)]
+        assert app.canvas.itemcget(item, "outline") == "#ffffff"
+        assert id(far) not in app.noteToItem
+
+    def testCursorStaysOnTop(self, app: MidiEditorApp) -> None:
+        """Notes drawn after a scroll go under the playback cursor."""
+        self._farNote(app)
+        app.cursorItem = app.canvas.create_line(10, 0, 10, 100, tags="cursor")
+        app._xview("moveto", 1.0)
+        app.update()
+        assert app.canvas.find_all()[-1] == app.cursorItem
 
 
 class TestViewport:
@@ -398,6 +927,35 @@ class TestViewport:
         assert app.zoomX > before
         app.onWheel(FakeEvent(100, 100, num=5, widget=app.canvas))
         assert app.zoomX > before
+
+    def testOpensOnTheNotes(self, app: MidiEditorApp) -> None:
+        """The roll opens scrolled so the middle of the file's pitches is in view."""
+        pitches = sorted(n.pitch for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        middle = pitches[len(pitches) // 2]
+        top = app.canvas.canvasy(0)
+        bottom = top + app.canvas.winfo_height()
+        assert top <= (127 - middle) * app.rowH <= bottom
+
+    def testNotesHaveADarkerEdge(self, app: MidiEditorApp) -> None:
+        """An unselected note's edge is its fill mixed towards black; selection is white."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        item = app.noteToItem[id(note)]
+        fill = app.canvas.itemcget(item, "fill")
+        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#000000", 0.4)
+        app.selection = {note}
+        app._applySelectionStyle()
+        assert app.canvas.itemcget(item, "outline") == "#ffffff"
+        app._clearSelection()
+        assert app.canvas.itemcget(item, "outline") == theme.mix(fill, "#000000", 0.4)
+
+    def testMutedNotesShowOnTheRoll(self, app: MidiEditorApp) -> None:
+        """A muted channel's notes take the muted grey, which differs from the grid."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        app.muteVars[note.channel].set(True)
+        app._channelsChanged()
+        item = app.noteToItem[id(note)]
+        assert app.canvas.itemcget(item, "fill") == theme.ROLL["muted"]
+        assert theme.ROLL["muted"] != theme.ROLL["roll"]
 
     def testMotionUpdatesStatus(self, app: MidiEditorApp) -> None:
         """Moving the pointer reports bar, beat and the note under it."""
@@ -460,7 +1018,18 @@ class TestDemandStrip:
         app.budgetVar.set(40)
         app._drawDemand()
         assert app.budgetVar.get() == peak
-        assert int(float(app.budgetSpin.cget("to"))) == peak
+        assert app.budgetLimit == peak
+
+    def testBudgetCanRiseWhileReduced(self, app: MidiEditorApp) -> None:
+        """With the reduction on, the budget still reaches the song's peak, not the reduced one."""
+        peak = app._ensureSongDemand().peak
+        app.budgetVar.set(peak - 2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app._drawDemand()
+        assert app.budgetLimit == peak
+        app._stepBudget(1)
+        assert app.budgetVar.get() == peak - 1
 
     def testColumnsMergeIntoRuns(self, app: MidiEditorApp) -> None:
         """Identical neighbouring columns become one run covering them all."""
@@ -512,13 +1081,8 @@ class TestDemandStrip:
         assert app.demandCanvas.find_all() == ()
 
     def testCardsShowDemandFigures(self, app: MidiEditorApp) -> None:
-        """Each channel card carries its peak, mean and share of the piece."""
-        texts = []
-
-        for row in app.channelRows.values():
-            for w in row.winfo_children():
-                if isinstance(w, tk.Label) and "peak" in w.cget("text"):
-                    texts.append(w.cget("text"))
+        """Each channel row's detail carries its peak, mean and share of the piece."""
+        texts = [label.cget("text") for label in app.usageLabels.values()]
 
         withNotes = {n.channel for n in app.song.notes}
         assert len(texts) == len(withNotes)
@@ -552,6 +1116,67 @@ class TestDemandStrip:
         before = app.canvas.xview()[0]
         app.onWheel(FakeEvent(100, 10, state=0x1, num=5, widget=app.demandCanvas))
         assert app.canvas.xview()[0] > before
+
+
+class TestLanes:
+    """The lane switch under the roll: Demand, Velocity and Weight."""
+
+    def _visible(self, app: MidiEditorApp) -> list[model.Note]:
+        """The notes whose start is in view, as a note lane draws them."""
+        x0 = app.canvas.canvasx(0)
+        t0, t1 = x0 / app.ppt, (x0 + app.demandCanvas.winfo_width()) / app.ppt
+        notes = [n for n in app.song.notes if t0 - 1 <= n.start <= t1]
+        return notes
+
+    def testVelocityLaneDrawsABarPerNote(self, app: MidiEditorApp) -> None:
+        """Every note in view has a bar, and the loudest reaches the top of the scale."""
+        app.laneVar.set("Velocity")
+        app._laneChanged()
+        app._drawDemand()
+        visible = self._visible(app)
+        assert len(app.laneBars) == len(visible)
+        loudest = max(visible, key=lambda n: n.velocity)
+        x = loudest.start * app.ppt - app.canvas.canvasx(0)
+        top = min(app.demandCanvas.coords(i)[1] for i in app.demandCanvas.find_all()
+                  if app.demandCanvas.type(i) == "rectangle"
+                  and app.demandCanvas.coords(i)[0] == pytest.approx(x))
+        height = app.demandCanvas.winfo_height()
+        expected = height - 2 - loudest.velocity * (height - 8) / 127
+        assert top <= expected + 0.5
+
+    def testWeightLaneOutlinesDroppedNotes(self, app: MidiEditorApp) -> None:
+        """With the reduction on, dropped notes are outlines and kept notes are filled."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        _settle(app)
+        app.laneVar.set("Weight")
+        app._laneChanged()
+        app._drawDemand()
+        rects = [i for i in app.demandCanvas.find_all() if app.demandCanvas.type(i) == "rectangle"]
+        fills = {app.demandCanvas.itemcget(i, "fill") for i in rects}
+        assert "" in fills
+        assert len(fills) > 1
+
+    def testHoverInALaneDescribesTheNote(self, app: MidiEditorApp) -> None:
+        """Pointing at a bar in a note lane names its note on the status bar."""
+        app.laneVar.set("Velocity")
+        app._laneChanged()
+        app._drawDemand()
+        xa, xb, note = app.laneBars[-1]
+        app._onDemandMotion(FakeEvent((xa + xb) / 2, 10))
+        assert f"vel {note.velocity}" in app.status.cget("text")
+
+    def testBackToDemand(self, app: MidiEditorApp) -> None:
+        """Switching back to Demand draws the stack and the budget again."""
+        app.laneVar.set("Weight")
+        app._laneChanged()
+        app._drawDemand()
+        app.laneVar.set("Demand")
+        app._laneChanged()
+        app._drawDemand()
+        kinds = {app.demandCanvas.type(i) for i in app.demandCanvas.find_all()}
+        assert kinds == {"rectangle", "line", "text"}
 
 
 class TestTonal:
@@ -595,6 +1220,471 @@ class TestTonal:
         assert all(name == "N.C." for _, _, name in rebuilt)
 
 
+class TestHover:
+    """The bar, beat and slot under the pointer, each lit a step more, and the note under it."""
+
+    def _hoverOn(self, app: MidiEditorApp, note: model.Note) -> int:
+        """Move the pointer onto a note's middle.
+
+        Args:
+            app: the window.
+            note: the note.
+
+        Returns:
+            int: the note's canvas item.
+        """
+        app.onMotion(FakeEvent(*_noteCentre(app, note)))
+        item = app.noteToItem[id(note)]
+        return item
+
+    def testBandCoversTheBar(self, app: MidiEditorApp) -> None:
+        """The band spans the bar under the pointer, on the roll and the ruler."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        start, end = app._hoverBar
+        assert start <= note.start < end
+        assert end - start == app.song.barTick(2) - app.song.barTick(1)
+        base = app.canvas.find_withtag("hoverBar")[0]
+        assert app.canvas.coords(base)[0] == pytest.approx(start * app.ppt)
+        assert app.canvas.coords(base)[2] == pytest.approx(end * app.ppt)
+        assert app.ruler.find_withtag("hoverBar")
+
+    def testLevelsStackUnderTheLinesAndNotes(self, app: MidiEditorApp) -> None:
+        """Bar base, beat base, row shading, bar rows, beat rows, slot, then lines and notes."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        c = app.canvas
+        order = list(c.find_all())
+
+        def at(tag: str) -> list[int]:
+            return [order.index(i) for i in c.find_withtag(tag)]
+
+        assert order[0] == c.find_withtag("hoverBarBase")[0]
+        assert order[1] == c.find_withtag("hoverBeatBase")[0]
+        assert max(at("rowShade")) < min(at("hoverBarRow"))
+        assert max(at("hoverBarRow")) < min(at("hoverBeatRow"))
+        assert max(at("hoverBeatRow")) < min(at("hoverCell"))
+        notes = [order.index(i) for i in app.itemToNote]
+        assert max(at("hoverCell")) < min(notes)
+        assert max(at("hoverCell")) < min(at("tempo"))
+
+    def testBeatAndSlotSitInsideTheBar(self, app: MidiEditorApp) -> None:
+        """The beat lies within the bar, and the slot is the note a double-click would add."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        bar, beat = app._hoverBar, app._hoverBeat
+        num, den = app.song.timeSigs[0][1], app.song.timeSigs[0][2]
+        assert bar[0] <= beat[0] < beat[1] <= bar[1]
+        assert beat[1] - beat[0] == app.song.mf.division * 4 // den
+        assert (bar[1] - bar[0]) == (beat[1] - beat[0]) * num
+        start, end, pitch = app._hoverCell
+        assert beat[0] <= start < end and pitch == note.pitch
+        assert end - start == app._snapTicks()
+        cell = app.canvas.find_withtag("hoverCell")[0]
+        black = note.pitch % 12 in (1, 3, 6, 8, 10)
+        assert (app.canvas.itemcget(cell, "fill")
+                == theme.ROLL["hoverCellRow" if black else "hoverCell"])
+
+    def testDoubleClickFillsTheSlot(self, app: MidiEditorApp) -> None:
+        """A note added by double-click lies exactly in the slot the pointer lit."""
+        app.snapVar.set("1/8")
+        x = (app.song.maxTick + app.song.mf.division) * app.ppt
+        y = (127 - 64) * app.rowH + app.rowH / 2
+        event = FakeEvent(*_toWidget(app, x, y))
+        app.onMotion(event)
+        slot = app._hoverCell
+        app.onDouble(event)
+        added = next(iter(app.selection))
+        assert (added.start, added.end, added.pitch) == slot
+
+    def testNoteUnderThePointerIsLit(self, app: MidiEditorApp) -> None:
+        """The note under the pointer is mixed towards white, and given its fill back after."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        item = app.noteToItem[id(note)]
+        fill = app.canvas.itemcget(item, "fill")
+        self._hoverOn(app, note)
+        assert app.canvas.itemcget(item, "fill") == theme.mix(fill, "#ffffff", NOTE_HOVER_MIX)
+        x, y = _noteCentre(app, note)
+        app.onMotion(FakeEvent(x, y - 3 * app.rowH))
+        assert app.canvas.itemcget(item, "fill") == fill
+
+    def testLeavingTheRollClearsIt(self, app: MidiEditorApp) -> None:
+        """Leaving the roll takes down the band and gives the note its fill back."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        item = app.noteToItem[id(note)]
+        fill = app.canvas.itemcget(item, "fill")
+        self._hoverOn(app, note)
+        app._clearHover()
+
+        for tag in ("hoverBar", "hoverBeat", "hoverCell"):
+            assert not app.canvas.find_withtag(tag)
+
+        assert not app.ruler.find_withtag("hoverBar")
+        assert app.canvas.itemcget(item, "fill") == fill
+
+    def testBandOutlivesARedraw(self, app: MidiEditorApp) -> None:
+        """A full redraw, as after a zoom, keeps the band on the same bar."""
+        note = next(n for n in app.song.notes if n.channel != model.DRUM_CHANNEL)
+        self._hoverOn(app, note)
+        bar = app._hoverBar
+        app.zoom(1.25)
+        assert app._hoverBar == bar
+        base = app.canvas.find_withtag("hoverBar")[0]
+        assert app.canvas.coords(base)[0] == pytest.approx(bar[0] * app.ppt)
+
+
+class TestBudget:
+    """The voice budget beside the strip: its arrows, its number and its line."""
+
+    def _countRecomputes(self, app: MidiEditorApp,
+                         monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """Count the reduction's recomputes from here on.
+
+        Args:
+            app: the window.
+            monkeypatch: the fixture that wraps `_reductionChanged`.
+
+        Returns:
+            list[int]: grows by one at each recompute, holding the budget.
+        """
+        calls: list[int] = []
+        original = app._reductionChanged
+
+        def counted() -> None:
+            calls.append(app.budgetVar.get())
+            original()
+
+        monkeypatch.setattr(app, "_reductionChanged", counted)
+        return calls
+
+    def testLayout(self, app: MidiEditorApp) -> None:
+        """Voices heads the gutter, the lanes clear its rule, and the number is centred."""
+        app.update_idletasks()
+        roll = app.demandCanvas.master
+        corner = [w for w in roll.grid_slaves(row=3, column=0)
+                  if isinstance(w, tk.Label) and w.cget("text") == "Voices"]
+        assert corner and str(corner[0].cget("foreground")) == theme.PALETTE["text"]
+        switch = next(w for w in roll.grid_slaves(row=3) if isinstance(w, ttk.Frame))
+        assert int(str(switch.cget("padding")[0])) == app.keysW + app.laneGap
+        assert app.laneGap == round(app.winfo_fpixels(LANE_GAP))
+
+        # The lit lane stands clear of the rule under it by the lanes' padding.
+        lane = switch.winfo_children()[0]
+        pad = round(app.winfo_fpixels(LANE_PAD))
+        assert app.laneRule.winfo_rooty() - (lane.winfo_rooty() + lane.winfo_height()) >= pad
+
+        # The heading has its padding either side within the column, which
+        # is never narrower than the keyboard needs.
+        heading = tkfont.Font(app, font=corner[0].cget("font"))
+        pad = round(app.winfo_fpixels(CORNER_PAD))
+        assert app.keysW >= max(KEYS_W, heading.measure("Voices") + 2 * pad)
+        assert int(app.keys.cget("width")) == app.keysW
+        up, down = app.budgetArrows["budgetUp"], app.budgetArrows["budgetDown"]
+        middle = (up.winfo_y() + up.winfo_height() + down.winfo_y()) / 2
+        box = app.budgetBox
+        assert abs(box.winfo_y() + box.winfo_height() / 2 - middle) <= 2
+
+    def testArrowsStepAndRecomputeOnce(self, app: MidiEditorApp,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each click steps a voice at once; the reduction recomputes once the clicks pause."""
+        app.budgetVar.set(2)
+        app._drawDemand()
+        calls = self._countRecomputes(app, monkeypatch)
+        up = app.budgetArrows["budgetUp"]
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetUp", 1)
+        assert str(up.cget("image")) == str(app.paintedImages["budgetUpPressed"])
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetUp", 1)
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetDown", -1)
+        assert app.budgetVar.get() == 3
+        assert calls == []
+        app.after(BUDGET_SETTLE_MS + 50)
+        app.update()
+        assert calls == [3]
+        assert app.plan.pools[0].voices == 3
+
+    def testWheelAndKeysStep(self, app: MidiEditorApp) -> None:
+        """The wheel and the arrow keys step the budget, held between 1 and the peak."""
+        app.budgetVar.set(1)
+        app._drawDemand()
+        app._onBudgetWheel(FakeEvent(num=5))
+        assert app.budgetVar.get() == 1
+        app._onBudgetWheel(FakeEvent(num=4))
+        app._onBudgetWheel(FakeEvent(delta=120))
+        assert app.budgetVar.get() == 3
+        app._stepBudget(100)
+        assert app.budgetVar.get() == app.budgetLimit
+
+    def testDragTheNumber(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Dragging the number up raises the budget, filled with the accent; release recomputes."""
+        app.budgetVar.set(1)
+        app._drawDemand()
+        calls = self._countRecomputes(app, monkeypatch)
+        app._onBudgetPress(FakeEvent(y=500, num=1))
+        assert app.budgetDragging
+        assert str(app.budgetBox.cget("background")) == theme.PALETTE["accent"]
+        app._onBudgetDrag(FakeEvent(y=500 - 2 * BUDGET_DRAG_PX))
+        assert app.budgetVar.get() == 3
+        c = app.demandCanvas
+
+        def tagged() -> list[str]:
+            return [c.itemcget(i, "text") for i in c.find_all() if c.type(i) == "text"]
+
+        assert "3 voices" in tagged()
+        assert calls == []
+        app._onBudgetRelease()
+        assert not app.budgetDragging
+        assert calls == [3]
+        assert "3 voices" not in tagged()
+
+    def testClickWithoutMovingKeepsTheReduction(self, app: MidiEditorApp,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+        """A press and release that leave the budget alone recompute nothing."""
+        calls = self._countRecomputes(app, monkeypatch)
+        app._onBudgetPress(FakeEvent(y=500, num=1))
+        app._onBudgetRelease()
+        assert calls == []
+
+    def testTypeABudget(self, app: MidiEditorApp) -> None:
+        """A double click opens the number for typing; Return keeps it, Escape drops it."""
+        app.budgetVar.set(1)
+        app._drawDemand()
+        app._editBudget()
+        editor = app._budgetEditor
+        editor.delete(0, "end")
+        editor.insert(0, "2")
+        app._closeBudgetEditor(True)
+        assert app.budgetVar.get() == 2
+        assert app._budgetEditor is None
+        app._editBudget()
+        app._budgetEditor.delete(0, "end")
+        app._budgetEditor.insert(0, "3")
+        app._closeBudgetEditor(False)
+        assert app.budgetVar.get() == 2
+        app._editBudget()
+        app._budgetEditor.delete(0, "end")
+        app._budgetEditor.insert(0, "999")
+        app._closeBudgetEditor(True)
+        assert app.budgetVar.get() == app.budgetLimit
+
+    def testDragTheLine(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The budget line is grabbed within a few pixels and dragged in whole voices."""
+        app.budgetVar.set(3)
+        app._drawDemand()
+        calls = self._countRecomputes(app, monkeypatch)
+        base, scale = app._stripScale
+        y = base - 3 * scale
+        assert app._budgetLineAt(y + BUDGET_GRAB)
+        assert app._budgetLineAt(y + BUDGET_GRAB + 2) is None
+        app._onDemandMotion(FakeEvent(x=10, y=y))
+        assert app.budgetLineHover is app.plan.pools[0]
+        assert str(app.demandCanvas.cget("cursor")) == "sb_v_double_arrow"
+        app._onStripPress(FakeEvent(x=10, y=y, num=1))
+        assert app.budgetDragging
+        app._onStripDrag(FakeEvent(x=10, y=base - 2 * scale))
+        assert app.budgetVar.get() == 2
+        app._onBudgetRelease()
+        assert calls == [2]
+
+    def testSeveralPoolsLockTheBudgetButNotTheLines(self, app: MidiEditorApp) -> None:
+        """With several pools the budget beside the strip is greyed; the line still moves a pool."""
+        app.addPool()
+        app.poolVars[1].set("pool 2")
+        app._channelPoolChanged(1)
+        app._drawDemand()
+        total = app.budgetVar.get()
+        assert not app.budgetEditable
+        assert str(app.budgetBox.cget("foreground")) == theme.PALETTE["muted"]
+        assert (str(app.budgetArrows["budgetUp"].cget("image"))
+                == str(app.paintedImages["budgetUpDisabled"]))
+        app._pressBudgetArrow(FakeEvent(num=1), "budgetUp", 1)
+        app._onBudgetWheel(FakeEvent(num=4))
+        app._editBudget()
+        assert app._budgetEditor is None
+        assert app.budgetVar.get() == total
+
+        # The total's line moves the selected pool, here the new one.
+        base, scale = app._stripScale
+        line = app._budgetLineAt(base - total * scale)
+        assert line is not None and line[2] is app.editPool
+        app._onStripPress(FakeEvent(x=10, y=base - total * scale, num=1))
+        app._onStripDrag(FakeEvent(x=10, y=base - (total + 2) * scale))
+        app._onBudgetRelease()
+        assert app.budgetVar.get() == total + 2
+        assert app.editPool.voices == 3
+
+
+class TestPoolTable:
+    """The pools table in the Reduce panel, and the chip lines on the strip."""
+
+    def _twoChips(self, app: MidiEditorApp) -> tuple[Any, Any]:
+        """Give the plan the X16's two chips, with the bass in a pool of its own on the PSG.
+
+        Args:
+            app: the window.
+
+        Returns:
+            tuple: the first pool, on the YM2151, and the bass pool.
+        """
+        app._applyTiers([type(t)(**vars(t)) for t in X16_TIERS])
+        app.addPool()
+        app.poolVar.set("bass")
+        app._renamePool()
+        app.poolVoicesVar.set(2)
+        app.poolTierVar.set("psg")
+        app._storePoolControls()
+        app.poolVars[1].set("bass")
+        app._channelPoolChanged(1)
+        app._selectPool(app.plan.pools[0])
+        app.poolTierVar.set("opm")
+        app._reductionChanged()
+        app._drawDemand()
+        pools = (app.plan.pools[0], app.plan.pools[1])
+        return pools
+
+    def testALinePerPool(self, app: MidiEditorApp) -> None:
+        """The table has a line per pool with its voices, peak and channel count."""
+        first, bass = self._twoChips(app)
+        assert set(app.poolRows) == {id(first), id(bass)}
+        row = app.poolRows[id(bass)]
+        assert row["name"].cget("text") == "bass"
+        assert row["tier"].cget("text") == "psg"
+        assert row["box"].cget("text") == "2"
+        assert row["figure"].cget("text") == f"peak {app._poolPeak(bass)}"
+        assert row["count"].cget("text") == "1 ch"
+
+    def testPeakIsAmberAboveTheVoices(self, app: MidiEditorApp) -> None:
+        """A pool's peak is in the warning colour while it is above the pool's voices."""
+        first, _ = self._twoChips(app)
+        peak = app._poolPeak(first)
+        app._setPoolVoices(first, peak - 1)
+        figure = app.poolRows[id(first)]["figure"]
+        assert str(figure.cget("foreground")) == theme.PALETTE["warn"]
+        app._setPoolVoices(first, peak)
+        assert str(figure.cget("foreground")) == theme.PALETTE["muted"]
+
+    def testClickSelectsThePool(self, app: MidiEditorApp) -> None:
+        """A click on a line selects its pool: the bar lights and the panel edits it."""
+        first, bass = self._twoChips(app)
+        row = app.poolRows[id(bass)]
+        assert app.poolHeading.cget("text") == first.name
+        app._selectPool(bass)
+        assert app.editPool is bass
+        assert app.poolHeading.cget("text") == "bass"
+        assert app.poolTierVar.get() == "psg"
+        assert str(row["bar"].cget("background")) == theme.PALETTE["accent"]
+        assert str(app.poolRows[id(first)]["bar"].cget("background")) != theme.PALETTE["accent"]
+        assert app.poolRows[id(bass)]["row"] is row["row"]
+
+    def testVoicesStepDragAndType(self, app: MidiEditorApp,
+                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pool's voices step with its arrows, drag with the pointer, and take a typed number."""
+        _, bass = self._twoChips(app)
+        box = app.poolRows[id(bass)]["box"]
+        up = app.poolRows[id(bass)]["arrows"].winfo_children()[0]
+        app._pressPoolArrow(up, "poolUp", bass, 1)
+        assert bass.voices == 3 and box.cget("text") == "3"
+        app._onPoolPress(FakeEvent(y=500, num=1), bass)
+        app._onPoolDrag(FakeEvent(y=500 - 2 * BUDGET_DRAG_PX), bass)
+        assert bass.voices == 5
+        recomputes: list[int] = []
+        original = app._reductionChanged
+        monkeypatch.setattr(app, "_reductionChanged",
+                            lambda: (recomputes.append(bass.voices), original()))
+        app._onPoolRelease()
+        assert recomputes == [5]
+        app._editPoolVoices(bass)
+        _typeIntoEditor(app, "4")
+        assert bass.voices == 4 and app._poolEditor is None
+
+    def testATierCapsItsPools(self, app: MidiEditorApp) -> None:
+        """A pool takes no more voices than its tier has left after its other pools."""
+        first, bass = self._twoChips(app)
+        opm = next(t for t in app.plan.tiers if t.name == "opm")
+        app._setPoolVoices(first, 99)
+        assert first.voices == opm.capacity - opm.reserved
+
+    def testRenameFromTheTable(self, app: MidiEditorApp) -> None:
+        """A double click on a pool's name opens it for typing; Return renames the pool."""
+        _, bass = self._twoChips(app)
+        app._editPoolName(bass)
+        assert app.editPool is bass
+        _typeIntoEditor(app, "low")
+        assert bass.name == "low"
+        assert app.poolRows[id(bass)]["name"].cget("text") == "low"
+        assert app.poolHeading.cget("text") == "low"
+
+    def testSoundBoxOffersItsChipsSounds(self, app: MidiEditorApp) -> None:
+        """The Sound box lists the sounds of the selected pool's chip and no other's."""
+        first, bass = self._twoChips(app)
+        assert app.soundCombo.cget("values") == (BY_INSTRUMENT,) + zsm.CHIPS[0].sounds
+        app._selectPool(bass)
+        assert app.soundCombo.cget("values") == (BY_INSTRUMENT,) + zsm.CHIPS[1].sounds
+        app.poolSoundVar.set("saw")
+        app._poolSoundChanged()
+
+        # Moved to the YM2151, the pool shows the instrument's patch, which
+        # is what the export plays for a waveform there.
+        app.poolTierVar.set("opm")
+        app._storePoolControls()
+        assert "saw" not in app.soundCombo.cget("values")
+        assert app.poolSoundVar.get() == BY_INSTRUMENT
+
+        # With no tier the box is disabled, says so, and its tip says why.
+        app.poolTierVar.set(NO_TIER)
+        app._storePoolControls()
+        assert app.soundCombo.instate(["disabled"])
+        assert app.poolSoundVar.get() == NO_CHIP
+        assert "Tier" in app.soundTip.text
+        app.poolTierVar.set("psg")
+        app._storePoolControls()
+        assert app.soundCombo.instate(["!disabled"])
+        assert app.poolSoundVar.get() == "saw"
+
+    def testChipLinesMoveTheirPools(self, app: MidiEditorApp) -> None:
+        """Each chip's line moves the selected pool on that chip, or the chip's last pool."""
+        first, bass = self._twoChips(app)
+        levels = app._budgetLevels()
+        assert [(label.split()[0], pool) for label, _, pool in levels] == [
+            ("opm", first), ("psg", bass)]
+
+        # Dragging the PSG line two voices down takes them from the bass.
+        base, scale = app._stripScale
+        level = levels[1][1]
+        app._onStripPress(FakeEvent(x=10, y=base - level * scale, num=1))
+        assert app._lineDrag[0] is bass
+        start = bass.voices
+        app._onStripDrag(FakeEvent(x=10, y=base - (level - 1) * scale))
+        assert bass.voices == start - 1
+        app._onBudgetRelease()
+        assert app._lineDrag is None
+
+    def testTagsDoNotTouch(self, app: MidiEditorApp) -> None:
+        """Tags of lines close together step apart rather than cover or touch each other."""
+        first, bass = self._twoChips(app)
+        app.demandCanvas.configure(height=60)
+        app._setPoolVoices(bass, 1)
+        app._drawDemand()
+        c = app.demandCanvas
+        boxes = [tuple(c.coords(i)) for i in c.find_all() if c.type(i) == "rectangle"
+                 and c.itemcget(i, "fill") == theme.ROLL["budget"]]
+        assert len(boxes) == 2
+        assert app._tagClash(boxes[1], [boxes[0]]) is None
+
+    def testLinesAreSolidWithTags(self, app: MidiEditorApp) -> None:
+        """A budget line is two pixels in the budget colour, lit in the accent under the pointer."""
+        first, _ = self._twoChips(app)
+        c = app.demandCanvas
+        solid = [i for i in c.find_all() if c.type(i) == "line"
+                 and c.itemcget(i, "fill") == theme.ROLL["budget"]]
+        assert len(solid) == len(app._budgetLevels())
+        assert all(float(c.itemcget(i, "width")) == 2 and not c.itemcget(i, "dash")
+                   for i in solid)
+        app._hoverBudgetLine(first)
+        lit = [i for i in c.find_all() if c.type(i) == "text"
+               and c.itemcget(i, "text") == f"{first.name} {first.voices}"]
+        assert lit
+
+
 class TestReduction:
     """The Reduce panel, the reduced roll, playback and Save Reduced As."""
 
@@ -616,7 +1706,7 @@ class TestReduction:
         app.budgetVar.set(1)
         app.reduceVar.set(True)
         app._reductionChanged()
-        app.update()
+        _settle(app)
         ghosts = self._stippled(app)
         assert ghosts
         assert len(ghosts) == len(app.reduction.dropped) + len(app.reduction.cut)
@@ -624,11 +1714,93 @@ class TestReduction:
         assert "no voice" in app.lossLbl.cget("text")
         assert all(app.itemToNote[i] in app.song.notes for i in ghosts)
 
+    def testAChangeIsWorkedOutOffTheMainThread(self, app: MidiEditorApp) -> None:
+        """A budget change starts a job, the roll keeps its drawing until it lands, then follows."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        _settle(app)
+        ghosts = len(self._stippled(app))
+        app.budgetVar.set(4)
+        app._reductionChanged()
+        assert app._reduceJob is not None and app.reduction is None and app._reducePending()
+        app.update_idletasks()
+        assert len(self._stippled(app)) == ghosts
+        _settle(app)
+        assert app._reduceJob is None and app.reduction is not None
+        assert len(self._stippled(app)) == len(app.reduction.dropped) + len(app.reduction.cut)
+        assert len(self._stippled(app)) < ghosts
+
+    def testAnEditDuringAJobIsReducedHere(self, app: MidiEditorApp) -> None:
+        """An edit while a job runs reduces on the main thread, and the stale job is dropped."""
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app._setActiveChannel(0)
+        app.onDouble(FakeEvent(*_toWidget(app, 20 * app.ppt * app.song.mf.division,
+                                          (127 - 100) * app.rowH + 2)))
+        added = next(iter(app.selection))
+        here = app.reduction
+        assert here is not None and any(p.note is added for p in here.placed)
+        _settle(app)
+        assert app.reduction is here
+
+    def testExactReadersWaitForTheJob(self, app: MidiEditorApp) -> None:
+        """Playback, export and the report wait for a job and take its result."""
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        job = app._reduceJob
+        reduction = app._ensureReduction()
+        assert app._reduceJob is None and reduction is job.reduction
+        alone = reduce.reduce(app.song, app._currentPlan())
+        assert reduction.dropped == alone.dropped and reduction.cut == alone.cut
+        app.update()
+
+    def testChangesDuringAJobRunOneMore(self, app: MidiEditorApp) -> None:
+        """Changes while a job runs start one more job when it ends, from the latest plan."""
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        first = app._reduceJob
+        app.budgetVar.set(1)
+        app._reductionChanged()
+        app.budgetVar.set(2)
+        app._reductionChanged()
+        assert app._reduceJob is first and app._reduceAgain and app._reducePending()
+        _settle(app)
+        assert app._ensureDemand().peak <= 2
+        assert app.reduction.voicesUsed == 2
+
+    def testTheSwitchIntervalIsCutOnlyWhileAJobRuns(self, app: MidiEditorApp) -> None:
+        """The interpreter switches threads more often while a job runs, and as before after."""
+        before = sys.getswitchinterval()
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app.update_idletasks()
+        app.update_idletasks()
+        assert app._reduceJob.thread is not None
+        assert sys.getswitchinterval() == pytest.approx(REDUCE_SWITCH_S)
+        _settle(app)
+        assert sys.getswitchinterval() == pytest.approx(before)
+
+    def testAJobErrorIsRaisedHere(self, app: MidiEditorApp,
+                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        """An exception on the job's thread is raised on the main thread when it lands."""
+        def broken(*args, **kwargs):
+            raise RuntimeError("reducer broke")
+
+        monkeypatch.setattr(reduce, "reduce", broken)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+
+        with pytest.raises(RuntimeError, match="reducer broke"):
+            _settle(app)
+
     def testStripFollowsTheReduction(self, app: MidiEditorApp) -> None:
         """The demand strip sweeps the reduced notes, so it never exceeds the budget."""
         app.budgetVar.set(2)
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         assert app._ensureDemand().peak <= 2
         app.reduceVar.set(False)
         app._reductionChanged()
@@ -648,14 +1820,67 @@ class TestReduction:
         assert app._currentPlan().priorityOf(0) == 2.5
         assert pool.voices == app.budgetVar.get()
 
+    def testGapReadouts(self, app: MidiEditorApp, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The gaps show a word at 0, step, drag and take typing, held to their range."""
+        tremolo, legato, chord = app.gapReadouts
+        assert [g.label.cget("text") for g in app.gapReadouts] == ["off", "off", "all"]
+
+        # A step moves a tick gap by GAP_STEP and the chord by one; the
+        # reduction waits for the steps to pause.
+        settles: list[int] = []
+        monkeypatch.setattr(app, "_settleReduction", lambda: settles.append(1))
+        app._stepGap(tremolo, 1)
+        app._stepGap(chord, 1)
+        app._stepGap(chord, -1)
+        app._stepGap(chord, -1)
+        assert (app.tremoloVar.get(), tremolo.label.cget("text")) == (GAP_STEP, str(GAP_STEP))
+        assert (app.maxChordVar.get(), chord.label.cget("text")) == (0, "all")
+        assert len(settles) == 4
+
+        # A drag up moves by a step per BUDGET_DRAG_PX, filled while held,
+        # and recomputes on release.
+        recomputes: list[int] = []
+        original = app._reductionChanged
+        monkeypatch.setattr(app, "_reductionChanged",
+                            lambda: (recomputes.append(app.legatoVar.get()), original()))
+        app._onGapPress(FakeEvent(y=500, num=1), legato)
+        assert str(legato.label.cget("background")) == theme.PALETTE["accent"]
+        app._onGapDrag(FakeEvent(y=500 - 3 * BUDGET_DRAG_PX), legato)
+        app._onGapRelease()
+        assert recomputes == [3 * GAP_STEP]
+        assert str(legato.label.cget("background")) == theme.ROLL["strip"]
+        assert app._currentPlan().pools[0].legatoGap == 3 * GAP_STEP
+
+        # Typing past the range holds to the limit.
+        app._editGap(chord)
+        _typeIntoEditor(app, "99")
+        assert app.maxChordVar.get() == chord.limit
+        assert chord.label.cget("text") == str(chord.limit)
+
+    def testWeightsLastUntilAPriorityChanges(self, app: MidiEditorApp) -> None:
+        """A budget step reuses the notes' weights; a new priority scores them again."""
+        weights = app._ensureWeights()
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        assert app._ensureWeights() is weights
+        app.priorityVars[0].set(3.0)
+        app._reductionChanged()
+        again = app._ensureWeights()
+        assert again is not weights
+        first = next(n for n in app.song.notes if n.channel == 0)
+        assert again[id(first)] == pytest.approx(3.0 * weights[id(first)])
+
     def testPriorityMovesTheLoss(self, app: MidiEditorApp) -> None:
         """Raising a channel's priority keeps more of its notes."""
         app.budgetVar.set(2)
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         before = sum(1 for n in app.song.notes if n.channel == 1 and app.reduction.isDropped(n))
         app.priorityVars[1].set(5.0)
         app._reductionChanged()
+        _settle(app)
         after = sum(1 for n in app.song.notes if n.channel == 1 and app.reduction.isDropped(n))
         assert after < before
 
@@ -782,6 +2007,7 @@ class TestWeightShading:
         first = app._ensureWeights()
         app.priorityVars[1].set(5.0)
         app._reductionChanged()
+        _settle(app)
         assert app._ensureWeights() is not first
         after = self._brightness(app.canvas.itemcget(app.noteToItem[id(note)], "fill"))
         assert after > before
@@ -804,13 +2030,14 @@ class TestPlanControls:
         assert [p.name for p in app.plan.pools] == ["all"]
         assert app.plan.pools[0].channels == [0, 1, 9]
         assert app.plan.pools[0].voices == app.budgetVar.get()
-        assert all(v.get() == "all" for v in app.poolVars.values())
+        assert all(app.poolVars[ch].get() == "all" for ch in (0, 1, 9))
+        assert app.poolVars[2].get() == NO_POOL       # events but no notes
         assert app.poolVar.get() == "all"
         assert app.editPool is app.plan.pools[0]
-        assert str(app.budgetSpin.cget("state")) == "normal"
+        assert app.budgetEditable
 
     def testBudgetAndPoolVoicesAreOneNumber(self, app: MidiEditorApp) -> None:
-        """With one pool the strip's spinbox and the panel's Voices mirror each other."""
+        """With one pool the strip's budget and the panel's Voices mirror each other."""
         app.budgetVar.set(3)
         assert app.poolVoicesVar.get() == 3
         app.poolVoicesVar.set(5)
@@ -829,7 +2056,7 @@ class TestPlanControls:
         assert app.plan.pools[0].channels == [0, 9]
         assert app.plan.pools[1].channels == [1]
         app._drawDemand()
-        assert str(app.budgetSpin.cget("state")) == "disabled"
+        assert not app.budgetEditable
         assert app.budgetVar.get() == app._totalVoices()
         app.poolVars[1].set(NO_POOL)
         app._channelPoolChanged(1)
@@ -860,7 +2087,7 @@ class TestPlanControls:
         app.poolVar.set("strings")
         app._renamePool()
         assert app.plan.pools[0].name == "strings"
-        assert all(v.get() == "strings" for v in app.poolVars.values())
+        assert all(app.poolVars[ch].get() == "strings" for ch in app.plan.pools[0].channels)
         assert "strings" in app.poolCombos[0].cget("values")
         app.addPool()
         app.poolVar.set("strings")
@@ -889,8 +2116,9 @@ class TestPlanControls:
         c = app.demandCanvas
         labels = [c.itemcget(i, "text") for i in c.find_all() if c.type(i) == "text"]
         assert "opm 6" in labels and "psg 8" in labels
-        dashed = [i for i in c.find_all() if c.type(i) == "line" and c.itemcget(i, "dash")]
-        assert len(dashed) == 2
+        lines = [i for i in c.find_all() if c.type(i) == "line"
+                 and c.itemcget(i, "fill") == theme.ROLL["budget"]]
+        assert len(lines) == 2
         app._onDemandMotion(FakeEvent(x=int(100 * app.ppt)))
         assert "opm " in app.status.cget("text") and "/6" in app.status.cget("text")
         assert app._stackOrder(app._ensureDemand().channels) == [0, 1, 9]
@@ -915,6 +2143,7 @@ class TestPlanControls:
         app.poolVoicesVar.set(3)
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         assert app.lossLbl.cget("text").startswith("plan refused")
         assert app.reduction.placed == []
 
@@ -922,9 +2151,11 @@ class TestPlanControls:
         """A release typed on a card reaches the plan and stretches the strip's occupancy."""
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         before = analysis.channelDemand(app._ensureDemand())[0].fraction
         app.releaseVars[0].set("500")
         app._channelReleaseChanged(0)
+        _settle(app)
         assert app.plan.release == {0: 500.0}
         assert analysis.channelDemand(app._ensureDemand())[0].fraction > before
         assert "tails clipped" in app.lossLbl.cget("text")
@@ -1071,7 +2302,8 @@ class TestPlanControls:
         """Cards show their overlap with the edited pool; the panel shows the pool's worst."""
         shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 1, 9])
         worst = max(shares[ch] for ch in (0, 1, 9))
-        assert app.overlapLbl.cget("text") == f"all: its channels overlap {worst:.0%} at most"
+        assert app.overlapLbl.cget("text") == f"{worst:.0%}"
+        assert all(f"ch {ch + 1}: {shares[ch]:.0%}" in app.overlapTip.text for ch in (0, 1, 9))
 
         for ch in (0, 1, 9):
             assert app.usageLabels[ch].cget("text").endswith(f"| overlaps all {shares[ch]:.0%}")
@@ -1082,14 +2314,16 @@ class TestPlanControls:
         app._channelPoolChanged(1)
         shares = analysis.poolOverlap(app._ensureSongDemand(), [0, 9])
         assert app.usageLabels[1].cget("text").endswith(f"| overlaps all {shares[1]:.0%}")
-        assert f"{max(shares[0], shares[9]):.0%}" in app.overlapLbl.cget("text")
+        assert app.overlapLbl.cget("text") == f"{max(shares[0], shares[9]):.0%}"
 
         # An empty new pool, then one channel in it.
         app.addPool()
-        assert app.overlapLbl.cget("text") == "pool 2: no channels"
+        assert app.overlapLbl.cget("text") == "-"
+        assert "no channels" in app.overlapTip.text
         app.poolVars[1].set("pool 2")
         app._channelPoolChanged(1)
-        assert app.overlapLbl.cget("text") == "pool 2: one channel"
+        assert app.overlapLbl.cget("text") == "-"
+        assert "one channel" in app.overlapTip.text
         against = analysis.poolOverlap(app._ensureSongDemand(), [1])
         assert app.usageLabels[0].cget("text").endswith(f"| overlaps pool 2 {against[0]:.0%}")
 
@@ -1160,6 +2394,80 @@ class TestArrangeMenu:
         assert app.song is song
 
 
+class TestChannelCommands:
+    """Adding a channel and deleting one, from the title bar and the Edit menu."""
+
+    def testAddChannelMakesAnActiveRow(self, app: MidiEditorApp) -> None:
+        """A new channel takes the lowest free one, gets a row, is active and joins the pool."""
+        assert 3 not in app.song.channels           # 0, 1, 2 and 10 are in use
+        app.addChannel()
+        assert app.song.channels[3].instrument == "Acoustic Grand Piano"
+        assert 3 in app.rowBars and app.activeChannel == 3
+        assert 3 in app.editPool.channels and app.poolVars[3].get() == app.editPool.name
+        assert app.song.dirty
+        assert app.status.cget("text") == "Added Ch 4 Acoustic Grand Piano"
+
+    def testAddedChannelTakesNotes(self, app: MidiEditorApp) -> None:
+        """A double click on the roll after adding a channel writes a note on it."""
+        app.addChannel()
+        x = 20 * app.ppt * app.song.mf.division   # bar 5 and a bit
+        y = (127 - 100) * app.rowH + 2           # pitch 100, nothing there
+        app.onDouble(FakeEvent(*_toWidget(app, x, y)))
+        assert any(n.channel == 3 and n.pitch == 100 for n in app.song.notes)
+
+    def testDrumChannelOnlyWhileFree(self, app: MidiEditorApp) -> None:
+        """The drum channel can be started only while no part uses it."""
+        assert app.editMenu.entrycget("Add Drum Channel", "state") == "disabled"
+        app.addChannel(drums=True)
+        assert app.status.cget("text") == "Ch 10 is in use"
+
+    def testAddingStopsWhenEveryChannelIsUsed(self, app: MidiEditorApp) -> None:
+        """With all fifteen non-drum channels in use, + is greyed out."""
+        while app._freeChannel(False) is not None:
+            app.addChannel()
+
+        assert app.addChannelBtn.instate(["disabled"])
+        assert app.editMenu.entrycget("Add Channel", "state") == "disabled"
+        app.addChannel()
+        assert app.status.cget("text") == "Every channel is in use"
+
+    def testDeleteChannelAsksFirst(self, app: MidiEditorApp,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        """Declined, nothing changes; confirmed, the channel and its plan entries go."""
+        asked: list[str] = []
+        answer = [False]
+        monkeypatch.setattr("montyroll.app.messagebox.askyesno",
+                            lambda title, text, **k: (asked.append(text), answer[0])[1])
+        app._setActiveChannel(1)
+        app.plan.priority[1] = 2.0
+        notes = app.song.channels[1].noteCount
+        app.deleteChannel()
+        assert f"Delete Ch 2 Flute and its {notes} notes?" in asked[0]
+        assert 1 in app.song.channels and not app.song.dirty
+        answer[0] = True
+        app.deleteChannel()
+        assert 1 not in app.song.channels and 1 not in app.rowBars
+        assert all(1 not in pool.channels for pool in app.plan.pools)
+        assert 1 not in app.plan.priority and 1 not in app.muteVars
+        assert app.activeChannel == 2 and app.song.dirty
+        assert app.status.cget("text") == f"Deleted Ch 2 Flute and {notes} notes"
+
+    def testMuteSurvivesAddingAChannel(self, app: MidiEditorApp) -> None:
+        """Rebuilding the rows for a new channel keeps the other rows' mutes."""
+        app.muteVars[0].set(True)
+        app.addChannel()
+        assert app.muteVars[0].get()
+
+    def testClearAfterAnInstrumentChangeLeavesNoDeadWidgets(self, app: MidiEditorApp) -> None:
+        """Clear rebuilds the rows when it restores an instrument; the lists follow."""
+        app.song.setProgram(0, 40)
+        app.clearMuteSolo()
+        assert all(combo.winfo_exists() for combo in app.poolCombos)
+        assert all(label.winfo_exists() for label in app.usageLabels.values())
+        app.addPool()
+        assert len(app.plan.pools) == 2
+
+
 class TestTempoEditing:
     """Tempo changes from the Edit menu and the ruler."""
 
@@ -1186,6 +2494,7 @@ class TestTempoEditing:
         assert app.song.dirty
         assert "Tempo 90 bpm from bar 2" in app.status.cget("text")
         assert len(app.canvas.find_withtag("tempo")) == 2
+        app.openDrawer("Events")
         rows = [app.evTree.item(i)["values"] for i in app.evTree.get_children()]
         assert any(r[5] == "tempo" and r[6] == "90.0 bpm" for r in rows)
 
@@ -1272,13 +2581,43 @@ class TestTempoEditing:
         assert scheduled == [1]
 
 
+class TestDrawer:
+    """Events and Report in the drawer under the roll."""
+
+    def testClosedAtStart(self, app: MidiEditorApp) -> None:
+        """The window opens with the drawer shut and both buttons pointing up."""
+        assert not app.drawerOpen
+        assert not app.nb.winfo_ismapped()
+        assert all(b.cget("text").startswith(DRAWER_OPEN_GLYPH)
+                   for b in app.drawerButtons.values())
+
+    def testButtonOpensAndClosesItsPage(self, app: MidiEditorApp) -> None:
+        """A button opens its page; the same button again closes the drawer."""
+        app.toggleDrawer("Events")
+        app.update()
+        assert app.drawerOpen and app.nb.winfo_ismapped()
+        assert app.drawerButtons["Events"].cget("text").startswith(DRAWER_CLOSE_GLYPH)
+        app.toggleDrawer("Report")
+        assert app.drawerOpen
+        assert app.drawerButtons["Report"].cget("text").startswith(DRAWER_CLOSE_GLYPH)
+        assert app.drawerButtons["Events"].cget("text").startswith(DRAWER_OPEN_GLYPH)
+        app.toggleDrawer("Report")
+        app.update()
+        assert not app.drawerOpen and not app.nb.winfo_ismapped()
+
+    def testEventCount(self, app: MidiEditorApp) -> None:
+        """The bar counts every event in the file."""
+        total = sum(len(track) for track in app.song.mf.tracks)
+        assert app.eventCountLbl.cget("text") == f"{total:,} events"
+
+
 class TestReportTab:
     """The Report tab: Original and Reduced sub-tabs and the Save button."""
 
     def testOriginalIsGeneratedWhenShown(self, app: MidiEditorApp) -> None:
         """Nothing is generated until the tab is selected; then the text appears."""
         assert app.reports == {"original": None, "reduced": None}
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.update()
         text = app.reportTexts["original"].get("1.0", "end")
         assert text.startswith("MontyRoll report: song.mid")
@@ -1288,14 +2627,14 @@ class TestReportTab:
 
     def testReducedIsANoteWhileReductionIsOff(self, app: MidiEditorApp) -> None:
         """The Reduced sub-tab explains itself until the reduction is on."""
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.reportNb.select(1)
         app.update()
         assert app.reportTexts["reduced"].get("1.0", "end").startswith("Reduction is off.")
 
     def testReducedFollowsTheReduction(self, app: MidiEditorApp) -> None:
         """With Reduce on, the Reduced sub-tab describes the reduced song and says so."""
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.reportNb.select(1)
         app.budgetVar.set(1)
         app.reduceVar.set(True)
@@ -1313,7 +2652,7 @@ class TestReportTab:
 
     def testReportsFollowEdits(self, app: MidiEditorApp) -> None:
         """Deleting every note regenerates the report on view."""
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.update()
         app.selectAll()
         app.deleteSelection()
@@ -1328,7 +2667,7 @@ class TestReportTab:
         app.saveReport()
         assert out.read_text(encoding="ascii") == app._ensureReport("original")
         assert "Saved original report" in app.status.cget("text")
-        app.nb.select(2)
+        app.openDrawer("Report")
         app.reportNb.select(1)
         app.update()
         app.saveReport()
@@ -1339,9 +2678,28 @@ class TestEventList:
     """The decoded event table."""
 
     def testEveryEventIsListed(self, app: MidiEditorApp) -> None:
-        """One row per event, all of them for a small file."""
+        """One row per event, all of them for a small file, once the page is on view."""
+        assert not app.evTree.get_children()
+        app.openDrawer("Events")
         total = sum(len(t) for t in app.song.mf.tracks)
         assert len(app.evTree.get_children()) == total
+
+    def testAnEditOnViewRefillsThePage(self, app: MidiEditorApp) -> None:
+        """A note added while the page is on view is listed at the next idle moment;
+        one added while it is hidden is listed when it opens."""
+        app.openDrawer("Events")
+        before = len(app.evTree.get_children())
+        app.song.addNote(0, 90, 100, 0, 480)
+        app._markDirty()
+        app.update()
+        assert len(app.evTree.get_children()) == before + 2
+        app.openDrawer("Report")
+        app.song.addNote(0, 91, 100, 0, 480)
+        app._markDirty()
+        app.update()
+        assert len(app.evTree.get_children()) == before + 2
+        app.openDrawer("Events")
+        assert len(app.evTree.get_children()) == before + 4
 
     def testRowsAreCapped(self, app: MidiEditorApp) -> None:
         """A huge file shows the first MAX_EVENT_ROWS rows plus one overflow line."""
@@ -1370,6 +2728,45 @@ class TestEventList:
         """Each event kind decodes to its readable type and detail text."""
         assert MidiEditorApp._evType(event) == kind
         assert MidiEditorApp._evDetail(event) == detail
+
+
+class TestTransportControls:
+    """The master volume beside the readout and the playback tempo."""
+
+    def testVolumeSitsBesideTheReadout(self, app: MidiEditorApp) -> None:
+        """Vol follows the readout on the left, its slider between its name and figure."""
+        bar = app.volLbl.master
+        parts = bar.pack_slaves()
+        readout = app.timeLbl.master
+        at = parts.index(readout)
+        assert str(parts[at + 1].cget("text")) == "Vol"
+        assert isinstance(parts[at + 2], ttk.Scale)
+        assert parts[at + 3] is app.volLbl
+        assert parts[at + 2].cget("to") == MASTER_MAX
+
+    def testVolumeShowsItsFigureAndResets(self, app: MidiEditorApp) -> None:
+        """The figure follows the slider, and a double click puts it back to 100%."""
+        parts = app.volLbl.master.pack_slaves()
+        scale = parts[parts.index(app.volLbl) - 1]
+        app.masterVar.set(40)
+        app._masterChanged()
+        assert app.volLbl.cget("text") == "40%"
+        assert "_resetVolume" in scale.bind("<Double-Button-1>")
+        assert app._resetVolume() == "break"
+        assert app.masterVar.get() == 100 and app.volLbl.cget("text") == "100%"
+
+    def testTempoIsNamedAndResetsOnDoubleClick(self, app: MidiEditorApp) -> None:
+        """The slider is labelled Tempo, and a double click puts it back to 100%."""
+        labels = [str(w.cget("text")) for w in app.speedLbl.master.winfo_children()
+                  if isinstance(w, ttk.Label)]
+        assert "Tempo" in labels and "Speed" not in labels
+        app.speedVar.set(200)
+        app._speedChanged()
+        assert app.speedLbl.cget("text") == "200%"
+        scale = next(w for w in app.speedLbl.master.winfo_children() if isinstance(w, ttk.Scale))
+        assert "_resetTempo" in scale.bind("<Double-Button-1>")
+        assert app._resetTempo() == "break"
+        assert app.speedVar.get() == 100 and app.speedLbl.cget("text") == "100%"
 
 
 class TestPlayback:
@@ -1429,6 +2826,28 @@ class TestPlayback:
         assert app.cursorItem is None
         assert app.demandCursorItem is None
 
+    def testReadoutWhenStopped(self, app: MidiEditorApp) -> None:
+        """Stopped, the readout shows the opening position and tempo."""
+        assert app.timeLbl.cget("text") == "0:00.00"
+        bpm = round(app.song.tempoAt(0))
+        assert app.posLbl.cget("text") == f"bar 1:1   {TEMPO_GLYPH}={bpm}"
+
+    def testReadoutFollowsPlayback(self, app: MidiEditorApp,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        """Playing, the readout shows the cursor; stopping puts the opening position back."""
+        calls: list[int] = []
+        monkeypatch.setattr(app.player, "play", lambda *a, **k: calls.append(1) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        monkeypatch.setattr(type(app.player), "playing", property(lambda self: bool(calls)))
+        bar2 = app.song.barTick(2)
+        app.playFrom(bar2)
+        app._tickCursor()
+        assert app.posLbl.cget("text").startswith("bar 2:1")
+        assert app.timeLbl.cget("text") != "0:00.00"
+        app.stopPlayback()
+        assert app.timeLbl.cget("text") == "0:00.00"
+        assert app.posLbl.cget("text").startswith("bar 1:1")
+
     def testLiveUpdateIsDebounced(self, app: MidiEditorApp,
                                   monkeypatch: pytest.MonkeyPatch) -> None:
         """Several quick changes while playing restart the synth once."""
@@ -1480,7 +2899,7 @@ class TestPlayFromAndChangeAll:
                 pass
 
         monkeypatch.setattr("montyroll.app.tk.Menu", FakeMenu)
-        app.onContext(FakeEvent(x=int(3500 * app.ppt), y=3))     # late in bar 2, empty
+        app.onContext(FakeEvent(*_toWidget(app, int(3500 * app.ppt), 3)))   # late in bar 2, empty
         assert menus[-1].items == ["Play from bar 3", "Play from beat 2:4"]
         note = app.song.notes[0]
         app.onContext(FakeEvent(*_noteCentre(app, note)))

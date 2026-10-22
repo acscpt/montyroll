@@ -18,10 +18,9 @@ on MIDI note 36 is not a unison with a bass C2.
 
 from __future__ import annotations
 
-from bisect import bisect_right
-from collections import Counter
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
-from itertools import combinations
+from itertools import accumulate, combinations
 
 from . import model
 
@@ -189,27 +188,117 @@ def _classKey(note: model.Note) -> tuple[str, int]:
     return key
 
 
-def _bump(counter: Counter, key: object, delta: int) -> int:
-    """Adjust a multiset count and report the change in distinct keys.
+def _sweepRange(song: model.Song, notes: list[model.Note], start: int | None,
+                end: int | None, channels: list[int]) -> Demand:
+    """Cut notes into constant-state segments between two ticks and count each.
+
+    Every note's start and end are boundaries, and at a shared tick
+    note-offs come before note-ons, so a note re-struck where its
+    predecessor ends counts as one voice. Each count is a running tally:
+    the multisets of keys hold how many notes share a key, and the distinct
+    count changes only when a key appears or vanishes.
 
     Args:
-        counter: the multiset.
-        key: the key to adjust.
-        delta: +1 or -1.
+        song: for the tempo map.
+        notes: the notes to sweep.
+        start: a tick from which to begin, the notes sounding there struck
+            at it; None to begin at the first note.
+        end: a tick at which to stop, with the last segment recorded up to
+            it and no note released at or after it; None to run to the last
+            note's end.
+        channels: the channels to count, every note's among them.
 
     Returns:
-        int: +1 when the key appeared, -1 when it vanished, else 0.
+        Demand: the segments, with `endTick` the last tick reached.
     """
-    before = counter[key]
-    after = before + delta
+    # Boundary events, offs before ons at a tick; the sequence number keeps
+    # the sort from comparing notes.
+    events: list[tuple[int, int, int, model.Note]] = []
 
-    if after:
-        counter[key] = after
-    else:
-        del counter[key]
+    for seq, n in enumerate(notes):
+        events.append((n.start if start is None else max(n.start, start), 1, seq, n))
 
-    change = (1 if after else 0) - (1 if before else 0)
-    return change
+        if end is None or n.end < end:
+            events.append((n.end, 0, seq, n))
+
+    events.sort()
+    keys = [((n.channel, n.pitch), _pitchKey(n), _classKey(n)) for n in notes]
+    column = {ch: i for i, ch in enumerate(channels)}
+    perChannel = [0] * len(channels)
+    voiceKeys: dict = {}
+    pitchKeys: dict = {}
+    classKeys: dict = {}
+    raw = voices = pitches = classes = 0
+    demand = Demand()
+    rows: list[tuple[int, ...]] = []
+    prevTick = start
+    prevSec = song.tickToSeconds(start) if start is not None else 0.0
+
+    def record(tick: int):
+        """Append the segment from prevTick to tick with the counts in force."""
+        nonlocal prevSec
+        sec = song.tickToSeconds(tick)
+        demand.ticks.append(prevTick)
+        demand.seconds.append(sec - prevSec)
+        demand.raw.append(raw)
+        demand.voices.append(voices)
+        demand.pitches.append(pitches)
+        demand.classes.append(classes)
+        rows.append(tuple(perChannel))
+        prevSec = sec
+
+    for tick, kind, seq, n in events:
+        # A new tick closes the segment that ran up to it.
+        if tick != prevTick:
+            if prevTick is not None:
+                record(tick)
+            else:
+                prevSec = song.tickToSeconds(tick)
+
+            prevTick = tick
+
+        delta = 1 if kind else -1
+        raw += delta
+        perChannel[column[n.channel]] += delta
+        voiceKey, pitchKey, classKey = keys[seq]
+
+        before = voiceKeys.get(voiceKey, 0)
+        after = before + delta
+        voices += (after != 0) - (before != 0)
+
+        if after:
+            voiceKeys[voiceKey] = after
+        else:
+            del voiceKeys[voiceKey]
+
+        before = pitchKeys.get(pitchKey, 0)
+        after = before + delta
+        pitches += (after != 0) - (before != 0)
+
+        if after:
+            pitchKeys[pitchKey] = after
+        else:
+            del pitchKeys[pitchKey]
+
+        before = classKeys.get(classKey, 0)
+        after = before + delta
+        classes += (after != 0) - (before != 0)
+
+        if after:
+            classKeys[classKey] = after
+        else:
+            del classKeys[classKey]
+
+    if end is not None and prevTick is not None and end > prevTick:
+        record(end)
+        prevTick = end
+
+    # The per-channel counts are kept a row per segment and turned into a
+    # column per channel once.
+    columns = list(zip(*rows)) if rows else [()] * len(channels)
+    demand.channels = {ch: list(columns[i]) for i, ch in enumerate(channels)}
+    demand.endTick = prevTick if prevTick is not None else 0
+    return demand
 
 
 def sweep(song: model.Song, notes: list[model.Note] | None = None) -> Demand:
@@ -232,64 +321,79 @@ def sweep(song: model.Song, notes: list[model.Note] | None = None) -> Demand:
     if notes is None:
         notes = song.notes
 
-    demand = Demand()
-
     if not notes:
-        return demand
+        empty = Demand()
+        return empty
 
-    # Boundary events, offs before ons at the same tick. The sequence number
-    # keeps the sort from ever comparing Note objects.
-    events: list[tuple[int, int, int, model.Note]] = []
-
-    for seq, n in enumerate(notes):
-        events.append((n.start, 1, seq, n))
-        events.append((n.end, 0, seq, n))
-
-    events.sort(key=lambda e: (e[0], e[1], e[2]))
-
-    # Running multisets, one per way of counting, and the distinct-key count
-    # of each kept alongside so a segment costs nothing to record.
-    channelsInUse = sorted({n.channel for n in notes})
-    perChannel: dict[int, int] = {ch: 0 for ch in channelsInUse}
-    voiceKeys: Counter = Counter()
-    pitchKeys: Counter = Counter()
-    classKeys: Counter = Counter()
-    raw = voices = pitches = classes = 0
-    demand.channels = {ch: [] for ch in channelsInUse}
-    prevTick: int | None = None
-    i = 0
-
-    while i < len(events):
-        tick = events[i][0]
-
-        # Record the segment that just ended, with the state in force
-        # during it.
-        if prevTick is not None and tick > prevTick:
-            demand.ticks.append(prevTick)
-            demand.seconds.append(song.tickToSeconds(tick) - song.tickToSeconds(prevTick))
-            demand.raw.append(raw)
-            demand.voices.append(voices)
-            demand.pitches.append(pitches)
-            demand.classes.append(classes)
-
-            for ch in channelsInUse:
-                demand.channels[ch].append(perChannel[ch])
-
-        # Apply every event at this tick before looking at the next.
-        while i < len(events) and events[i][0] == tick:
-            _, kind, _, n = events[i]
-            delta = 1 if kind else -1
-            raw += delta
-            perChannel[n.channel] += delta
-            voices += _bump(voiceKeys, (n.channel, n.pitch), delta)
-            pitches += _bump(pitchKeys, _pitchKey(n), delta)
-            classes += _bump(classKeys, _classKey(n), delta)
-            i += 1
-
-        prevTick = tick
-
-    demand.endTick = prevTick if prevTick is not None else 0
+    demand = _sweepRange(song, notes, None, None, sorted({n.channel for n in notes}))
     return demand
+
+
+def resweep(song: model.Song, demand: Demand, t0: int, t1: int,
+            index: StepIndex | None = None) -> Demand:
+    """Sweep a song again after an edit, keeping the segments the edit cannot reach.
+
+    `demand` is the sweep of the song before the edit, and every note the
+    edit changed lay between `t0` and `t1` both before and after it, so the
+    boundaries outside that span are unchanged. The segments before the
+    last boundary ahead of `t0`, and from the first boundary past `t1`, are
+    kept; the stretch between is swept from the notes sounding at its
+    start, or from the first note when no boundary lies ahead of `t0`. The
+    result equals `sweep(song)`.
+
+    Args:
+        song: the song after the edit.
+        demand: its sweep before the edit.
+        t0: the first tick the edit touched.
+        t1: the last.
+        index: the song's `stepIndex` after the edit, built when omitted.
+
+    Returns:
+        Demand: the sweep of the song as it now is.
+    """
+    # A sweep with no segments has nothing to keep, and a song with no
+    # notes has nothing to sweep.
+    if not demand.ticks or not song.notes:
+        fresh = sweep(song)
+        return fresh
+
+    boundaries = demand.ticks + [demand.endTick]
+    i = bisect_left(boundaries, t0) - 1
+    j = bisect_right(boundaries, t1)
+    a = boundaries[i] if i >= 0 else None
+    b = boundaries[j] if j < len(boundaries) else None
+    index = index or stepIndex(song)
+    last = bisect_left(index.starts, b) if b is not None else len(index.notes)
+
+    if a is None:
+        notes = index.notes[:last]
+    else:
+        notes = [n for n in index.notes[bisect_right(index.reach, a):last] if n.end > a]
+
+    # The stretch is swept from the notes sounding at its start, counting
+    # the channels as a full sweep would list them.
+    channelsInUse = sorted({n.channel for n in song.notes})
+    middle = _sweepRange(song, notes, a, b, channelsInUse)
+
+    # The kept segments either side, with a channel the edit introduced
+    # silent in them and one it emptied dropped.
+    head = slice(0, max(i, 0))
+    tail = slice(j, len(demand.ticks)) if b is not None else slice(0, 0)
+    result = Demand(
+        ticks=demand.ticks[head] + middle.ticks + demand.ticks[tail],
+        endTick=demand.endTick if b is not None else middle.endTick,
+        seconds=demand.seconds[head] + middle.seconds + demand.seconds[tail],
+        raw=demand.raw[head] + middle.raw + demand.raw[tail],
+        voices=demand.voices[head] + middle.voices + demand.voices[tail],
+        pitches=demand.pitches[head] + middle.pitches + demand.pitches[tail],
+        classes=demand.classes[head] + middle.classes + demand.classes[tail])
+    kept = len(demand.ticks)
+
+    for ch in channelsInUse:
+        old = demand.channels.get(ch, [0] * kept)
+        result.channels[ch] = old[head] + middle.channels[ch] + old[tail]
+
+    return result
 
 
 def stats(counts: list[int], seconds: list[float],
@@ -624,6 +728,17 @@ def _omissionCost(interval: int) -> float:
     return cost
 
 
+# Every template on every root, ready to score: the root, its pitch classes
+# as a bit mask and in the template's order, the cost of each one being
+# absent by pitch class, the template's own cost, and the chord's name.
+_CANDIDATES = tuple(
+    (root, sum(1 << ((root + i) % 12) for i in intervals),
+     tuple((root + i) % 12 for i in intervals),
+     {(root + i) % 12: _omissionCost(i) for i in intervals},
+     RARE_CHORD_COST.get(suffix, 0.0), f"{PITCH_CLASS_NAMES[root]}{suffix}")
+    for root in range(12) for suffix, intervals in CHORD_TEMPLATES)
+
+
 def nameChord(profile: list[float], bass: int | None = None, threshold: float = 0.6) -> str:
     """Name the chord a pitch-class profile most resembles.
 
@@ -659,81 +774,108 @@ def nameChord(profile: list[float], bass: int | None = None, threshold: float = 
 
     useBass = bass is not None and sounding >= 3
     best = (-1.0, NO_CHORD)
+    present = sum(1 << pc for pc, w in enumerate(profile) if w != 0)
 
-    for root in range(12):
-        for suffix, intervals in CHORD_TEMPLATES:
-            absent = [i for i in intervals if profile[(root + i) % 12] == 0]
+    for root, mask, classes, omission, rare, name in _CANDIDATES:
+        absent = mask & ~present
 
-            # A chord may lack one of its tones but not two: a seventh is
-            # never named from two notes.
-            if len(absent) > 1:
-                continue
+        # A chord may lack one of its tones but not two: a seventh is never
+        # named from two notes.
+        if absent & (absent - 1):
+            continue
 
-            covered = sum(profile[(root + i) % 12] for i in intervals)
+        covered = 0
 
-            # Coverage less a cost for the absent tone that follows how
-            # dispensable it is: a fifth is dropped all the time, a third
-            # less often, a root rarely. C and A are therefore A minor
-            # without its fifth rather than F without its root, and a bare
-            # fifth is C rather than a seventh. The bass breaks ties between
-            # readings of a fuller chord.
-            score = covered / total - RARE_CHORD_COST.get(suffix, 0.0)
+        for pc in classes:
+            covered += profile[pc]
 
-            if absent:
-                score -= _omissionCost(absent[0])
+        # Coverage less a cost for the absent tone that follows how
+        # dispensable it is: a fifth is dropped all the time, a third less
+        # often, a root rarely. C and A are therefore A minor without its
+        # fifth rather than F without its root, and a bare fifth is C rather
+        # than a seventh. The bass breaks ties between readings of a fuller
+        # chord.
+        score = covered / total - rare
 
-            if useBass and root == bass:
-                score += 0.2
+        if absent:
+            score -= omission[absent.bit_length() - 1]
 
-            if score > best[0]:
-                best = (score, f"{PITCH_CLASS_NAMES[root]}{suffix}")
+        if useBass and root == bass:
+            score += 0.2
+
+        if score > best[0]:
+            best = (score, name)
 
     name = best[1] if best[0] >= threshold else NO_CHORD
     return name
 
 
-def chordTrack(song: model.Song, stepTicks: int, smooth: int = 1) -> list[tuple[int, int, str]]:
-    """Name the chord in each step of the piece and merge repeats.
+@dataclass
+class StepIndex:
+    """A song's notes in start order, arranged so a step finds its notes by bisection."""
+
+    notes: list[model.Note]
+    starts: list[int]       # each note's start, in the same order
+    reach: list[int]        # the latest end among the notes up to and including each
+
+
+def stepIndex(song: model.Song) -> StepIndex:
+    """Index a song's notes for naming chords one step at a time.
 
     Args:
         song: the song.
-        stepTicks: the analysis step, typically a beat or a bar.
+
+    Returns:
+        StepIndex: the notes sorted by start, their starts, and the running
+        maximum of their ends.
+    """
+    notes = sorted(song.notes, key=lambda n: n.start)
+    reach = list(accumulate((n.end for n in notes), max))
+    index = StepIndex(notes, [n.start for n in notes], reach)
+    return index
+
+
+def chordAt(song: model.Song, index: StepIndex, t0: int, t1: int) -> str:
+    """Name the chord in one step, from the notes sounding in it.
+
+    The notes are found by bisection: the first that can still sound is the
+    first whose running end reaches past the step's start, and the last is
+    the last to start before its end. The bass is the lowest pitched note
+    still sounding at the step's start or starting within it.
+
+    Args:
+        song: the song.
+        index: the song's `stepIndex`.
+        t0: the step's start tick.
+        t1: its end tick.
+
+    Returns:
+        str: the chord name.
+    """
+    window = index.notes[bisect_right(index.reach, t0):bisect_left(index.starts, t1)]
+    lowest = min((n for n in window if n.channel != model.DRUM_CHANNEL and n.end > t0),
+                 key=lambda n: n.pitch, default=None)
+    bass = lowest.pitch % 12 if lowest is not None else None
+    name = nameChord(pitchClassProfile(song, t0, t1, window), bass)
+    return name
+
+
+def chordRuns(names: list[str], stepTicks: int, smooth: int = 1) -> list[tuple[int, int, str]]:
+    """Merge a chord name per step into runs, absorbing short islands.
+
+    Args:
+        names: the chord in each step, from tick 0.
+        stepTicks: the step's length.
         smooth: a run of at most this many steps sitting between two runs of
             the same name is absorbed into them, so a bass note on the
             downbeat does not split a bar of one chord into three labels.
             Zero keeps every step as named.
 
     Returns:
-        list[tuple[int, int, str]]: (start tick, end tick, chord name) runs
-        covering the piece, consecutive equal names merged.
+        list[tuple[int, int, str]]: (start tick, end tick, chord name) runs,
+        consecutive equal names merged.
     """
-    names: list[str] = []
-    tick = 0
-
-    # Notes sorted by start let each step scan only the notes that can
-    # overlap it.
-    notes = sorted(song.notes, key=lambda n: n.start)
-    first = 0
-
-    while tick < song.maxTick:
-        end = tick + stepTicks
-
-        while first < len(notes) and notes[first].end <= tick:
-            first += 1
-
-        window = []
-
-        for n in notes[first:]:
-            if n.start >= end:
-                break
-
-            window.append(n)
-
-        lowest = min((n for n in window if n.channel != model.DRUM_CHANNEL),
-                     key=lambda n: n.pitch, default=None)
-        bass = lowest.pitch % 12 if lowest is not None else None
-        names.append(nameChord(pitchClassProfile(song, tick, end, window), bass))
-        tick = end
+    names = list(names)
 
     # Smoothing: a short island between two stretches of the same name
     # takes that name.
@@ -763,6 +905,24 @@ def chordTrack(song: model.Song, stepTicks: int, smooth: int = 1) -> list[tuple[
         else:
             runs.append((start, end, name))
 
+    return runs
+
+
+def chordTrack(song: model.Song, stepTicks: int, smooth: int = 1) -> list[tuple[int, int, str]]:
+    """Name the chord in each step of the piece and merge repeats.
+
+    Args:
+        song: the song.
+        stepTicks: the analysis step, typically a beat or a bar.
+        smooth: as `chordRuns` takes it.
+
+    Returns:
+        list[tuple[int, int, str]]: (start tick, end tick, chord name) runs
+        covering the piece, consecutive equal names merged.
+    """
+    index = stepIndex(song)
+    names = [chordAt(song, index, t, t + stepTicks) for t in range(0, song.maxTick, stepTicks)]
+    runs = chordRuns(names, stepTicks, smooth)
     return runs
 
 

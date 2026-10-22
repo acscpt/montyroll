@@ -147,6 +147,8 @@ class Song:
         self.channels: dict[int, ChannelInfo] = {}
         self.trackNames: list[str] = []
         self.tempoMap: list[tuple[int, int, float]] = []  # (tick, uspb, sec_at_tick)
+        self.tempoTicks: list[int] = []        # the map's ticks, for bisection
+        self.tempoSeconds: list[float] = []    # and its times
         self.timeSigs: list[tuple[int, int, int]] = []    # (tick, num, denom)
         self.markers: list[tuple[int, str]] = []
         self.maxTick = 0
@@ -242,6 +244,8 @@ class Song:
         self.trackNames = ["" for _ in self.mf.tracks]
         self.timeSigs = []
         self.markers = []
+        notes = self.notes
+        channels = self.channels
         maxTick = 0
 
         for ti, track in enumerate(self.mf.tracks):
@@ -251,12 +255,15 @@ class Song:
             pending: dict[tuple[int, int], list[Note]] = {}
 
             for e in track:
-                maxTick = max(maxTick, e.tick)
+                if e.tick > maxTick:
+                    maxTick = e.tick
+
+                status = e.status
 
                 # Meta events feed the song-level tables.  Only the first
                 # track name on a track is kept, and tempo and time signature
                 # payloads are checked for length before they are decoded.
-                if e.status == smf.META:
+                if status == smf.META:
                     if e.metaType == smf.META_TRACK_NAME and not self.trackNames[ti]:
                         self.trackNames[ti] = e.data.decode("latin-1").strip()
                     elif e.metaType == smf.META_TIME_SIG and len(e.data) >= 2:
@@ -267,42 +274,58 @@ class Song:
                     continue
 
                 # Sysex events carry no channel and contribute nothing further.
-                ch = e.channel
-
-                if ch < 0:
+                if status >= 0xF0:
                     continue
 
-                info = self.channels.setdefault(ch, ChannelInfo(ch))
+                ch = status & 0x0F
+                info = channels.get(ch)
+
+                if info is None:
+                    info = channels[ch] = ChannelInfo(ch)
+
                 info.tracks.add(ti)
-                kind = e.status & 0xF0
+                kind = status & 0xF0
+                data = e.data
 
                 # Program changes are recorded only until the channel's first
                 # note, so info.program is the instrument actually in force
                 # when the channel starts sounding.  The first CC7 seen is
-                # taken as the channel volume.
+                # taken as the channel volume.  The note tests are those of
+                # Event.isNoteOn and isNoteOff, read from the status byte.
                 if kind == 0xC0:
                     if info.noteCount == 0:
-                        info.program = e.data[0]
+                        info.program = data[0]
                 elif kind == 0xB0:
-                    info.controllers.add(e.data[0])
-                    if e.data[0] == 7 and info.volume < 0:
-                        info.volume = e.data[1]
+                    info.controllers.add(data[0])
+                    if data[0] == 7 and info.volume < 0:
+                        info.volume = data[1]
                 elif kind == 0xE0:
                     info.hasPitchBend = True
-                elif e.isNoteOn:
+                elif kind == 0x90 and len(data) > 1 and data[1] > 0:
                     # A note-on opens a Note whose end is provisionally its
                     # start; the matching note-off supplies the real end.
-                    note = Note(ti, ch, e.data[0], e.data[1], e.tick, e.tick, e)
-                    pending.setdefault((ch, e.data[0]), []).append(note)
-                    self.notes.append(note)
+                    pitch = data[0]
+                    note = Note(ti, ch, pitch, data[1], e.tick, e.tick, e)
+                    stack = pending.get((ch, pitch))
+
+                    if stack is None:
+                        pending[(ch, pitch)] = [note]
+                    else:
+                        stack.append(note)
+
+                    notes.append(note)
                     info.noteCount += 1
-                    info.lo = min(info.lo, e.data[0])
-                    info.hi = max(info.hi, e.data[0])
-                elif e.isNoteOff:
+
+                    if pitch < info.lo:
+                        info.lo = pitch
+
+                    if pitch > info.hi:
+                        info.hi = pitch
+                elif kind == 0x80 or (kind == 0x90 and len(data) > 1 and data[1] == 0):
                     # Close the oldest open note of this pitch.  A zero-length
                     # note is stretched to one tick so it stays visible and
                     # editable on the roll.
-                    stack = pending.get((ch, e.data[0]))
+                    stack = pending.get((ch, data[0]))
 
                     if stack:
                         note = stack.pop(0)
@@ -342,7 +365,7 @@ class Song:
         """
         # Find the tempo segment in force at tick and extrapolate from its
         # start time; index 0 also serves any tick before the first entry.
-        i = bisect_right([t for t, _, _ in self.tempoMap], tick) - 1
+        i = bisect_right(self.tempoTicks, tick) - 1
         t0, uspb, sec = self.tempoMap[max(i, 0)]
         return sec + (tick - t0) * uspb / 1e6 / self.mf.division
 
@@ -357,7 +380,7 @@ class Song:
         """
         # Find the tempo segment whose start time precedes seconds and
         # extrapolate from its start tick; index 0 also serves negative times.
-        i = bisect_right([s for _, _, s in self.tempoMap], seconds) - 1
+        i = bisect_right(self.tempoSeconds, seconds) - 1
         t0, uspb, sec = self.tempoMap[max(i, 0)]
         return t0 + (seconds - sec) * 1e6 * self.mf.division / uspb
 
@@ -542,6 +565,71 @@ class Song:
 
         self.dirty = True
 
+    def addChannel(self, channel: int, program: int = 0) -> None:
+        """Start a channel with a program change at tick 0.
+
+        A format 0 file has its one track, so the program change goes there;
+        any other file gains a track named after the instrument for it, at
+        the end, so the tracks already there keep their places and the notes
+        held elsewhere stay valid.
+
+        Args:
+            channel: 0-based MIDI channel, not yet in use.
+            program: GM program number, 0-127.
+
+        Raises:
+            ValueError: the channel is already in use.
+        """
+        if channel in self.channels:
+            raise ValueError(f"Ch {channel + 1} is already in use")
+
+        info = ChannelInfo(channel, program=program)
+        change = smf.Event(0, 0xC0 | channel, bytearray([program]))
+
+        if self.mf.format == 0:
+            self.mf.tracks[0].insert(0, change)
+            ti = 0
+        else:
+            name = info.instrument.encode("latin-1")
+            self.mf.tracks.append([smf.Event(0, smf.META, bytearray(name), smf.META_TRACK_NAME),
+                                   change])
+            self.trackNames.append(info.instrument)
+            ti = len(self.mf.tracks) - 1
+
+        info.tracks.add(ti)
+        self.channels[channel] = info
+        self.dirty = True
+
+    def removeChannel(self, channel: int) -> int:
+        """Remove every event on a channel, and the tracks it leaves with nothing to carry.
+
+        Notes, program changes, controllers and pitch bend all go. A track
+        that had events on the channel and is left with only its name and
+        end of track is dropped, unless it is the file's last track. The
+        derived views are rebuilt, so notes held elsewhere are stale after.
+
+        Args:
+            channel: 0-based MIDI channel.
+
+        Returns:
+            int: the number of notes removed.
+        """
+        removed = sum(1 for n in self.notes if n.channel == channel)
+        bare = (smf.META_TRACK_NAME, smf.META_END_OF_TRACK)
+        kept: list[list[smf.Event]] = []
+        emptied: list[list[smf.Event]] = []
+
+        for track in self.mf.tracks:
+            rest = [e for e in track if e.channel != channel]
+            empty = len(rest) < len(track) and all(e.status == smf.META and e.metaType in bare
+                                                   for e in rest)
+            (emptied if empty else kept).append(rest)
+
+        self.mf.tracks = kept or emptied[:1]
+        self.rebuild()
+        self.dirty = True
+        return removed
+
     def setProgram(self, channel: int, program: int) -> None:
         """Set the instrument on a channel by rewriting every program change it has.
 
@@ -719,7 +807,7 @@ class Song:
         """Recompute the tempo map from the tempo events after an edit.
 
         The notes, channel summaries and markers are untouched; only the
-        tick-to-seconds table changes.
+        tick-to-seconds table and its two lists for bisection change.
         """
         tempos: list[tuple[int, int]] = []
 
@@ -741,6 +829,9 @@ class Song:
                 sec = psec + (tick - ptick) * puspb / 1e6 / self.mf.division
 
             self.tempoMap.append((tick, uspb, sec))
+
+        self.tempoTicks = [t for t, _, _ in self.tempoMap]
+        self.tempoSeconds = [sec for _, _, sec in self.tempoMap]
 
     # ------------------------------------------------------------- playback
     def buildSlice(self, start_tick: int) -> smf.MidiFile:

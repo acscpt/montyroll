@@ -1,48 +1,77 @@
 # SPDX-FileCopyrightText: 2026 Heisenberg (acscpt)
 # SPDX-License-Identifier: MIT
 
-"""MontyRoll: tkinter MIDI visualiser/editor.
+"""MontyRoll: the tkinter window, `MidiEditorApp`.
 
-Layout: channel strip on the left (colour, instrument, mute/solo), a
-zoomable piano-roll in the middle tab, a raw event list in the second tab,
-transport + grid controls in the toolbar and a status bar that tracks the
-mouse in musical time.
+Layout: the toolbar with the transport and its readout, the file summary on
+a header line, channel rows on the left with the Reduce panel under them,
+the piano roll in the middle with its lane switch and strip and a drawer of
+Events and Report under it, the inspector on the right, and a status bar
+that tracks the mouse in musical time.
 
-This is the only module that knows about tkinter. Musical state lives in
-`model.Song`, and sound comes from an external synth process managed by
-`player.Player`; nothing can be pushed into a running synth, so every live
-change during playback (mute, solo, volume, speed) respawns it from the
-cursor position rather than talking to the running process.
+The window takes a `model.Song`, draws it with the colours and fonts of
+`theme.py`, and runs the analysis, reduction, arrangement and export
+functions on it. Sound comes from an external synth process managed by
+`player.Player`. A running synth takes no changes, so every live change
+during playback (mute, solo, volume, speed) respawns it from the cursor
+position.
 """
 
 from __future__ import annotations
 
+import copy
 import os
+import sys
+import threading
 import time
 import tkinter as tk
-from bisect import bisect_right
-from dataclasses import replace
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from functools import cache
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from typing import Any
 
-from . import analysis, arrange, export, gm, model, player, reduce, smf
+from . import analysis, arrange, export, gm, model, player, reduce, smf, theme
 
 CHANNEL_COLORS = [
-    "#ff4b3e", "#ff9518", "#ffe014", "#a4ff2e", "#2eff6e", "#14ffd0",
-    "#29c5ff", "#4b6bff", "#8d4bff", "#c92eff", "#ff2ee0", "#ff2e7c",
-    "#ffb46b", "#96ff96", "#6bd9ff", "#e09bff",
+    "#ff94a6", "#ffa374", "#f8f47c", "#bffb73", "#7ef1a4", "#6ff5e6",
+    "#8bd6ff", "#92a7ff", "#b9a4ff", "#d986ff", "#ff8fe0", "#ff8f9f",
+    "#ffcf8a", "#c8f5a4", "#9be0ff", "#e7b8ff",
 ]
 
-KEYS_W = 52          # piano keyboard gutter width
+KEYS_W = 52          # the narrowest the piano keyboard gutter is, in pixels
 RULER_FONT_SIZES = (7, 8, 7, 7)   # seconds, bars, tempo and markers, chords
 DEMAND_H = 90        # initial height of the voice-demand strip under the roll
 DEMAND_MIN_H = 40    # the strip's height limits when dragged
 DEMAND_MAX_H = 400
 DEMAND_BUDGET = 8    # default voice budget shown on the strip
+LANES = ("Demand", "Velocity", "Weight")   # what the strip under the roll can show
+LANE_GAP = "4p"      # space between the strip gutter's rule and the first lane
+LANE_PAD = "3p"      # space above the lanes and below them, clear of the rule
+CORNER_PAD = "3p"    # space either side of the strip gutter's Voices heading
+CORNER_FONT_PT = 8   # the Voices heading, the size of the lane switch's text
+BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
+BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
+BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
+REDUCE_POLL_MS = 15  # how often a reduction worked out off the main thread is looked for
+CHORD_SLICE_S = 0.008    # time given to naming beats at each idle moment after a file opens
+REDUCE_SWITCH_S = 0.0001  # the interpreter's switch interval while it is worked out
+MASTER_MAX = 150     # the master volume's top, in percent
+GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
+NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
+NOTE_MARGIN = 1.0    # view widths of notes drawn either side of the roll's view
+ROW_PAD = "1.5p"     # space above and below a channel row's name, which sets the bar's height
+HOVER_LEVELS = ("bar", "beat", "cell")   # the lit areas under the pointer, outermost first
+BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
+DRAWER_PAGES = ("Events", "Report")        # the drawer's pages, in tab order
+INSPECTOR_W = 290    # the inspector's width when open
+INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
 NO_TIER = "(none)"   # a pool with no tier: plain voices, no chip
 BY_INSTRUMENT = "(by instrument)"   # a pool's sound left to each part's GM program
+NO_CHIP = "(no chip)"   # the Sound box of a pool whose tier names no chip, so has no sounds
 X16_TIERS = export.presetTiers(export.TARGETS["zsm"])   # the Commander X16's two chips
 SNAP_CHOICES = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "off"]
 MAX_EVENT_ROWS = 8000
@@ -55,8 +84,13 @@ TEMPO_GLYPH = "\u2669"      # quarter note before a bpm figure in the ruler and 
 MINUS = "\u2212"            # true minus sign, the same width as "+" on the zoom buttons
 ARROW = "\u2192"            # rightwards arrow in the "Ch 1 -> Flute" status text
 NEWLINE_GLYPH = "\u23ce"    # return symbol standing in for newlines in event text
+BURGER_GLYPH = "\u2630"     # trigram for heaven, on the inspector's fold button
+DRAWER_OPEN_GLYPH = "\u25b4"    # small up-pointing triangle: a drawer button that opens
+DRAWER_CLOSE_GLYPH = "\u25be"   # small down-pointing triangle: one that closes
+ELLIPSIS = "\u2026"        # the end of a name cut short to fit its row
 
 
+@cache
 def _shade(color: str, factor: float) -> str:
     """Scale each component of a "#rrggbb" colour by a factor.
 
@@ -71,6 +105,109 @@ def _shade(color: str, factor: float) -> str:
     r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
     shaded = f"#{int(r * factor):02x}{int(g * factor):02x}{int(b * factor):02x}"
     return shaded
+
+
+def _elide(text: str, font: tkfont.Font, width: int) -> str:
+    """Cut text short with an ellipsis so it fits a width.
+
+    Args:
+        text: the text in full.
+        font: the font it is shown in.
+        width: the room it has, in pixels.
+
+    Returns:
+        str: the text when it fits, otherwise as much of it as fits
+        followed by an ellipsis.
+    """
+    if font.measure(text) <= width:
+        return text
+
+    cut = text
+
+    while cut and font.measure(cut.rstrip() + ELLIPSIS) > width:
+        cut = cut[:-1]
+
+    elided = cut.rstrip() + ELLIPSIS
+    return elided
+
+
+def _occupancy(reduction: reduce.Reduction) -> list[reduce.Placed]:
+    """List the placed notes as the voices they keep busy, until each release dies away.
+
+    Args:
+        reduction: the reduction.
+
+    Returns:
+        list[reduce.Placed]: one per placed note, ending where its voice is free.
+    """
+    spans = [replace(p, end=p.free) if p.release else p for p in reduction.placed]
+    return spans
+
+
+@dataclass(eq=False)
+class ReduceJob:
+    """A reduction, its sweep and any stale weights, worked out on a thread of their own.
+
+    The plan is a copy taken when the job starts, and `generation` is the
+    window's count of changes to the reduction's inputs at that moment, so
+    a result whose inputs have changed since is recognised and dropped. The
+    thread touches no widget; an exception is kept for the main thread to
+    raise, as one raised on the thread would be printed and lost.
+    """
+
+    generation: int
+    priorities: tuple            # the channel priorities the weights are scored under
+    song: model.Song
+    plan: reduce.Plan
+    weights: dict[int, float] | None    # the current weights, or None to score them here
+    wantReduction: bool                 # False when only the weights are wanted
+    reduction: reduce.Reduction | None = None
+    demand: analysis.Demand | None = None
+    refused: str | None = None          # the reducer's reason for refusing the plan
+    error: Exception | None = None
+    thread: threading.Thread | None = None
+    done: bool = False
+
+    def start(self):
+        """Start the work on a daemon thread, which ends with the program."""
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def join(self):
+        """Wait for the work to end, doing it here if its thread has not started."""
+        if self.thread is None:
+            self.run()
+        else:
+            self.thread.join()
+
+    def run(self):
+        """Score the weights if they are stale, then reduce and sweep the reduced notes."""
+        try:
+            if self.weights is None:
+                self.weights = reduce.weights(self.song, self.plan)
+
+            if self.wantReduction:
+                self.reduction = reduce.reduce(self.song, self.plan, self.weights)
+                self.demand = analysis.sweep(self.song, _occupancy(self.reduction))
+        except ValueError as exc:
+            self.refused = str(exc)
+            self.reduction = reduce.Reduction()
+            self.demand = analysis.Demand()
+        except Exception as exc:
+            self.error = exc
+
+        self.done = True
+
+
+@dataclass(eq=False)
+class GapReadout:
+    """A pool's gap on the Reduce panel's display: its value's label, variable and range."""
+
+    label: tk.Label
+    var: tk.IntVar
+    limit: int          # the largest value
+    step: int           # what a drag step, a wheel turn or an arrow key moves it by
+    zero: str           # shown for 0, which turns the gap off
 
 
 class Tooltip:
@@ -129,12 +266,15 @@ class Tooltip:
         # screen coordinates since the Toplevel is not managed by any parent.
         x = self.widget.winfo_rootx() + 12
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        top = self.widget.winfo_toplevel()
+        palette = getattr(top, "palette", theme.PALETTE)
+        family = getattr(top, "uiFamily", "TkDefaultFont")
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.text, justify="left", bg="#ffffe0",
-                 fg="#000", relief="solid", bd=1, padx=6, pady=3,
-                 font=("TkDefaultFont", 9)).pack()
+        tk.Label(self.tip, text=self.text, justify="left", bg=palette["raised"],
+                 fg=palette["text"], relief="solid", bd=1, padx=6, pady=3,
+                 font=(family, 9)).pack()
 
     def _hide(self, _event=None):
         """Cancel any pending timer and take down the popup.
@@ -175,7 +315,8 @@ class MidiEditorApp(tk.Tk):
                 song.
         """
         super().__init__()
-        self.geometry("1280x760")
+        self.geometry("1400x860")
+        self._applyTheme()
 
         # The model and two synth processes: one for playback and a separate
         # one for instrument previews, so auditioning never stops the music.
@@ -187,11 +328,24 @@ class MidiEditorApp(tk.Tk):
         self.selection: set[model.Note] = set()
         self.itemToNote: dict[int, model.Note] = {}
         self.noteToItem: dict[int, int] = {}
+        self.itemOutline: dict[int, str] = {}        # canvas item -> its unselected edge
+        self.noteItems: dict[int, list[int]] = {}    # id(note) -> every item drawing it
+        self._eventsStale = True    # the Events page is filled when next on view
+        self._eventsAfter: str | None = None
+        self._drawnSpan: tuple[float, float] = (0.0, 0.0)   # ticks whose notes are drawn
+        self._noteIndex: analysis.StepIndex | None = None   # the notes by start, for the span
+        self._spanAfter: str | None = None
+        self._rollWidth = 0      # the roll's scrollregion width, which the ruler shares
+        self._styledSelection: set[model.Note] = set()   # the notes drawn as selected
 
         # Channel strip state.
         self.muteVars: dict[int, tk.BooleanVar] = {}
         self.soloVars: dict[int, tk.BooleanVar] = {}
         self.channelRows: dict[int, tk.Frame] = {}
+        self.channelDetails: dict[int, tk.Frame] = {}    # per channel: the part shown when active
+        self.nameLabels: dict[int, tk.Label] = {}        # per channel: the instrument on its row
+        self.rowBars: dict[int, tk.Frame] = {}           # per channel: its row's one-line bar
+        self.rowNames: dict[int, str] = {}               # per channel: that name in full
         self.activeChannel = 0
         self.originalPrograms: dict[int, int] = {}   # per channel, as the file was opened
 
@@ -216,7 +370,13 @@ class MidiEditorApp(tk.Tk):
         # of scroll events costs one redraw.
         self.demand: analysis.Demand | None = None
         self.songDemand: analysis.Demand | None = None   # the song as written, reduced or not
+        # The last sweep with the span edited since, for analysis.resweep.
+        self._sweepBase: tuple[analysis.Demand, tuple[int, int]] | None = None
         self.chords: list[tuple[int, int, str]] | None = None
+        self.chordNames: list[str] | None = None     # per beat, before smoothing
+        self._chordStale: list[tuple[int, int]] = []    # tick spans whose beats need naming
+        self._chordsPending = False    # a new file's beats are being named in idle slices
+        self._chordAfter: str | None = None
         self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
 
         # Reduction: the plan's switches live in these variables, the result
@@ -244,14 +404,50 @@ class MidiEditorApp(tk.Tk):
         self.usageLabels: dict[int, tk.Label] = {}       # per channel: the demand figures
         self.descLabels: dict[int, tk.Label] = {}        # per channel: notes, range, family
         self.usageText: dict[int, str] = {}              # those figures without the overlap
+        self.channelFigures: dict[int, analysis.ChannelDemand] = {}   # per channel, as on the cards
+        self.overlapShares: dict[int, float] = {}        # per channel: overlap with the edited pool
         self._overlapAfter: str | None = None
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
+        self._reduceJob: ReduceJob | None = None   # a reduction worked out off the main thread
+        self._reduceAgain = False   # its inputs changed as it ran: start another when it ends
+        self._reduceGen = 0         # changes to the reduction's inputs, so a stale job is known
+        self._reducePoll: str | None = None
+        self._reduceStart: str | None = None
+        self._switchInterval = sys.getswitchinterval()   # restored when a job ends
+        self._lastReduction: reduce.Reduction | None = None   # drawn while a job runs
+        self._lastDemand: analysis.Demand | None = None       # the strip's, likewise
         self.shadeVar = tk.BooleanVar(value=False)       # notes coloured by weight, not velocity
         self.noteWeights: dict[int, float] | None = None  # id(note) -> weight, cached with the plan
+        self._weightsFor: tuple = ()    # the channel priorities noteWeights were scored under
         self.reports: dict[str, str | None] = {"original": None, "reduced": None}
         self._demandAfter: str | None = None
+        self.laneVar = tk.StringVar(value=LANES[0])     # what the strip under the roll shows
+        self.drawerOpen = False                           # Events and Report showing under the roll
+        self._centrePending = False                       # the roll waits to be laid out to centre
+        self.laneBars: list[tuple[float, float, model.Note]] = []   # x extents drawn in a note lane
         self._sashStart = (0, DEMAND_H)    # (pointer y, strip height) at sash press
+        self.budgetLimit = 64                # the most the budget can be set to
+        self.budgetEditable = True           # one pool: the budget is set beside the strip
+        self.budgetDragging = False          # the budget or its line is being dragged
+        self.budgetLineHover: reduce.Pool | None = None   # the pool whose line the pointer is on
+        self._budgetHover = False            # the pointer is on the budget
+        self._budgetArrowStates: dict[str, str] = {}   # per arrow: "", "Hover" or "Pressed"
+        self._budgetDragStart = (0, 0)       # (pointer y on screen, budget) at the press
+        self._settleAfter: str | None = None  # a pending recompute of the reduction
+        self._lineDrag: tuple[reduce.Pool, int, int] | None = None   # (pool, voices, level)
+        self._poolDrag: tuple[reduce.Pool, int, int] | None = None   # (pool, pointer y, voices)
+        self.gapReadouts: list[GapReadout] = []   # the display's Tremolo, Legato and Chord
+        self._gapDrag: tuple[GapReadout, int, int] | None = None   # (gap, pointer y, value)
+        self._poolEditor: ttk.Entry | None = None
+        self._poolTableKey: tuple = ()        # the pools the table was built for
+        self.poolRows: dict[int, dict[str, Any]] = {}   # id(pool) -> its line's widgets
+        self._budgetEditor: ttk.Entry | None = None
+        self._stripScale: tuple[float, float] | None = None   # (base y, pixels per voice)
+        self._hoverBar: tuple[int, int] | None = None   # (first tick, end tick) of the lit bar
+        self._hoverBeat: tuple[int, int] | None = None  # the same for the lit beat
+        self._hoverCell: tuple[int, int, int] | None = None   # (start, end, pitch) of the slot
+        self._hoverItem: tuple[int, str] | None = None  # (canvas item, its own fill) lit
 
         # With one pool the strip's budget and the pool's voices are one
         # number, whichever control it was typed into.
@@ -266,6 +462,7 @@ class MidiEditorApp(tk.Tk):
         self._buildMenu()
         self._buildToolbar()
         self._buildStatusbar()   # before body: last-packed widgets get squeezed out
+        self._buildDrawerBar()   # the same
         self._buildBody()
         self._bindKeys()
 
@@ -274,10 +471,266 @@ class MidiEditorApp(tk.Tk):
         else:
             self._refreshAll()
 
+    # --------------------------------------------------------------- theme
+    def _applyTheme(self):
+        """Theme the window before any widget is built.
+
+        The named fonts take the first interface font that is installed.
+        The ttk widgets take the clam theme, styled flat from `theme.PALETTE`
+        by `_styleFlat`, with the painted switch, sliders and icons from
+        `_paintElements`, and the option database gives the classic tk
+        widgets the same palette.
+        """
+        # The named fonts take the interface family, first, so the styles
+        # can name it. Widgets given a size of their own use the same family
+        # by name.
+        family = theme.pickFont(tkfont.families(self))
+        self.uiFamily = family or tkfont.nametofont("TkDefaultFont").actual("family")
+        self.rowNameFont = tkfont.Font(self, family=self.uiFamily, size=theme.UI_FONT_PT)
+        self.rowNameBoldFont = tkfont.Font(self, family=self.uiFamily, size=theme.UI_FONT_PT,
+                                           weight="bold")
+
+        if family is not None:
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                         "TkCaptionFont", "TkTooltipFont"):
+                size = theme.UI_CAPTION_PT if "Caption" in name else theme.UI_FONT_PT
+                tkfont.nametofont(name, root=self).configure(family=family, size=size)
+
+        self.palette = theme.PALETTE
+        self._styleFlat()
+        self._paintElements()
+        p = self.palette
+        self.configure(background=p["window"])
+
+        # Classic tk widgets read their colours from the option database as
+        # they are created, so these reach every one built after this.
+        for name, value in (("*Background", p["panel"]), ("*Foreground", p["text"]),
+                            ("*activeBackground", p["raised"]),
+                            ("*activeForeground", p["text"]),
+                            ("*selectColor", p["field"]), ("*troughColor", p["field"]),
+                            ("*highlightBackground", p["panel"]),
+                            ("*highlightColor", p["accent"]),
+                            ("*insertBackground", p["text"]),
+                            ("*selectBackground", p["accent"]),
+                            ("*selectForeground", p["ink"]),
+                            ("*disabledForeground", p["muted"])):
+            self.option_add(name, value)
+
+        # The combobox drop-down is a classic listbox inside the ttk widget.
+        self.option_add("*TCombobox*Listbox.background", p["field"])
+        self.option_add("*TCombobox*Listbox.foreground", p["text"])
+
+        # Menus are classic tk widgets too: a one-pixel edge in place of the
+        # bevel, no raised border on the entry under the pointer, and the
+        # accent behind it. _buildMenu flattens the menubar itself.
+        for name, value in (("*Menu.relief", "solid"), ("*Menu.borderWidth", 1),
+                            ("*Menu.activeBorderWidth", 0),
+                            ("*Menu.background", p["raised"]),
+                            ("*Menu.activeBackground", p["accent"]),
+                            ("*Menu.activeForeground", p["ink"]),
+                            ("*Menu.selectColor", p["accent"])):
+            self.option_add(name, value)
+
+        # Tk's file dialog on X11 draws its folder pane on a canvas with a
+        # white background of its own, and its text takes the light colour
+        # above. A class binding gives that canvas the field colour as the
+        # dialog maps it.
+        self.tk.eval("bind Canvas <Map> {+if {[string match .__tk_filedialog.* %W]} "
+                     f"{{%W configure -background {p['field']}}}}}")
+
+    def _styleFlat(self):
+        """Style the ttk clam theme flat from the palette.
+
+        clam draws its bevels in `lightcolor` and `darkcolor`, so giving both
+        a widget's own background flattens it, and `bordercolor` becomes the
+        etched line between the parts of the window. Buttons are a raised
+        grey, lighter under the pointer; the accent button and the toggles
+        that are on take the accent with dark text.
+        """
+        p = self.palette
+        s = ttk.Style(self)
+        s.theme_use("clam")
+        lit = theme.mix(p["accent"], "#ffffff", 0.2)
+
+        def flat(colour: str) -> dict[str, str]:
+            """Give a fill and both bevel colours as one colour."""
+            options = {"background": colour, "lightcolor": colour, "darkcolor": colour}
+            return options
+
+        def flatMap(*spec: tuple) -> dict[str, Any]:
+            """Map a fill and both bevel colours by state alike."""
+            options = {"background": list(spec), "lightcolor": list(spec),
+                       "darkcolor": list(spec)}
+            return options
+
+        # Every ttk widget inherits from "."; the styles after it adjust it.
+        s.configure(".", foreground=p["text"], fieldbackground=p["field"],
+                    bordercolor=p["border"], troughcolor=p["window"],
+                    focuscolor=p["accent"], selectbackground=p["accent"],
+                    selectforeground=p["ink"], insertcolor=p["text"], arrowcolor=p["muted"],
+                    **flat(p["panel"]))
+        s.map(".", foreground=[("disabled", p["muted"])],
+              background=[("disabled", p["panel"])])
+
+        # Buttons, the accent button, the toggles and the tool buttons.
+        s.configure("TButton", padding=(8, 2), width=-6, relief="flat", **flat(p["raised"]))
+        s.map("TButton", **flatMap(("pressed", p["active"]), ("active", p["hover"])))
+        s.configure("Accent.TButton", foreground=p["ink"], **flat(p["accent"]))
+        s.map("Accent.TButton", **flatMap(("active", lit)))
+        s.map("Toggle.TButton", foreground=[("selected", p["ink"])],
+              **flatMap(("selected", "active", lit), ("selected", p["accent"]),
+                        ("active", p["hover"])))
+        s.configure("Toolbutton", **flat(p["panel"]))
+        s.map("Toolbutton", **flatMap(("pressed", p["active"]), ("active", p["hover"])))
+
+        # A panel's title bar, a step lighter than the panel, with compact
+        # buttons, and the inspector's burger button, which sits on it.
+        s.configure("Title.TFrame", background=p["title"])
+        s.configure("Title.TLabel", background=p["title"], foreground=p["text"])
+        s.configure("Title.TButton", padding=(6, 0), width=0, font=(self.uiFamily, 9))
+        s.configure("Burger.Toolbutton", font=(self.uiFamily, 14), padding=(6, 0, 6, 2),
+                    **flat(p["title"]))
+        s.map("Burger.Toolbutton", **flatMap(("pressed", p["active"]), ("active", p["hover"])))
+
+        # Fields: flat on the field colour with an etched edge.
+        for style in ("TCombobox", "TSpinbox"):
+            s.configure(style, background=p["raised"], lightcolor=p["field"],
+                        darkcolor=p["field"])
+
+        s.configure("TEntry", **flat(p["field"]))
+        s.map("TCombobox", fieldbackground=[("readonly", p["field"])],
+              foreground=[("readonly", p["text"])],
+              selectbackground=[("readonly", p["field"])],
+              selectforeground=[("readonly", p["text"])])
+        s.configure("TCheckbutton", indicatorbackground=p["field"],
+                    indicatorforeground=p["ink"], upperbordercolor=p["border"],
+                    lowerbordercolor=p["border"])
+        s.map("TCheckbutton", indicatorbackground=[("selected", p["accent"])],
+              background=[("active", p["panel"])])
+
+        # Frames, the drawer's tabs, the event list and the scroll bars.
+        s.configure("TLabelframe", **flat(p["panel"]))
+        s.configure("TLabelframe.Label", background=p["panel"], foreground=p["muted"])
+        s.configure("TNotebook", **flat(p["window"]))
+        s.configure("TNotebook.Tab", foreground=p["muted"], padding=(12, 4),
+                    **flat(p["window"]))
+        s.map("TNotebook.Tab", foreground=[("selected", p["accent"])],
+              **flatMap(("selected", p["panel"])))
+        s.configure("Treeview", foreground=p["text"], **flat(p["field"]),
+                    fieldbackground=p["field"])
+        s.configure("Treeview.Heading", foreground=p["text"], relief="flat",
+                    **flat(p["panel"]))
+        s.map("Treeview.Heading", **flatMap(("active", p["hover"])))
+        s.configure("TScrollbar", bordercolor=p["window"], troughcolor=p["window"],
+                    arrowcolor=p["muted"], **flat(p["raised"]))
+        s.map("TScrollbar", **flatMap(("active", p["hover"])))
+
+        # The sashes between the panes are the etched lines, three pixels wide.
+        # Etch.TFrame shows the same colour through the gaps between the
+        # channel rows.
+        s.configure("Sash", sashthickness=3, gripcount=0, **flat(p["border"]))
+        s.configure("TPanedwindow", background=p["border"])
+        s.configure("Etch.TFrame", background=p["border"])
+
+        # The lane switch and the strip's gutter sit on the strip's dark: a
+        # lane is accent text alone, and the lane on view is filled with the
+        # accent under dark text.
+        dark = theme.ROLL["strip"]
+        s.configure("Lane.TFrame", background=dark)
+        s.configure("Lane.TLabel", background=dark, foreground=p["muted"])
+        s.configure("Lane.Toggle.TButton", foreground=p["accent"], padding=(8, 0),
+                    font=(self.uiFamily, 8), focuscolor=dark, **flat(dark))
+        s.map("Lane.Toggle.TButton", foreground=[("selected", p["ink"])],
+              focuscolor=[("selected", p["accent"])],
+              **flatMap(("selected", "active", lit), ("selected", p["accent"]),
+                        ("active", theme.mix(dark, p["accent"], 0.15))))
+
+        # The Reduce panel's display shares the strip's dark: labels in the
+        # text colour over cyan values, a readout in amber, and drop-downs
+        # drawn as cyan text, with the arrow `_paintElements` gives them.
+        # Each map matches every state, as the parent styles map theirs.
+        s.configure("Lcd.TFrame", background=dark)
+        s.configure("Lcd.TLabel", background=dark, foreground=p["text"],
+                    font=(self.uiFamily, 8))
+        s.configure("Readout.Lcd.TLabel", foreground=p["warn"], font=(self.uiFamily, 9))
+        s.configure("Lcd.TCombobox", padding=0)
+        s.map("Lcd.TCombobox", fieldbackground=[("", dark)], background=[("", dark)],
+              foreground=[("disabled", p["muted"]), ("", p["accent"])],
+              selectbackground=[("", dark)], selectforeground=[("", p["accent"])],
+              lightcolor=[("", dark)], darkcolor=[("", dark)], bordercolor=[("", dark)])
+
+    def _paintElements(self):
+        """Make the painted images into the switch and slider elements.
+
+        `Switch.TCheckbutton` draws its indicator from the switch images,
+        by state. Every horizontal `ttk.Scale` takes the painted knob and
+        trough; `Row.Horizontal.TScale` takes the channel rows' smaller
+        knob and translucent trough, and a style per channel derived from
+        it gives the colour the trough sits on. `Mute.Row.TCheckbutton` and
+        `Solo.Row.TCheckbutton` are the rows' icons, given the colour the
+        same way. `Lcd.TCombobox` opens from the pools table's down arrow.
+        """
+        s = ttk.Style(self)
+        img = {name: tk.PhotoImage(master=self, data=data)
+               for name, data in theme.paintedImages().items()}
+        self.paintedImages = img
+
+        # The switch: a checkbutton whose indicator is the painted pill.
+        s.element_create("Switch.indicator", "image", img["switchOff"],
+                         ("disabled", "selected", img["switchOnDisabled"]),
+                         ("disabled", img["switchOffDisabled"]),
+                         ("active", "selected", img["switchOnHover"]),
+                         ("selected", img["switchOn"]),
+                         ("active", img["switchOffHover"]), width=46, sticky="w")
+        s.layout("Switch.TCheckbutton", [("Checkbutton.padding", {
+            "sticky": "nswe", "children": [
+                ("Switch.indicator", {"side": "left", "sticky": ""}),
+                ("Checkbutton.label", {"side": "left", "sticky": "w"})]})])
+
+        # The sliders: the toolbar's, then the channel rows'. A trough
+        # stretches along its middle and keeps its ends.
+        s.element_create("Horizontal.Scale.slider", "image", img["knob"],
+                         ("pressed", img["knobHover"]), ("active", img["knobHover"]),
+                         sticky="")
+        s.element_create("Horizontal.Scale.trough", "image", img["trough"],
+                         border=(8, 0), padding=0, sticky="ew")
+        s.element_create("Row.Horizontal.Scale.slider", "image", img["rowKnob"],
+                         ("pressed", img["rowKnobHover"]), ("active", img["rowKnobHover"]),
+                         sticky="")
+        s.element_create("Row.Horizontal.Scale.trough", "image", img["rowTrough"],
+                         border=(6, 0), padding=0, sticky="ew")
+        s.layout("Row.Horizontal.TScale", [("Row.Horizontal.Scale.trough", {
+            "sticky": "nswe", "children": [
+                ("Row.Horizontal.Scale.slider", {"side": "left", "sticky": ""})]})])
+
+        # The channel rows' mute and solo: checkbuttons drawn as the icon
+        # alone, by state.
+        s.configure("Row.TCheckbutton", padding=(3, 1))
+
+        for key in ("Mute", "Solo"):
+            name = key.lower()
+            s.element_create(f"{key}.indicator", "image", img[f"{name}Off"],
+                             ("active", "selected", img[f"{name}OnHover"]),
+                             ("selected", img[f"{name}On"]),
+                             ("active", img[f"{name}OffHover"]), sticky="")
+            s.layout(f"{key}.Row.TCheckbutton", [("Checkbutton.padding", {
+                "sticky": "nswe", "children": [(f"{key}.indicator", {"sticky": ""})]})])
+
+        # The display's drop-downs: the text, then the pools table's down
+        # arrow, filled while pressed and muted while disabled.
+        s.element_create("Lcd.Combobox.downarrow", "image", img["poolDown"],
+                         ("disabled", img["poolDownDisabled"]),
+                         ("pressed", img["poolDownPressed"]), sticky="", padding=(4, 0, 0, 0))
+        s.layout("Lcd.TCombobox", [
+            ("Lcd.Combobox.downarrow", {"side": "right", "sticky": "ns"}),
+            ("Combobox.field", {"sticky": "nswe", "children": [
+                ("Combobox.padding", {"sticky": "nswe", "children": [
+                    ("Combobox.textarea", {"sticky": "nswe"})]})]})])
+
     # ------------------------------------------------------------------ UI
     def _buildMenu(self):
         """Create the File and Edit menus and route window close to onClose."""
-        m = tk.Menu(self)
+        m = tk.Menu(self, relief="flat", borderwidth=0, background=self.palette["window"])
 
         # The accelerator captions are display only; the key bindings that
         # back them live in _bindKeys.
@@ -307,6 +760,9 @@ class MidiEditorApp(tk.Tk):
         em.add_command(label="Delete Selection", accelerator="Del", command=self.deleteSelection)
         em.add_command(label="Set Velocity...", command=self.setVelocityDialog)
         em.add_separator()
+        em.add_command(label="Add Channel", command=self.addChannel)
+        em.add_command(label="Add Drum Channel", command=lambda: self.addChannel(drums=True))
+        em.add_command(label="Delete Channel...", command=self.deleteChannel)
         em.add_command(label="Split Channel into Parts...", command=self.splitChannelDialog)
         em.add_command(label="Double Channel...", command=self.doubleChannelDialog)
         em.add_command(label="Echo Channel...", command=self.echoChannelDialog)
@@ -314,6 +770,7 @@ class MidiEditorApp(tk.Tk):
         em.add_command(label="Set Tempo at Bar...", command=self.setTempoDialog)
         em.add_command(label="Scale All Tempos...", command=self.scaleTemposDialog)
         m.add_cascade(label="Edit", menu=em)
+        self.editMenu = em
 
         # Closing the window goes through the same unsaved-changes check as
         # File > Quit.
@@ -321,79 +778,99 @@ class MidiEditorApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.onClose)
 
     def _buildToolbar(self):
-        """Build the toolbar across the top of the window.
+        """Build the toolbar across the top of the window, then the header line under it.
 
-        Left to right: Open and Save, Play/Stop, master volume, speed, the
-        playback position readout, grid snap, the four zoom buttons and, at
-        the right-hand end, the file summary label.
+        Left to right: Open and Save, then the transport, which is Play/Stop
+        and the position readout, then the master volume. At the right-hand
+        end: the playback tempo, grid snap and the four zoom buttons.
         """
-        bar = ttk.Frame(self, padding=(6, 4))
+        bar = ttk.Frame(self, padding=(6, 5))
         bar.pack(fill="x")
+        p = self.palette
 
         b = ttk.Button(bar, text="Open", command=self.openDialog)
         b.pack(side="left")
         Tooltip(b, "Open a MIDI file (Ctrl+O)")
 
         b = ttk.Button(bar, text="Save", command=self.save)
-        b.pack(side="left", padx=(4, 12))
+        b.pack(side="left", padx=(4, 0))
         Tooltip(b, "Save the file (Ctrl+S)")
 
         # Transport: one button whose caption flips between Play and Stop.
-        self.playBtn = ttk.Button(bar, text=f"{PLAY_GLYPH} Play", command=self.togglePlay)
-        self.playBtn.pack(side="left")
+        self.playBtn = ttk.Button(bar, text=f"{PLAY_GLYPH} Play", style="Accent.TButton",
+                                  width=7, command=self.togglePlay)
+        self.playBtn.pack(side="left", padx=(28, 0))
         Tooltip(self.playBtn, "Play / stop (Space).\n"
                 "Mute/solo and volume changes apply live:\n"
                 "playback resumes from the cursor position.")
 
-        # Master volume scales note velocities in the playback copy only. The
-        # slider's command goes through _liveUpdate, so moving it during
-        # playback restarts the synth once the drag settles.
-        ttk.Label(bar, text="Vol:").pack(side="left", padx=(10, 0))
-        self.masterVar = tk.IntVar(value=100)
-        mv = tk.Scale(bar, from_=0, to=150, orient="horizontal", showvalue=0,
-                      length=90, variable=self.masterVar,
-                      command=lambda v: self._liveUpdate())
-        mv.pack(side="left")
-        Tooltip(mv, "Master playback volume (0-150%).\n"
-                "Scales note velocities in the playback copy only -\n"
-                "the file is not changed. Applies live while playing.")
+        # The readout: the time in a large fixed-width face, then the bar and
+        # beat and the tempo, on a dark panel. _showReadout fills it, from
+        # _tickCursor while playing and with the opening position when not.
+        mono = theme.pickFont(tkfont.families(self), theme.MONO_FONTS)
+        family = mono or tkfont.nametofont("TkFixedFont").actual("family")
+        readout = tk.Frame(bar, bg=p["lcd"], padx=12, pady=1)
+        readout.pack(side="left", padx=(8, 0))
+        self.timeLbl = tk.Label(readout, text="", bg=p["lcd"], fg=p["accent"],
+                                font=(family, 17, "bold"))
+        self.timeLbl.pack(side="left")
+        self.posLbl = tk.Label(readout, text="", bg=p["lcd"], fg=p["muted"],
+                               font=(family, 10), width=22, anchor="w")
+        self.posLbl.pack(side="left", padx=(10, 0))
 
-        # Speed scales the tempo events in the playback copy. The label beside
-        # the slider mirrors its value; _speedChanged updates it and then
-        # feeds _liveUpdate like the other live controls.
-        ttk.Label(bar, text="Speed:").pack(side="left", padx=(10, 0))
+        for w in (readout, self.timeLbl, self.posLbl):
+            Tooltip(w, "Playback position: time, bar:beat and current\n"
+                    "tempo from the file's tempo events. (If a file has\n"
+                    "no tempo events, this stays constant even when the\n"
+                    "music speeds up - the rubato is in the note spacing.)")
+
+        # Master volume, beside the readout, laid out as the tempo is: its
+        # name, the slider and its figure. It scales note velocities in the
+        # playback copy and sets the level of an export; the file is not
+        # changed. _masterChanged updates the figure and feeds _liveUpdate,
+        # and a double click puts it back to 100%.
+        ttk.Label(bar, text="Vol").pack(side="left", padx=(14, 0))
+        self.masterVar = tk.IntVar(value=100)
+        mv = ttk.Scale(bar, from_=0, to=MASTER_MAX, orient="horizontal", length=90,
+                       variable=self.masterVar, command=lambda v: self._masterChanged())
+        mv.pack(side="left", padx=(4, 0))
+        mv.bind("<Double-Button-1>", self._resetVolume)
+        self.volLbl = ttk.Label(bar, text="100%", width=5)
+        self.volLbl.pack(side="left", padx=(4, 0))
+        Tooltip(mv, f"Master volume (0-{MASTER_MAX}%): scales note velocities for\n"
+                "playback and sets the level of an export - the file\n"
+                "is not changed. Applies live while playing.\n"
+                "Double-click for 100%.")
+
+        # The view controls sit together at the right-hand end.
+        view = ttk.Frame(bar)
+        view.pack(side="right")
+
+        # Tempo scales the tempo events in the playback copy. The label
+        # beside the slider mirrors its value; _speedChanged updates it and
+        # then feeds _liveUpdate like the other live controls. A double
+        # click puts it back to 100% and stops the scale's own press, which
+        # would step it on from there.
+        ttk.Label(view, text="Tempo").pack(side="left")
         self.speedVar = tk.IntVar(value=100)
-        sv = tk.Scale(bar, from_=25, to=300, orient="horizontal", showvalue=0,
-                      length=90, variable=self.speedVar,
-                      command=lambda v: self._speedChanged())
-        sv.pack(side="left")
-        self.speedLbl = ttk.Label(bar, text="100%", width=5)
-        self.speedLbl.pack(side="left")
-        Tooltip(sv, "Playback speed (25-300%): scales the file's tempo\n"
+        sv = ttk.Scale(view, from_=25, to=300, orient="horizontal", length=90,
+                       variable=self.speedVar, command=lambda v: self._speedChanged())
+        sv.pack(side="left", padx=(4, 0))
+        sv.bind("<Double-Button-1>", self._resetTempo)
+        self.speedLbl = ttk.Label(view, text="100%", width=5)
+        self.speedLbl.pack(side="left", padx=(4, 0))
+        Tooltip(sv, "Playback tempo (25-300%): scales the file's tempo\n"
                 "in the playback copy only - pitch is unaffected and\n"
                 "the file is not changed. Applies live while playing.\n"
-                "Handy for files sequenced at the wrong base tempo.")
-
-        # Position readout, refreshed by _tickCursor at 30 Hz while playing.
-        # A fixed-width font and a reserved width keep the digits from
-        # shuffling the rest of the toolbar as they change.
-        readoutFont = tkfont.nametofont("TkFixedFont").copy()
-        readoutFont.configure(size=9)
-        self.posLbl = ttk.Label(bar, text="", width=26, font=readoutFont)
-        self.posLbl.pack(side="left", padx=(10, 0))
-        Tooltip(self.posLbl, "Playback position: time, bar:beat and current\n"
-                "tempo from the file's tempo events. (If a file has\n"
-                "no tempo events, this stays constant even when the\n"
-                "music speeds up - the rubato is in the note spacing.)")
+                "Double-click for 100%.")
 
         # Grid snap: read back by _snapTicks whenever a note is moved,
         # resized or added.
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
-        ttk.Label(bar, text="Snap:").pack(side="left")
+        ttk.Label(view, text="Snap").pack(side="left", padx=(8, 0))
         self.snapVar = tk.StringVar(value="1/16")
-        snap = ttk.Combobox(bar, textvariable=self.snapVar, values=SNAP_CHOICES,
+        snap = ttk.Combobox(view, textvariable=self.snapVar, values=SNAP_CHOICES,
                             width=5, state="readonly")
-        snap.pack(side="left", padx=(2, 12))
+        snap.pack(side="left", padx=(4, 10))
         Tooltip(snap, "Grid snap for moving, resizing and adding notes.\n"
                 "1/16 = sixteenth notes; 'off' = free placement.")
 
@@ -408,24 +885,29 @@ class MidiEditorApp(tk.Tk):
 
         for text, cmd in (("H+", lambda: self.zoom(1.25)), (f"H{MINUS}", lambda: self.zoom(0.8)),
                           ("V+", lambda: self.vzoom(2)), (f"V{MINUS}", lambda: self.vzoom(-2))):
-            b = ttk.Button(bar, text=text, width=4, command=cmd)
+            b = ttk.Button(view, text=text, width=3, command=cmd)
             b.pack(side="left", padx=1)
             Tooltip(b, zoom_tips[text])
 
-        # File summary at the right-hand end, filled in by _refreshAll.
-        self.infoLbl = ttk.Label(bar, text="", anchor="e")
-        self.infoLbl.pack(side="right")
+        # The file summary has a line of its own, so it is never clipped by
+        # the toolbar; _updateSummary fills it.
+        header = tk.Frame(self, bg=p["window"])
+        header.pack(fill="x")
+        self.infoLbl = tk.Label(header, text="", anchor="w", bg=p["window"], fg=p["muted"],
+                                font=(self.uiFamily, 9))
+        self.infoLbl.pack(side="left", padx=10, pady=(0, 4))
         Tooltip(self.infoLbl, "File summary: format, tracks, ticks per quarter\n"
-                "note, time signature, tempo, note count, duration")
+                "note, time signature, tempo, note count, duration, key")
 
     def _buildBody(self):
-        """Build the paned body: channel strip on the left, notebook on the right.
+        """Build the paned body: channel strip, centre column, and inspector.
 
-        The channel strip is a canvas holding an inner frame, because sixteen
-        channel cards never fit on screen and need a scrollbar. The notebook
-        holds the piano roll (ruler, keyboard gutter, note canvas and
-        scrollbars wired so the ruler and keys track the roll) and the raw
-        event list.
+        The channel strip is a canvas holding an inner frame, so a long list
+        of channel rows scrolls. The centre column holds the piano roll
+        (ruler, keyboard gutter, note canvas and scrollbars wired so the
+        ruler and keys track the roll, then the lane switch and the strip)
+        over the drawer, a notebook of the event list and the report. The
+        inspector is the right-hand pane.
         """
         paned = ttk.PanedWindow(self, orient="horizontal")
         paned.pack(fill="both", expand=True)
@@ -434,31 +916,44 @@ class MidiEditorApp(tk.Tk):
         # Header row with the title and the two bulk mute/solo buttons.
         left = ttk.Frame(paned, width=330)
         paned.add(left, weight=0)
-        head = ttk.Frame(left, padding=(6, 4))
+        # The buttons are packed first and the title last, so on a narrow
+        # strip the title gives way and the buttons stay whole.
+        head = ttk.Frame(left, padding=(6, 2), style="Title.TFrame")
         head.pack(fill="x")
-        ttk.Label(head, text="Channels",
-                  font=("TkDefaultFont", 10, "bold")).pack(side="left")
-        b = ttk.Button(head, text="Mute All", width=8, command=self.muteAll)
+        b = ttk.Button(head, text="Mute All", style="Title.TButton", command=self.muteAll)
         b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Mute every channel")
-        b = ttk.Button(head, text="Change All", width=10, command=self.changeAllDialog)
+        b = ttk.Button(head, text="Change All", style="Title.TButton",
+                       command=self.changeAllDialog)
         b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Set every channel's instrument to one GM program\n"
                    "(Ch 10, the percussion channel, is left alone)")
-        b = ttk.Button(head, text="Clear", width=6, command=self.clearMuteSolo)
-        b.pack(side="right")
+        b = ttk.Button(head, text="Clear", style="Title.TButton", command=self.clearMuteSolo)
+        b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Clear all mutes and solos and restore the\n"
                    "instruments the file was opened with")
+        self.removeChannelBtn = ttk.Button(head, text="-", style="Title.TButton",
+                                           command=self.deleteChannel)
+        self.removeChannelBtn.pack(side="right", padx=(2, 0))
+        Tooltip(self.removeChannelBtn, "Delete the active channel and every event on it")
+        self.addChannelBtn = ttk.Button(head, text="+", style="Title.TButton",
+                                        command=self.addChannel)
+        self.addChannelBtn.pack(side="right")
+        Tooltip(self.addChannelBtn, "Add a channel on the lowest free one, playing\n"
+                                    "Acoustic Grand Piano, and make it active")
+        ttk.Label(head, text="Channels", style="Title.TLabel",
+                  font=(self.uiFamily, 10, "bold")).pack(side="left")
 
         # Reduce panel, packed at the bottom before the strip so the strip
         # gives way to it rather than pushing it off the window.
         self._buildReducePanel(left)
 
-        # Scrollable strip: the cards live in chanHolder, which is embedded in
+        # Scrollable strip: the rows live in chanHolder, which is embedded in
         # chanCanvas through create_window. The holder's <Configure> keeps the
-        # scrollregion in step with the cards' total height, and the canvas's
-        # <Configure> stretches the holder to the canvas width so the cards
-        # fill it edge to edge.
+        # scrollregion in step with the rows' total height, and the canvas's
+        # <Configure> stretches the holder to the canvas width so the rows
+        # fill it edge to edge. The holder is the etch colour, which frames
+        # the rows and shows as a one-pixel line between them.
         scroller = ttk.Frame(left)
         scroller.pack(fill="both", expand=True)
         self.chanCanvas = tk.Canvas(scroller, highlightthickness=0, width=340)
@@ -467,7 +962,7 @@ class MidiEditorApp(tk.Tk):
         self.chanCanvas.configure(yscrollcommand=cbar.set)
         cbar.pack(side="right", fill="y")
         self.chanCanvas.pack(side="left", fill="both", expand=True)
-        self.chanHolder = ttk.Frame(self.chanCanvas)
+        self.chanHolder = ttk.Frame(self.chanCanvas, style="Etch.TFrame", padding=(1, 1, 1, 0))
         self._chanWindow = self.chanCanvas.create_window(
             (0, 0), window=self.chanHolder, anchor="nw")
         self.chanHolder.bind(
@@ -486,33 +981,58 @@ class MidiEditorApp(tk.Tk):
             for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
                 w.bind(seq, self._onChanWheel)
 
-        # -- notebook: piano roll + events
-        self.nb = ttk.Notebook(paned)
-        paned.add(self.nb, weight=1)
+        # -- centre: the roll over the drawer. The drawer is a notebook of
+        # Events and Report, added to the column by openDrawer and taken out
+        # by closeDrawer.
+        self.centre = ttk.PanedWindow(paned, orient="vertical")
+        paned.add(self.centre, weight=1)
+        self.nb = ttk.Notebook(self.centre)
+
+        # -- inspector: the active channel and the selected note, folding to
+        # a narrow strip from its burger button. Its pane keeps the width it
+        # is given rather than the width its contents ask for.
+        self.paned = paned
+        self._inspectorOpenW = INSPECTOR_W
+        self.inspectorPane = ttk.Frame(paned, width=INSPECTOR_W, padding=(8, 4))
+        self.inspectorPane.pack_propagate(False)
+        paned.add(self.inspectorPane, weight=0)
+        self._buildInspector(self.inspectorPane)
 
         # The roll is a 3x3 grid: ruler above the note canvas, keyboard gutter
         # to its left, scrollbars to the right and below. Row 1 / column 1
         # (the note canvas) take all the spare space.
-        roll = ttk.Frame(self.nb)
-        self.nb.add(roll, text="Piano Roll")
+        roll = ttk.Frame(self.centre)
+        self.centre.add(roll, weight=3)
         roll.rowconfigure(1, weight=1)
         roll.columnconfigure(1, weight=1)
         # Ruler rows are sized from their fonts, so the text fits at any
         # display scaling; rulerRows holds the five boundaries of the four
         # rows, top to bottom.
-        self.rulerFonts = [tkfont.Font(font=("TkDefaultFont", size))
+        self.rulerFonts = [tkfont.Font(font=(self.uiFamily, size))
                            for size in RULER_FONT_SIZES]
         self.rulerRows = [0]
 
         for f in self.rulerFonts:
             self.rulerRows.append(self.rulerRows[-1] + f.metrics("linespace") + 3)
 
-        self.ruler = tk.Canvas(roll, height=self.rulerRows[-1], bg="#2a2a30",
+        self.ruler = tk.Canvas(roll, height=self.rulerRows[-1], bg=theme.ROLL["ruler"],
                                highlightthickness=0)
         self.ruler.grid(row=0, column=1, sticky="ew")
-        self.keys = tk.Canvas(roll, width=KEYS_W, bg="#1c1c20", highlightthickness=0)
+
+        # The left column, under the keyboard and the strip's gutter, is as
+        # wide as the keys need or, at a large font, as the Voices heading
+        # needs with its padding. That padding, the gap before the lanes and
+        # the space above and below them are in points, so they grow with
+        # the display's scaling as the text does.
+        pad = round(self.winfo_fpixels(CORNER_PAD))
+        heading = tkfont.Font(self, family=self.uiFamily, size=CORNER_FONT_PT)
+        self.keysW = max(KEYS_W, heading.measure("Voices") + 2 * pad + 1)
+        self.laneGap = round(self.winfo_fpixels(LANE_GAP))
+        lanePad = round(self.winfo_fpixels(LANE_PAD))
+        self.keys = tk.Canvas(roll, width=self.keysW, bg=theme.ROLL["roll"],
+                              highlightthickness=0)
         self.keys.grid(row=1, column=0, sticky="ns")
-        self.canvas = tk.Canvas(roll, bg="#18181c", highlightthickness=0)
+        self.canvas = tk.Canvas(roll, bg=theme.ROLL["roll"], highlightthickness=0)
         self.canvas.grid(row=1, column=1, sticky="nsew")
 
         # The ruler and keyboard gutter have no scrollbars of their own: the
@@ -522,16 +1042,16 @@ class MidiEditorApp(tk.Tk):
         vbar = ttk.Scrollbar(roll, orient="vertical", command=self._yview)
         vbar.grid(row=1, column=2, sticky="ns")
         hbar = ttk.Scrollbar(roll, orient="horizontal", command=self._xview)
-        hbar.grid(row=4, column=1, sticky="ew")
+        hbar.grid(row=5, column=1, sticky="ew")
         self.canvas.configure(
             xscrollcommand=lambda a, b: (hbar.set(a, b), self.ruler.xview_moveto(a),
-                                         self._scheduleDemand()),
+                                         self._scheduleDemand(), self._scheduleSpan()),
             yscrollcommand=lambda a, b: (vbar.set(a, b), self.keys.yview_moveto(a)))
 
         # A sash between the roll and the demand strip: dragging it changes
         # the strip's height, and the roll, which owns the grid's spare
         # space, gives way.
-        sash = tk.Frame(roll, height=5, bg="#3a3a44", cursor="sb_v_double_arrow")
+        sash = tk.Frame(roll, height=5, bg=theme.ROLL["sash"], cursor="sb_v_double_arrow")
         sash.grid(row=2, column=0, columnspan=2, sticky="ew")
         sash.bind("<ButtonPress-1>", self._onSashPress)
         sash.bind("<B1-Motion>", self._onSashDrag)
@@ -541,22 +1061,49 @@ class MidiEditorApp(tk.Tk):
         # only the visible columns from the current scroll position, so its
         # cost is the window width and not the length of the piece. The
         # gutter beside it holds the voice budget.
-        gutter = ttk.Frame(roll, width=KEYS_W)
-        gutter.grid(row=3, column=0, sticky="nsew")
+        gutter = ttk.Frame(roll, width=self.keysW, style="Lane.TFrame")
+        switch = ttk.Frame(roll, padding=(self.keysW + self.laneGap, lanePad, 0, lanePad + 1),
+                           style="Lane.TFrame")
+        switch.grid(row=3, column=0, columnspan=2, sticky="ew")
+
+        for lane, tip in (("Demand", "Voices sounding over time, against the budget"),
+                          ("Velocity", "A bar for each note at its start, as tall as its velocity"),
+                          ("Weight", "A bar for each note, as tall as its reduction weight;\n"
+                                     "outlines are the notes the reduction drops")):
+            b = ttk.Radiobutton(switch, text=lane, value=lane, variable=self.laneVar,
+                                style="Lane.Toggle.TButton", command=self._laneChanged)
+            b.pack(side="left", padx=(0, 2))
+            Tooltip(b, tip)
+
+        # A one-pixel rule along the bottom of the lane row, across the
+        # gutter and the strip. It shares the row's grid cell and is made
+        # after the row, so it sits over the row's bottom edge.
+        self.laneRule = tk.Frame(roll, height=1, bg=self.palette["raised"])
+        self.laneRule.grid(row=3, column=0, columnspan=2, sticky="sew")
+
+        # The gutter's heading sits in the corner of the lane row, in the
+        # text colour so it reads as a label and not a fourth lane, with a
+        # rule beside it that runs on down the gutter's edge.
+        tk.Label(roll, text="Voices", bg=theme.ROLL["strip"], fg=self.palette["text"],
+                 font=(self.uiFamily, CORNER_FONT_PT), padx=pad).grid(
+            row=3, column=0, sticky="nsew", padx=(0, 1), pady=(0, 1))
+        tk.Frame(roll, width=1, bg=self.palette["raised"]).grid(row=3, column=0, sticky="nse")
+        gutter.grid(row=4, column=0, sticky="nsew")
         gutter.grid_propagate(False)
-        ttk.Label(gutter, text="Voices", font=("TkDefaultFont", 7)).pack(pady=(4, 0))
-        self.budgetSpin = ttk.Spinbox(gutter, from_=1, to=64, width=3,
-                                      textvariable=self.budgetVar,
-                                      command=self._reductionChanged)
-        self.budgetSpin.pack()
-        self.budgetSpin.bind("<KeyRelease>", lambda e: self._reductionChanged())
-        Tooltip(gutter, "Voice budget: the line on the demand strip.\n"
-                "Where the stack crosses it, notes would have to go.")
-        self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg="#202026",
+        self._buildBudget(gutter)
+
+        # The strip reports what is under the pointer, and the budget line
+        # on it can be grabbed and dragged. The press is bound for every
+        # button, alongside the tooltip's, so the tooltip still closes.
+        self.demandCanvas = tk.Canvas(roll, height=DEMAND_H, bg=theme.ROLL["strip"],
                                       highlightthickness=0)
-        self.demandCanvas.grid(row=3, column=1, sticky="ew")
+        self.demandCanvas.grid(row=4, column=1, sticky="ew")
         self.demandCanvas.bind("<Configure>", lambda e: self._scheduleDemand())
         self.demandCanvas.bind("<Motion>", self._onDemandMotion)
+        self.demandCanvas.bind("<ButtonPress>", self._onStripPress, add="+")
+        self.demandCanvas.bind("<B1-Motion>", self._onStripDrag)
+        self.demandCanvas.bind("<ButtonRelease-1>", self._onBudgetRelease)
+        self.demandCanvas.bind("<Leave>", lambda e: self._hoverBudgetLine(None), add="+")
         Tooltip(self.demandCanvas,
                 "Voices sounding over time, stacked per channel.\n"
                 "White line: distinct pitches (unisons merged).\n"
@@ -621,7 +1168,9 @@ class MidiEditorApp(tk.Tk):
             text.pack(side="left", fill="both", expand=True)
             self.reportTexts[key] = text
 
-        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
+        self.nb.bind("<<NotebookTabChanged>>",
+                     lambda e: (self._updateDrawerButtons(), self._showReportIfSelected(),
+                                self._showEventsIfSelected()))
         self.reportNb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
 
         # Mouse bindings for the roll. Wheel events are bound on the ruler and
@@ -635,6 +1184,9 @@ class MidiEditorApp(tk.Tk):
         self.ruler.bind("<Double-Button-1>", self.onRulerDouble)
         self.ruler.bind("<Button-3>", self.onRulerContext)
         self.canvas.bind("<Motion>", self.onMotion)
+        self.canvas.bind("<Leave>", self._clearHover, add="+")
+        self.canvas.bind("<Configure>", lambda e: self._centreOnNotes()
+                         if self._centrePending else None, add="+")
 
         for w in (self.canvas, self.keys, self.ruler, self.demandCanvas):
             w.bind("<Button-4>", self.onWheel)
@@ -650,6 +1202,80 @@ class MidiEditorApp(tk.Tk):
         """
         self.status = ttk.Label(self, text="Ready", padding=(8, 3), relief="sunken")
         self.status.pack(fill="x", side="bottom")
+
+    def _buildDrawerBar(self):
+        """Create the bar of drawer buttons along the bottom, above the status bar.
+
+        Packed before the body, for the same reason as the status bar. Each
+        button opens the drawer on its page, or closes it when that page is
+        already showing; the count of events in the file sits at the right.
+        """
+        bar = ttk.Frame(self, padding=(6, 1))
+        bar.pack(fill="x", side="bottom")
+        self.drawerButtons: dict[str, ttk.Button] = {}
+
+        for name, tip in (("Events", "Open the list of every event in the file"),
+                          ("Report", "Open the file's analysis as text")):
+            b = ttk.Button(bar, text=name, style="Toolbutton",
+                           command=lambda n=name: self.toggleDrawer(n))
+            b.pack(side="left", padx=(0, 4))
+            Tooltip(b, tip)
+            self.drawerButtons[name] = b
+
+        self.eventCountLbl = ttk.Label(bar, text="", foreground=self.palette["muted"],
+                                       font=(self.uiFamily, 9))
+        self.eventCountLbl.pack(side="right", padx=6)
+        self._updateDrawerButtons()
+
+    def toggleDrawer(self, page: str):
+        """Open the drawer on a page, or close it when that page is already showing.
+
+        Args:
+            page: "Events" or "Report".
+        """
+        if self.drawerOpen and DRAWER_PAGES[self.nb.index(self.nb.select())] == page:
+            self.closeDrawer()
+        else:
+            self.openDrawer(page)
+
+    def openDrawer(self, page: str):
+        """Open the drawer under the roll, on one of its pages.
+
+        The drawer is the lower pane of the centre column; opening it gives
+        it the lower two fifths, and its sash can be dragged from there.
+
+        Args:
+            page: "Events" or "Report".
+        """
+        if not self.drawerOpen:
+            self.centre.add(self.nb, weight=1)
+            self.drawerOpen = True
+            self.update_idletasks()
+            height = self.centre.winfo_height()
+
+            if height > 1:
+                self.centre.sashpos(0, int(height * 0.6))
+
+        self.nb.select(DRAWER_PAGES.index(page))
+        self._updateDrawerButtons()
+        self._showReportIfSelected()
+        self._showEventsIfSelected()
+
+    def closeDrawer(self):
+        """Close the drawer; the roll takes the whole centre column again."""
+        if self.drawerOpen:
+            self.centre.forget(self.nb)
+            self.drawerOpen = False
+
+        self._updateDrawerButtons()
+
+    def _updateDrawerButtons(self):
+        """Point each drawer button's arrow up to open its page, or down to close it."""
+        showing = DRAWER_PAGES[self.nb.index(self.nb.select())] if self.drawerOpen else None
+
+        for name, button in self.drawerButtons.items():
+            glyph = DRAWER_CLOSE_GLYPH if name == showing else DRAWER_OPEN_GLYPH
+            button.configure(text=f"{glyph}  {name}")
 
     def _bindKeys(self):
         """Bind the keyboard shortcuts advertised in the menus and tooltips.
@@ -764,6 +1390,20 @@ class MidiEditorApp(tk.Tk):
                                       "Discard unsaved changes?")
         return discard
 
+    def destroy(self):
+        """Drop a reduction worked out off the main thread, then destroy the window.
+
+        The job's thread is a daemon and is left to end; the interpreter's
+        switch interval is given back.
+        """
+        for pending in (self._reducePoll, self._reduceStart, self._chordAfter):
+            if pending is not None:
+                self.after_cancel(pending)
+
+        self._reducePoll = self._reduceStart = self._chordAfter = None
+        self._endReduceJob()
+        super().destroy()
+
     def onClose(self):
         """Quit: stop both synths and destroy the window, unless the user
         decides to keep unsaved changes."""
@@ -787,7 +1427,15 @@ class MidiEditorApp(tk.Tk):
         self.demand = None
         self.songDemand = None
         self.chords = None
-        self.reduction = None
+        self.chordNames = None
+        self._chordStale = []
+        self._chordsPending = True
+        self._noteIndex = None
+        self._sweepBase = None
+        self._dropReduction()
+        self._reduceAgain = False
+        self._lastReduction = None
+        self._lastDemand = None
         self.noteWeights = None
         self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
@@ -819,25 +1467,29 @@ class MidiEditorApp(tk.Tk):
         self.activeChannel = chans[0] if chans else 0
         self.originalPrograms = {ch: info.program for ch, info in self.song.channels.items()}
         self._buildChannelRows()
+        self._refreshChannelCommands()
         self._loadPoolControls()
         self.redraw()
-        self._fillEvents()
+        self.after_idle(self._centreOnNotes)
+        self._nameChordsLater()
+        self._eventsChanged()
         self._updateTitle()
         self._updateSummary()
+        self._showReadout(0.0)
         self._showReportIfSelected()
 
     def _updateSummary(self):
-        """Refresh the toolbar file summary: name, format, tracks, resolution,
-        time signature, starting tempo, note count and duration."""
+        """Refresh the file summary on the header line: name, format, tracks,
+        resolution, time signature, starting tempo, note count, duration and key."""
         s = self.song
         name = s.path.rsplit("/", 1)[-1] if s.path else "untitled"
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
         key = analysis.songKey(s)
         keyText = f" | {key.name}" if key else ""
         self.infoLbl.config(text=(
-            f"{name}   fmt {s.mf.format} | {len(s.mf.tracks)} trk | "
+            f"{name}     format {s.mf.format} | {len(s.mf.tracks)} tracks | "
             f"{s.mf.division} tpq | {num}/{den} | {s.initialBpm():.0f} bpm | "
-            f"{len(s.notes)} notes | {s.duration:.1f}s{keyText}"))
+            f"{len(s.notes):,} notes | {s.duration:.1f} s{keyText}"))
 
     def _updateTitle(self):
         """Set the window title to the file path, starred when unsaved."""
@@ -846,9 +1498,35 @@ class MidiEditorApp(tk.Tk):
         self.title(f"MontyRoll - {name}{star}")
 
     def _markDirty(self):
-        """Flag the song as modified and show the star in the title."""
+        """Flag the song as modified, show the star in the title, and date the Events page."""
         self.song.dirty = True
         self._updateTitle()
+        self._eventsChanged()
+
+    def _eventsChanged(self):
+        """Count the events and date the Events page, filling it at the next idle if on view."""
+        total = sum(len(track) for track in self.song.mf.tracks)
+        self.eventCountLbl.config(text=f"{total:,} events")
+        self._eventsStale = True
+
+        if self._eventsAfter is None and self._eventsOnView():
+            self._eventsAfter = self.after_idle(self._showEventsIfSelected)
+
+    def _eventsOnView(self) -> bool:
+        """Report whether the drawer is open on the Events page.
+
+        Returns:
+            bool: True when the event list can be seen.
+        """
+        onView = self.drawerOpen and DRAWER_PAGES[self.nb.index(self.nb.select())] == "Events"
+        return onView
+
+    def _showEventsIfSelected(self):
+        """Fill the Events page when it is on view and out of date."""
+        self._eventsAfter = None
+
+        if self._eventsStale and self._eventsOnView():
+            self._fillEvents()
 
     def _setStatus(self, text: str):
         """Show a message in the status bar.
@@ -860,95 +1538,102 @@ class MidiEditorApp(tk.Tk):
 
     # ------------------------------------------------------- channel strip
     def _buildChannelRows(self):
-        """Rebuild the channel strip, one card per channel the song uses.
+        """Rebuild the channel strip, one compact row per channel the song uses.
 
-        Each card carries the channel colour swatch and number, a preview
-        button, the GM instrument picker (a fixed label on the drum channel),
-        mute and solo checkbuttons, a CC7 volume slider and a one-line
-        summary. Clicking a card makes it the active channel for adding
-        notes, and wheel events on the card scroll the strip.
+        A row is one line: the channel's number on a swatch of its colour,
+        the instrument, mute and solo toggles and a CC7 volume slider. Under
+        it sits the
+        row's detail, shown for the active channel only: the summary, the
+        demand figures, and the pool, release and priority controls. The
+        detail is built for every row, so each channel's controls and
+        figures exist whichever row is active. Clicking a row makes it the
+        active channel, and wheel events on a row scroll the strip.
         """
-        # Throw away the previous song's cards.
+        # Throw away the previous rows and the widgets listed from them; the
+        # mute, solo and reduction variables keep their state.
         for w in self.chanHolder.winfo_children():
             w.destroy()
 
         self.channelRows.clear()
+        self.channelDetails.clear()
+        self.nameLabels.clear()
+        self.rowNames.clear()
+        self.rowBars.clear()
+        self.poolCombos.clear()
+        self.usageLabels.clear()
+        self.usageText.clear()
+        self.descLabels.clear()
         figures = analysis.channelDemand(self._ensureSongDemand())
-        scaling = float(self.tk.call("tk", "scaling"))   # the figures line wraps at high DPI
+        self.channelFigures = figures
+        p = self.palette
+        digits = max((len(str(ch + 1)) for ch in self.song.channels), default=1)
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
-            color = CHANNEL_COLORS[ch]
-            row = tk.Frame(self.chanHolder, bd=1, relief="solid",
-                           padx=4, pady=3)
-            row.pack(fill="x", padx=4, pady=2)
+            colour = CHANNEL_COLORS[ch]
+            row = tk.Frame(self.chanHolder)
+            row.pack(fill="x", pady=(0, 1))
 
-            # Top line: colour swatch, channel number, preview button and the
-            # instrument. The lambda default pins ch to this card.
-            top = tk.Frame(row)
+            # The one-line row is a grey bar: the channel's number on a swatch
+            # of its colour, as wide as the song's largest number needs so
+            # the names line up, then the instrument, and on the right mute,
+            # solo and the volume. Tk shrinks what is packed last when the
+            # strip is narrow, so the name goes last and gives way, with an
+            # ellipsis. _highlightActiveRow colours the bar and its styles.
+            top = tk.Frame(row, bg=p["raised"])
             top.pack(fill="x")
-            sw = tk.Canvas(top, width=14, height=14, highlightthickness=0)
-            sw.create_rectangle(0, 0, 14, 14, fill=color, outline="")
-            sw.pack(side="left")
-            tk.Label(top, text=f"Ch {ch + 1}", width=5, anchor="w",
-                     font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(4, 0))
-            pb = ttk.Button(top, text=PREVIEW_GLYPH, width=2,
-                            command=lambda c=ch: self._previewChannel(c))
-            pb.pack(side="left", padx=(0, 2))
-            Tooltip(pb, "Play a short sample of this channel's instrument\n"
-                    "(in the channel's own pitch range)")
-
-            # Channel 10 is fixed to GM percussion, so it gets a label where
-            # the other channels get a program picker. Picker entries are
-            # "nnn  Name"; _programChanged parses the number back out.
-            if info.isDrums:
-                dl = tk.Label(top, text="Drum Kit (GM percussion)", anchor="w")
-                dl.pack(side="left", fill="x", expand=True)
-                Tooltip(dl, "Channel 10 is the GM percussion channel:\n"
-                        "each pitch is a different drum sound")
-            else:
-                var = tk.StringVar(value=f"{info.program:3d}  {info.instrument}")
-                combo = ttk.Combobox(
-                    top, textvariable=var, state="readonly",
-                    values=[f"{i:3d}  {n}" for i, n in enumerate(gm.GM_PROGRAMS)])
-                combo.pack(side="left", fill="x", expand=True, padx=(4, 0))
-                combo.bind("<<ComboboxSelected>>",
-                           lambda e, c=ch, v=var: self._programChanged(c, v))
-                Tooltip(combo, "GM instrument for this channel.\n"
-                        "Picking one writes a program-change event\n"
-                        "into the file (saved on Ctrl+S).")
-
-            # Bottom line: mute and solo share _channelsChanged, which dims
-            # the roll and restarts the synth when playing.
-            bottom = tk.Frame(row)
-            bottom.pack(fill="x")
-            self.muteVars[ch] = tk.BooleanVar(value=False)
-            self.soloVars[ch] = tk.BooleanVar(value=False)
-            mb = tk.Checkbutton(bottom, text="M", variable=self.muteVars[ch],
-                                command=self._channelsChanged)
-            mb.pack(side="left")
-            Tooltip(mb, f"Mute channel {ch + 1}: silence it during playback\n"
-                    "and dim its notes in the piano roll")
-            sb = tk.Checkbutton(bottom, text="S", variable=self.soloVars[ch],
-                                command=self._channelsChanged)
-            sb.pack(side="left")
-            Tooltip(sb, f"Solo channel {ch + 1}: when any channel is soloed,\n"
-                    "only soloed channels play (solo overrides mute)")
+            self.rowBars[ch] = top
+            tk.Label(top, text=str(ch + 1), bg=colour, fg=p["ink"], width=digits, padx=5,
+                     font=(self.uiFamily, 10, "bold")).pack(side="left", fill="y")
 
             # Volume slider starts at the file's CC7 value, or 100 when the
-            # channel has none. set() fires the command once during
-            # construction; _volumeChanged treats that no-op as a no-op.
-            vol = tk.Scale(bottom, from_=0, to=127, orient="horizontal",
-                           showvalue=0, length=70, width=9,
-                           command=lambda v, c=ch: self._volumeChanged(c, v))
+            # channel has none. Its style puts the trough on the bar's grey.
+            # set() fires the command once during construction;
+            # _volumeChanged treats that no-op as a no-op.
+            vol = ttk.Scale(top, from_=0, to=127, orient="horizontal", length=56,
+                            style=f"Ch{ch}.Row.Horizontal.TScale",
+                            command=lambda v, c=ch: self._volumeChanged(c, v))
             vol.set(info.volume if info.volume >= 0 else 100)
-            vol.pack(side="right", padx=(4, 0))
+            vol.pack(side="right", padx=(6, 4))
             Tooltip(vol, f"Channel {ch + 1} volume (MIDI CC7, 0-127).\n"
                     "Writes a volume event into the file (saved on\n"
                     "Ctrl+S). Applies live while playing.")
 
-            # Summary: note count, pitch range and GM family, flagged when
-            # the channel uses pitch bend.
+            # Mute and solo are painted icons that share _channelsChanged,
+            # which dims the roll and restarts the synth when playing. They
+            # are packed from the right, solo first, each with a one-pixel
+            # line before it. A style per channel puts each icon on its
+            # bar's grey in every state: ttk reads a state map anywhere up
+            # the style's family before a plain setting, so without one the
+            # checkbutton's hover colour would show.
+            self.muteVars.setdefault(ch, tk.BooleanVar(value=False))
+            self.soloVars.setdefault(ch, tk.BooleanVar(value=False))
+
+            for key, var, tip in (
+                    ("Solo", self.soloVars[ch], f"Solo channel {ch + 1}: when any channel is "
+                     "soloed,\nonly soloed channels play (solo overrides mute)"),
+                    ("Mute", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
+                     "playback\nand dim its notes in the piano roll")):
+                b = ttk.Checkbutton(top, variable=var, style=f"Ch{ch}.{key}.Row.TCheckbutton",
+                                    command=self._channelsChanged)
+                b.pack(side="right")
+                tk.Frame(top, width=1, bg=p["border"]).pack(side="right", fill="y")
+                Tooltip(b, tip)
+
+            # The name asks for no width of its own and is fitted to what it
+            # is given whenever that changes; its padding sets the bar's
+            # height.
+            name = tk.Label(top, text=info.instrument, anchor="w", width=1, bg=p["raised"],
+                            fg=p["text"], font=self.rowNameFont, pady=ROW_PAD)
+            name.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            name.bind("<Configure>", lambda e, c=ch: self._fitRowName(c))
+            self.nameLabels[ch] = name
+            self.rowNames[ch] = info.instrument
+
+            # The detail, shown under the active row: summary, figures, and
+            # the reduction controls.
+            detail = tk.Frame(row, padx=6, pady=2)
+            self.channelDetails[ch] = detail
             fam = "Percussion" if info.isDrums else gm.familyName(info.program)
             desc = (f"{info.noteCount} notes | "
                     f"{gm.noteName(info.lo)}-{gm.noteName(info.hi)} | {fam}")
@@ -956,9 +1641,9 @@ class MidiEditorApp(tk.Tk):
             if info.hasPitchBend:
                 desc += " | bends"
 
-            self.descLabels[ch] = dl = tk.Label(bottom, text=desc, anchor="w",
-                          font=("TkDefaultFont", 8))
-            dl.pack(side="left", padx=(8, 0))
+            self.descLabels[ch] = dl = tk.Label(detail, text=desc, anchor="w",
+                                                fg=p["muted"], font=(self.uiFamily, 9))
+            dl.pack(fill="x", pady=(3, 0))
             Tooltip(dl, "Note count, pitch range, GM instrument family")
 
             # Voice demand: the channel's own peak, its mean while sounding
@@ -968,9 +1653,9 @@ class MidiEditorApp(tk.Tk):
             if figure is not None:
                 usage = (f"peak {figure.peak} | mean {figure.mean:.1f} | "
                          f"plays {figure.fraction:.0%}")
-                ul = tk.Label(row, text=usage, anchor="w", font=("TkDefaultFont", 8),
-                              fg="#555", justify="left", wraplength=int(290 * scaling))
-                ul.pack(anchor="w", padx=(22, 0))
+                ul = tk.Label(detail, text=usage, anchor="w", font=(self.uiFamily, 9),
+                              fg=p["muted"], justify="left", wraplength=330)
+                ul.pack(fill="x")
                 self.usageLabels[ch] = ul
                 self.usageText[ch] = usage
                 Tooltip(ul, "Voice demand: most notes at once, average while\n"
@@ -978,49 +1663,51 @@ class MidiEditorApp(tk.Tk):
                             "and how much of its playing time the pool being\n"
                             "edited already sounds (low: it could share that pool)")
 
-                # Reduction: the pool the channel belongs to, its own release
-                # (blank for the tier's) and its priority.
-                prow = tk.Frame(row)
-                prow.pack(fill="x", padx=(20, 0))
-                tk.Label(prow, text="Pool", font=("TkDefaultFont", 8)).pack(side="left")
-                pv = self.poolVars.setdefault(ch, tk.StringVar(value=self._poolNameOf(ch)))
-                pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=8,
-                                  values=self._poolNames())
-                pc.pack(side="left", padx=(2, 6))
-                pc.bind("<<ComboboxSelected>>", lambda e, c=ch: self._channelPoolChanged(c))
-                self.poolCombos.append(pc)
-                Tooltip(pc, "The pool this channel's notes are reduced in;\n"
-                            "(none) leaves the channel out of the reduction")
-                tk.Label(prow, text="Rel", font=("TkDefaultFont", 8)).pack(side="left")
-                release = f"{self.plan.release[ch]:g}" if ch in self.plan.release else ""
-                rv = self.releaseVars.setdefault(ch, tk.StringVar(value=release))
-                rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=5,
-                                 textvariable=rv,
-                                 command=lambda c=ch: self._channelReleaseChanged(c))
-                rs.pack(side="left", padx=(2, 6))
-                rs.bind("<KeyRelease>", lambda e, c=ch: self._channelReleaseChanged(c))
-                Tooltip(rs, "Release in milliseconds: how long a voice stays busy\n"
-                            "after this channel's notes end; blank uses the tier's")
-                tk.Label(prow, text="Pri", font=("TkDefaultFont", 8)).pack(side="left")
-                var = self.priorityVars.setdefault(
-                    ch, tk.DoubleVar(value=self.plan.priorityOf(ch)))
-                pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=4,
-                                 textvariable=var, command=self._reductionChanged)
-                pr.pack(side="left", padx=(2, 0))
-                pr.bind("<KeyRelease>", lambda e: self._reductionChanged())
-                Tooltip(pr, "Reduction priority: 1 is neutral, higher keeps\n"
-                            "this channel's notes at the expense of others")
-                prow.bind("<Button-1>", lambda e, c=ch: self._setActiveChannel(c))
+            # Reduction: the pool the channel belongs to, its own release
+            # (blank for the tier's) and its priority, for every channel, so
+            # one with no notes yet can be given its pool.
+            prow = tk.Frame(detail)
+            prow.pack(fill="x", pady=(3, 1))
+            tk.Label(prow, text="Pool", fg=p["muted"],
+                     font=(self.uiFamily, 9)).pack(side="left")
+            pv = self.poolVars.setdefault(ch, tk.StringVar(value=self._poolNameOf(ch)))
+            pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=7,
+                              values=self._poolNames())
+            pc.pack(side="left", padx=(3, 8))
+            pc.bind("<<ComboboxSelected>>", lambda e, c=ch: self._channelPoolChanged(c))
+            self.poolCombos.append(pc)
+            Tooltip(pc, "The pool this channel's notes are reduced in;\n"
+                        "(none) leaves the channel out of the reduction")
+            tk.Label(prow, text="Rel", fg=p["muted"],
+                     font=(self.uiFamily, 9)).pack(side="left")
+            release = f"{self.plan.release[ch]:g}" if ch in self.plan.release else ""
+            rv = self.releaseVars.setdefault(ch, tk.StringVar(value=release))
+            rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=4,
+                             textvariable=rv,
+                             command=lambda c=ch: self._channelReleaseChanged(c))
+            rs.pack(side="left", padx=(3, 8))
+            rs.bind("<KeyRelease>", lambda e, c=ch: self._channelReleaseChanged(c))
+            Tooltip(rs, "Release in milliseconds: how long a voice stays busy\n"
+                        "after this channel's notes end; blank uses the tier's")
+            tk.Label(prow, text="Pri", fg=p["muted"],
+                     font=(self.uiFamily, 9)).pack(side="left")
+            var = self.priorityVars.setdefault(
+                ch, tk.DoubleVar(value=self.plan.priorityOf(ch)))
+            pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=3,
+                             textvariable=var, command=self._reductionChanged)
+            pr.pack(side="left", padx=(3, 0))
+            pr.bind("<KeyRelease>", lambda e: self._reductionChanged())
+            Tooltip(pr, "Reduction priority: 1 is neutral, higher keeps\n"
+                        "this channel's notes at the expense of others")
 
-                for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
-                    prow.bind(seq, self._onChanWheel)
-
-            # A click on any part of the card makes it the active channel,
-            # and the wheel scrolls the strip from the card too: X11 delivers
-            # wheel events to the widget under the pointer, so the canvas
-            # binding alone never sees them while the pointer is on a card.
-            for w in (row, top, bottom):
+            # A click on any plain part of the row makes it the active
+            # channel, and the wheel scrolls the strip from the row too: X11
+            # delivers wheel events to the widget under the pointer, so the
+            # canvas binding alone never sees them while the pointer is on a
+            # row.
+            for w in self._rowSurfaces(row):
                 w.bind("<Button-1>", lambda e, c=ch: self._setActiveChannel(c))
+
                 for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
                     w.bind(seq, self._onChanWheel)
 
@@ -1030,9 +1717,47 @@ class MidiEditorApp(tk.Tk):
 
         self._highlightActiveRow()
 
+    @staticmethod
+    def _rowSurfaces(row: tk.Frame) -> list[tk.Misc]:
+        """List a row's frames and labels: the parts a click or a tint applies to.
+
+        Args:
+            row: a channel row, or the detail under one.
+
+        Returns:
+            list[tk.Misc]: the frame and every frame, label and canvas inside it.
+        """
+        surfaces: list[tk.Misc] = []
+        stack: list[tk.Misc] = [row]
+
+        while stack:
+            w = stack.pop()
+
+            if isinstance(w, (tk.Frame, tk.Label, tk.Canvas)):
+                surfaces.append(w)
+                stack.extend(w.winfo_children())
+
+        return surfaces
+
+    def _fitRowName(self, ch: int):
+        """Show a row's instrument name in full, or cut short with an ellipsis to fit.
+
+        Args:
+            ch: 0-based channel index.
+        """
+        label = self.nameLabels[ch]
+        width = label.winfo_width()
+        font = self.rowNameBoldFont if ch == self.activeChannel else self.rowNameFont
+
+        # Until the row is laid out the label has no width to fit to.
+        shown = self.rowNames[ch] if width <= 1 else _elide(self.rowNames[ch], font, width - 4)
+
+        if label.cget("text") != shown:
+            label.configure(text=shown)
+
     def _channelsChanged(self):
         """Mute or solo toggled: dim the roll and restart the synth if playing."""
-        self.redraw()
+        self._redrawNotes()
         self._liveUpdate()
 
     def muteAll(self):
@@ -1040,7 +1765,7 @@ class MidiEditorApp(tk.Tk):
         for var in self.muteVars.values():
             var.set(True)
 
-        self.redraw()
+        self._redrawNotes()
         self._liveUpdate()
         self._setStatus("All channels muted")
 
@@ -1067,7 +1792,7 @@ class MidiEditorApp(tk.Tk):
             self._invalidateReducedSong()
             self._buildChannelRows()
 
-        self.redraw()
+        self._redrawNotes()
         self._liveUpdate()
         message = "Mutes and solos cleared"
 
@@ -1195,19 +1920,57 @@ class MidiEditorApp(tk.Tk):
         """
         self.activeChannel = ch
         self._highlightActiveRow()
+        self._refreshInspector()
         self._setStatus(f"Active channel: {ch + 1} - double-click the roll to add notes")
 
     def _highlightActiveRow(self):
-        """Tint the active channel's card and reset every other card."""
+        """Light the active channel's row and show its detail; reset every other row.
+
+        The active row's bar, the row around it and its detail take the
+        tint, so they read as one card, and its name is bold. Every other
+        bar is the raised grey.
+        """
         for ch, row in self.channelRows.items():
             active = ch == self.activeChannel
+            colour = self.palette["active"] if active else self.palette["panel"]
+            row.configure(bg=colour)
+            self._paintRowBar(ch, self.palette["active"] if active else self.palette["raised"],
+                              active)
+            detail = self.channelDetails.get(ch)
 
-            # SystemButtonFace is the platform button colour where Tk knows
-            # the name; elsewhere the default Tk grey stands in for it.
-            try:
-                row.config(bg="#d0e0ff" if active else "SystemButtonFace")
-            except tk.TclError:
-                row.config(bg="#d0e0ff" if active else "#d9d9d9")
+            if detail is None:
+                continue
+
+            for w in self._rowSurfaces(detail):
+                w.configure(bg=colour)
+
+            if active:
+                detail.pack(fill="x")
+            else:
+                detail.pack_forget()
+
+    def _paintRowBar(self, ch: int, colour: str, bold: bool):
+        """Colour a channel row's bar, its icons' and slider's styles, and its name.
+
+        Args:
+            ch: 0-based channel index.
+            colour: the bar's colour.
+            bold: the name in bold, for the active channel.
+        """
+        s = ttk.Style(self)
+        self.rowBars[ch].configure(bg=colour)
+        self.nameLabels[ch].configure(bg=colour,
+                                      font=self.rowNameBoldFont if bold else self.rowNameFont)
+
+        # Each map matches every state, as the checkbutton's own hover map
+        # would otherwise win.
+        for key in ("Mute", "Solo"):
+            style = f"Ch{ch}.{key}.Row.TCheckbutton"
+            s.configure(style, background=colour)
+            s.map(style, background=[("", colour)])
+
+        s.configure(f"Ch{ch}.Row.Horizontal.TScale", background=colour)
+        self._fitRowName(ch)
 
     def _programChanged(self, ch: int, var: tk.StringVar):
         """Instrument picked in a card: write the program change into the song.
@@ -1220,8 +1983,12 @@ class MidiEditorApp(tk.Tk):
         program = int(var.get().split()[0])
         self.song.setProgram(ch, program)
 
-        # The card's summary line carries the instrument family, which the
-        # new program may have changed.
+        # The row shows the instrument, and its summary line carries the
+        # instrument family, which the new program may have changed.
+        if ch in self.nameLabels:
+            self.rowNames[ch] = gm.programName(program)
+            self._fitRowName(ch)
+
         label = self.descLabels.get(ch)
 
         if label is not None:
@@ -1237,6 +2004,7 @@ class MidiEditorApp(tk.Tk):
 
         self._markDirty()
         self._invalidateReducedSong()
+        self._refreshInspector()
         self._setStatus(f"Ch {ch + 1} {ARROW} {gm.programName(program)}")
         self._liveUpdate()
 
@@ -1276,6 +2044,285 @@ class MidiEditorApp(tk.Tk):
 
         return {c for c, v in self.muteVars.items() if not v.get()}
 
+    # ----------------------------------------------------------- inspector
+    def _buildInspector(self, parent: ttk.Frame):
+        """Create the inspector and the strip it folds to.
+
+        Open, the inspector is a header with the burger button and two
+        cards: the active channel, with its instrument picker and preview
+        button, and the selected note. Folded, it is a strip holding the
+        burger button and the panel's name written upwards.
+
+        Args:
+            parent: the inspector's pane.
+        """
+        p = self.palette
+        self.inspectorFolded = False
+
+        # The open panel: header, then the channel card.
+        self.inspectorBody = ttk.Frame(parent)
+        self.inspectorBody.pack(fill="both", expand=True)
+        head = ttk.Frame(self.inspectorBody, style="Title.TFrame")
+        head.pack(fill="x", pady=(0, 6))
+        b = ttk.Button(head, text=BURGER_GLYPH, style="Burger.Toolbutton",
+                       command=self.toggleInspector)
+        b.pack(side="left")
+        Tooltip(b, "Fold the inspector away; the roll takes its width")
+        ttk.Label(head, text="Inspector", style="Title.TLabel",
+                  font=(self.uiFamily, 10, "bold")).pack(side="left", padx=(4, 0))
+
+        card = self._inspectorCard("CHANNEL")
+        top = tk.Frame(card, bg=p["raised"])
+        top.pack(fill="x", pady=(4, 6))
+        self.inspSwatch = tk.Canvas(top, width=12, height=12, bg=p["raised"],
+                                    highlightthickness=0)
+        self.inspSwatch.pack(side="left")
+        self.inspTitle = tk.Label(top, text="", anchor="w", bg=p["raised"], fg=p["text"],
+                                  font=(self.uiFamily, 11, "bold"))
+        self.inspTitle.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        # The instrument picker and the preview button act on the active
+        # channel. Picker entries are "nnn  Name", as on the cards.
+        pick = tk.Frame(card, bg=p["raised"])
+        pick.pack(fill="x", pady=(0, 6))
+        self.inspProgramVar = tk.StringVar()
+        self.inspProgram = ttk.Combobox(
+            pick, textvariable=self.inspProgramVar, state="readonly",
+            values=[f"{i:3d}  {n}" for i, n in enumerate(gm.GM_PROGRAMS)])
+        self.inspProgram.pack(side="left", fill="x", expand=True)
+        self.inspProgram.bind("<<ComboboxSelected>>", lambda e: self._programChanged(
+            self.activeChannel, self.inspProgramVar))
+        Tooltip(self.inspProgram, "GM instrument for the active channel.\n"
+                "Picking one writes a program-change event\n"
+                "into the file (saved on Ctrl+S).")
+        pb = ttk.Button(pick, text=PREVIEW_GLYPH, width=2,
+                        command=lambda: self._previewChannel(self.activeChannel))
+        pb.pack(side="left", padx=(4, 0))
+        Tooltip(pb, "Play a short sample of the active channel's instrument\n"
+                "(in the channel's own pitch range)")
+        self.inspChannelFields = {name: self._inspectorField(card, name) for name in (
+            "Pool", "Release", "Priority", "Notes", "Range", "Family", "Peak", "Mean",
+            "Plays", "Overlap")}
+
+        # The note card: the pitch large, then the note's details and its
+        # weight as a bar against the heaviest note in the song.
+        card = self._inspectorCard("NOTE")
+        self.inspPitch = tk.Label(card, text="", anchor="w", bg=p["raised"], fg=p["text"],
+                                  font=(self.uiFamily, 16, "bold"))
+        self.inspPitch.pack(fill="x")
+        self.inspNoteFields = {name: self._inspectorField(card, name) for name in (
+            "Velocity", "Starts", "Ticks", "Track", "Reduction", "Weight")}
+        self.inspWeightBar = tk.Canvas(card, height=8, bg=p["raised"], highlightthickness=0)
+        self.inspWeightBar.pack(fill="x", pady=(3, 0))
+
+        # The folded strip.
+        self.inspectorStrip = ttk.Frame(parent)
+        b = ttk.Button(self.inspectorStrip, text=BURGER_GLYPH, style="Burger.Toolbutton",
+                       command=self.toggleInspector)
+        b.pack(side="top")
+        Tooltip(b, "Open the inspector")
+        name = tk.Canvas(self.inspectorStrip, width=24, height=110, bg=p["panel"],
+                         highlightthickness=0)
+        name.create_text(12, 55, text="Inspector", angle=90, fill=p["muted"],
+                         font=(self.uiFamily, 10, "bold"))
+        name.pack(side="top", pady=(10, 0))
+        name.bind("<Button-1>", lambda e: self.toggleInspector())
+
+    def _inspectorCard(self, title: str) -> tk.Frame:
+        """Add a titled card to the open inspector.
+
+        Args:
+            title: the card's heading.
+
+        Returns:
+            tk.Frame: the card, for its contents.
+        """
+        p = self.palette
+        card = tk.Frame(self.inspectorBody, bg=p["raised"], padx=10, pady=8)
+        card.pack(fill="x", pady=(0, 10))
+        tk.Label(card, text=title, anchor="w", bg=p["raised"], fg=p["muted"],
+                 font=(self.uiFamily, 9, "bold")).pack(fill="x")
+        return card
+
+    def _inspectorField(self, card: tk.Frame, name: str) -> tk.Label:
+        """Add a line with a name on the left and a value on the right.
+
+        Args:
+            card: the card to add it to.
+            name: the field's name.
+
+        Returns:
+            tk.Label: the value label, for `_refreshInspector` to fill.
+        """
+        p = self.palette
+        line = tk.Frame(card, bg=p["raised"])
+        line.pack(fill="x", pady=1)
+        tk.Label(line, text=name, bg=p["raised"], fg=p["muted"],
+                 font=(self.uiFamily, 10)).pack(side="left")
+        value = tk.Label(line, text="", bg=p["raised"], fg=p["text"], font=(self.uiFamily, 10))
+        value.pack(side="right")
+        return value
+
+    def toggleInspector(self):
+        """Fold the inspector to its strip, or open it again at the width it had.
+
+        The pane's sash moves to the new width, so the roll, the ruler and
+        the strip take the width the panel gives up, or give it back.
+        """
+        self.inspectorFolded = not self.inspectorFolded
+
+        # Folding remembers the open width, which a dragged sash may have
+        # changed, and opening puts it back.
+        if self.inspectorFolded:
+            self.update_idletasks()
+            self._inspectorOpenW = self.paned.winfo_width() - self.paned.sashpos(1)
+            self.inspectorBody.pack_forget()
+            self.inspectorStrip.pack(fill="y", expand=True)
+            width = INSPECTOR_FOLDED_W
+        else:
+            self.inspectorStrip.pack_forget()
+            self.inspectorBody.pack(fill="both", expand=True)
+            width = self._inspectorOpenW
+            self._refreshInspector()
+
+        self.inspectorPane.configure(width=width, padding=(2, 4) if self.inspectorFolded
+                                     else (8, 4))
+        self.update_idletasks()
+        total = self.paned.winfo_width()
+
+        if total > width:
+            self.paned.sashpos(1, total - width)
+
+    def _refreshInspector(self):
+        """Show the active channel and the selected note in the inspector.
+
+        Nothing is drawn while it is folded; opening it refreshes it.
+        """
+        if self.inspectorFolded:
+            return
+
+        self._showInspectorChannel()
+        self._showInspectorNote()
+
+    def _showInspectorChannel(self):
+        """Fill the inspector's channel card from the active channel."""
+        ch = self.activeChannel
+        info = self.song.channels.get(ch)
+        fields = self.inspChannelFields
+        self.inspSwatch.delete("all")
+
+        if info is None:
+            self.inspTitle.config(text="No channel")
+            self.inspProgramVar.set("")
+            self.inspProgram.configure(state="disabled")
+
+            for label in fields.values():
+                label.config(text="")
+
+            return
+
+        # Title, swatch and the picker; the drum channel's kit is fixed.
+        self.inspSwatch.create_rectangle(0, 0, 12, 12, fill=CHANNEL_COLORS[ch], outline="")
+        self.inspTitle.config(text=f"Ch {ch + 1}  {info.instrument}")
+
+        if info.isDrums:
+            self.inspProgramVar.set("Drum Kit (GM percussion)")
+            self.inspProgram.configure(state="disabled")
+        else:
+            self.inspProgramVar.set(f"{info.program:3d}  {gm.programName(info.program)}")
+            self.inspProgram.configure(state="readonly")
+
+        # The reduction settings as the cards have them, then the figures.
+        release = self.plan.release.get(ch)
+
+        try:
+            priority = self.priorityVars[ch].get() if ch in self.priorityVars \
+                else self.plan.priorityOf(ch)
+        except tk.TclError:
+            priority = self.plan.priorityOf(ch)    # half-typed number
+
+        figure = self.channelFigures.get(ch)
+        share = self.overlapShares.get(ch)
+        values = {
+            "Pool": self._poolNameOf(ch),
+            "Release": f"{release:g} ms" if release is not None else "tier default",
+            "Priority": f"{priority:g}",
+            "Notes": f"{info.noteCount:,}",
+            "Range": f"{gm.noteName(info.lo)}-{gm.noteName(info.hi)}",
+            "Family": "Percussion" if info.isDrums else gm.familyName(info.program),
+            "Peak": str(figure.peak) if figure else "",
+            "Mean": f"{figure.mean:.1f}" if figure else "",
+            "Plays": f"{figure.fraction:.0%}" if figure else "",
+            "Overlap": f"{share:.0%} with {self.editPool.name}" if share is not None
+                       and self.editPool is not None else "",
+        }
+
+        for name, label in fields.items():
+            label.config(text=values[name])
+
+    def _showInspectorNote(self):
+        """Fill the inspector's note card from the selection.
+
+        One selected note is described in full; with none or several the
+        card says so and the fields are left empty.
+        """
+        fields = self.inspNoteFields
+        self.inspWeightBar.delete("all")
+        note = next(iter(self.selection)) if len(self.selection) == 1 else None
+
+        if note is None:
+            count = len(self.selection)
+            self.inspPitch.config(text=f"{count} notes selected" if count else "No note selected",
+                                  font=(self.uiFamily, 10))
+
+            for label in fields.values():
+                label.config(text="")
+
+            return
+
+        # The note's verdict comes from the reduction while it is on; the
+        # weight is the plan's either way.
+        name = (gm.drumName(note.pitch) if note.channel == model.DRUM_CHANNEL
+                else gm.noteName(note.pitch))
+        self.inspPitch.config(text=name, font=(self.uiFamily, 16, "bold"))
+        bar, beat = self.song.barBeat(note.start)
+
+        reduction = self._shownReduction() if self.reduceVar.get() else None
+
+        if not self.reduceVar.get():
+            verdict = "reduction off"
+        elif reduction is None:
+            verdict = "working it out"
+        else:
+            verdict = reduction.dropped.get(id(note)) or (
+                "cut short" if id(note) in reduction.cut else "kept")
+
+        # The bar is out of the most a note can weigh under the plan: the
+        # top line of the highest priority channel at full velocity, with no
+        # doubling. One note is scored alone, so a click on a large file
+        # does not score every note.
+        plan = self._currentPlan()
+        weight = self._noteWeight(note)
+        heaviest = 1.5 * max((plan.priorityOf(ch) for ch in self.song.channels), default=1.0)
+        values = {
+            "Velocity": str(note.velocity),
+            "Starts": f"bar {bar}:{beat}",
+            "Ticks": f"{note.start}-{note.end} ({note.length})",
+            "Track": str(note.track),
+            "Reduction": verdict,
+            "Weight": f"{weight:.2f}",
+        }
+
+        for key, label in fields.items():
+            label.config(text=values[key])
+
+        # The weight bar across the card's width.
+        width = max(self.inspWeightBar.winfo_width(), 200)
+        self.inspWeightBar.create_rectangle(0, 0, width, 8, fill=self.palette["field"],
+                                            outline="")
+        self.inspWeightBar.create_rectangle(0, 0, width * weight / heaviest, 8,
+                                            fill=CHANNEL_COLORS[note.channel], outline="")
+
     # ------------------------------------------------------------- drawing
     @property
     def ppt(self) -> float:
@@ -1299,16 +2346,15 @@ class MidiEditorApp(tk.Tk):
     def redraw(self):
         """Redraw the whole piano roll, ruler and keyboard from the song.
 
-        Every structural change (load, add, delete, zoom, mute) comes through
-        here: the canvas is cleared and rebuilt and the item <-> note maps are
+        Every structural change (load, add, delete, zoom) comes through here:
+        the canvas is cleared and rebuilt and the item <-> note maps are
         refilled, which is also why the playback cursor item is forgotten and
-        recreated by the next `_tickCursor`. Dragging bypasses this and moves
-        items directly through `_placeNoteItem`.
+        recreated by the next `_tickCursor`. The grid, the ruler and the notes
+        are drawn for the span around the view (`_drawSpan`). Dragging
+        bypasses this and moves items directly through `_placeNoteItem`.
         """
         c = self.canvas
         c.delete("all")
-        self.itemToNote.clear()
-        self.noteToItem.clear()
         self.cursorItem = None
 
         # Scrollregion leaves 200 px of slack past the last note; zoom() uses
@@ -1318,29 +2364,69 @@ class MidiEditorApp(tk.Tk):
         height = 128 * self.rowH
         c.configure(scrollregion=(0, 0, width, height))
 
-        # row shading for black keys + octave lines
+        # Row shading for the black keys, then the octave lines. The shading
+        # is drawn first and all together, so the band over the bar under
+        # the pointer can sit between it and every line.
         for pitch in range(128):
-            y = (127 - pitch) * self.rowH
-
-            if pitch % 12 in (1, 3, 6, 8, 10):
+            if pitch % 12 in BLACK_KEYS:
+                y = (127 - pitch) * self.rowH
                 c.create_rectangle(0, y, width, y + self.rowH,
-                                   fill="#1e1e24", outline="")
+                                   fill=theme.ROLL["row"], outline="", tags="rowShade")
 
-            if pitch % 12 == 0:
-                c.create_line(0, y + self.rowH, width, y + self.rowH,
-                              fill="#33333c")
+        for pitch in range(0, 128, 12):
+            y = (128 - pitch) * self.rowH
+            c.create_line(0, y, width, y, fill=theme.ROLL["octave"])
 
-        # bar / beat grid from the first time signature
+        # The grid, the ruler and the notes in and around the view, then the
+        # keys at the roll's height so they scroll in step with it, and the
+        # band over the bar under the pointer, which outlives the redraw.
+        self._rollWidth = width
+        self.ruler.delete("all")
+        self._drawSpan()
+        self._drawKeys(height)
+        self._hoverItem = None
+
+        for level in HOVER_LEVELS:
+            self._paintHover(level)
+
+        self._scheduleDemand()
+
+    def _drawSpan(self):
+        """Draw the grid, the ruler and the notes in and around the roll's view.
+
+        The span is the view and `NOTE_MARGIN` view widths either side, and
+        `_checkSpan` draws it again when a scroll leaves it. The grid's
+        lines go down before the notes, so they sit over the row shading
+        and the lit bands under the pointer and under the notes.
+        """
+        c = self.canvas
+        view = max(c.winfo_width(), 1)
+        left = c.canvasx(0) - NOTE_MARGIN * view
+        right = c.canvasx(0) + (1 + NOTE_MARGIN) * view
+        self._drawnSpan = (max(0.0, left / self.ppt), right / self.ppt)
+        self._drawGrid()
+        self._drawRuler()
+        self._drawNotes()
+
+    def _drawGrid(self):
+        """Draw the bar and beat lines and the tempo changes down the drawn span of the roll."""
+        c = self.canvas
+        s = self.song
+        c.delete("grid")
+        t0, t1 = self._drawnSpan
+        height = 128 * self.rowH
+
+        # Bar and beat lines from the first time signature, from the beat at
+        # or before the span to the end of the song's last bar.
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
         beat = s.mf.division * 4 // den
         bar = beat * num
-        t = 0
+        t = int(t0 // beat) * beat
 
-        while t <= s.maxTick + bar:
+        while t <= min(t1, s.maxTick + bar):
             x = t * self.ppt
-            is_bar = t % bar == 0
-            c.create_line(x, 0, x, height,
-                          fill="#3d3d48" if is_bar else "#26262e")
+            c.create_line(x, 0, x, height, tags="grid",
+                          fill=theme.ROLL["bar"] if t % bar == 0 else theme.ROLL["beat"])
             t += beat
 
         # Tempo changes as lines down the roll in the ruler's tempo colour,
@@ -1356,15 +2442,37 @@ class MidiEditorApp(tk.Tk):
 
             lastBpm = bpm
 
-            if tick > 0:
+            if 0 < tick and t0 <= tick <= t1:
                 x = tick * self.ppt
-                c.create_line(x, 0, x, height, fill="#a04848", dash=(6, 4), tags="tempo")
+                c.create_line(x, 0, x, height, fill="#a04848", dash=(6, 4),
+                              tags=("tempo", "grid"))
 
-        # Notes: brighter with velocity on audible channels, flat grey on
-        # muted ones so the mute/solo state shows in the roll. Both maps are
-        # filled here so hit-testing and dragging can find the items.
+    def _drawNotes(self):
+        """Draw the notes in the drawn span, replacing those drawn before.
+
+        The maps are filled here so hit-testing, dragging and selection find
+        the items, and the selection is outlined again.
+        """
+        c = self.canvas
+        c.delete("note")
+        self.itemToNote.clear()
+        self.noteToItem.clear()
+        self.itemOutline.clear()
+        self.noteItems.clear()
+        self._styledSelection = set()
+        self._hoverItem = None
+
+        # The notes in the span, found by bisection on the notes in start
+        # order.
+        t0, t1 = self._drawnSpan
+        index = self._ensureNoteIndex()
+        notes = [n for n in index.notes[bisect_right(index.reach, t0):
+                                        bisect_left(index.starts, t1)] if n.end >= t0]
+
+        # Notes are brighter with velocity on audible channels and flat grey
+        # on muted ones, so the mute and solo state shows in the roll.
         audible = self._audibleChannels()
-        reduction = self._ensureReduction() if self.reduceVar.get() else None
+        reduction = self._shownReduction() if self.reduceVar.get() else None
         segments: dict[int, list[reduce.Placed]] = {}
 
         if reduction is not None:
@@ -1373,22 +2481,22 @@ class MidiEditorApp(tk.Tk):
 
         # Shading by weight scales to the heaviest note in the song, so a
         # priority raised on one channel brightens it and dims the rest.
-        weights = self._ensureWeights() if self.shadeVar.get() else None
+        weights = self._shownWeights() if self.shadeVar.get() else None
         heaviest = max(weights.values(), default=1.0) if weights else 1.0
 
-        for note in s.notes:
+        for note in notes:
             y1 = (127 - note.pitch) * self.rowH + 1
             y2 = y1 + self.rowH - 2
             base = CHANNEL_COLORS[note.channel]
 
             if note.channel not in audible:
-                fill, outline = "#3a3a40", "#2c2c31"
+                fill, outline = theme.ROLL["muted"], theme.ROLL["mutedEdge"]
             elif weights is not None:
                 fill = _shade(base, 0.3 + 0.7 * weights[id(note)] / heaviest)
-                outline = _shade(base, 0.45)
+                outline = theme.mix(fill, "#000000", 0.4)
             else:
                 fill = _shade(base, 0.65 + 0.35 * note.velocity / 127)
-                outline = _shade(base, 0.45)
+                outline = theme.mix(fill, "#000000", 0.4)
 
             # With the reduction on, a note is drawn as the segments that
             # sound, over a stippled ghost of its original extent wherever
@@ -1408,6 +2516,8 @@ class MidiEditorApp(tk.Tk):
                                           tags="note")
                 self.itemToNote[item] = note
                 self.noteToItem[id(note)] = item
+                self.itemOutline[item] = _shade(base, 0.3)
+                self.noteItems.setdefault(id(note), []).append(item)
 
             for start, end in spans:
                 x1 = start * self.ppt
@@ -1415,52 +2525,83 @@ class MidiEditorApp(tk.Tk):
                 item = c.create_rectangle(x1, y1, x2, y2, fill=fill,
                                           outline=outline, tags="note")
                 self.itemToNote[item] = note
+                self.itemOutline[item] = outline
+                self.noteItems.setdefault(id(note), []).append(item)
 
                 if not ghost:
                     self.noteToItem[id(note)] = item
 
-        # Selection outlines, then the ruler and keys at the same width and
-        # height as the roll so they scroll in step with it.
         self._applySelectionStyle()
-        self._drawRuler(width)
-        self._drawKeys(height)
+
+        if self.cursorItem is not None:
+            c.tag_raise(self.cursorItem)
+
+    def _redrawNotes(self):
+        """Draw the notes again, and the strip, after a change to how they look.
+
+        A mute, a solo, the shading or the reduction changes the notes'
+        colours and segments and the strip's counts, and nothing else on the
+        roll.
+        """
+        self._drawNotes()
         self._scheduleDemand()
 
-    def _drawRuler(self, width: int):
-        """Redraw the four-row ruler above the roll.
+    def _scheduleSpan(self):
+        """Check at the next idle moment whether the view has left the drawn span."""
+        if self._spanAfter is None:
+            self._spanAfter = self.after_idle(self._checkSpan)
+
+    def _checkSpan(self):
+        """Draw the span again when the view reaches past the one drawn."""
+        self._spanAfter = None
+        c = self.canvas
+        t0 = c.canvasx(0) / self.ppt
+        t1 = (c.canvasx(0) + c.winfo_width()) / self.ppt
+        drawn0, drawn1 = self._drawnSpan
+
+        if t0 < drawn0 or t1 > drawn1:
+            self._drawSpan()
+
+    def _drawRuler(self):
+        """Draw the four-row ruler above the roll across the drawn span.
 
         Top row: a seconds scale. Second row: bar numbers. Third row: tempo
         changes and markers. Bottom row: the chord named in each beat,
         merged into runs, labelled where the run is wide enough to read.
-
-        Args:
-            width: scrollregion width in pixels, matching the note canvas.
+        The items are tagged "scale" and replace those drawn before, so the
+        band over the bar under the pointer stays.
         """
         r = self.ruler
-        r.delete("all")
+        r.delete("scale")
         r0, r1, r2, r3, r4 = self.rulerRows
         secondsFont, barFont, tempoFont, chordFont = self.rulerFonts
+        width = self._rollWidth
         r.configure(scrollregion=(0, 0, width, r4))
         s = self.song
+        t0, t1 = self._drawnSpan
+        x0, x1 = t0 * self.ppt, t1 * self.ppt
 
         for y in (r1, r2, r3):
-            r.create_line(0, y, width, y, fill="#44444e")
+            r.create_line(0, y, width, y, fill=theme.ROLL["octave"], tags="scale")
 
         # -- seconds scale (top row); tempo-aware: x from seconds_to_tick
         # The step is the smallest one whose ticks sit at least 45 px apart
         # at the song's average pixels per second; each tick's x then goes
         # through secondsToTick so the scale stays true across tempo changes.
+        # The marks run from the one at or before the span to the one past it.
         px_per_sec = s.maxTick * self.ppt / max(s.duration, 0.001)
 
         for step in (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300):
             if step * px_per_sec >= 45:
                 break
 
-        t = 0.0
+        k = int(s.tickToSeconds(t0) // step)
+        last = min(s.duration, s.tickToSeconds(t1)) + step
 
-        while t <= s.duration + step:
+        while k * step <= last:
+            t = k * step
             x = s.secondsToTick(t) * self.ppt
-            r.create_line(x, r1 - 5, x, r1, fill="#7a9")
+            r.create_line(x, r1 - 5, x, r1, fill="#7a9", tags="scale")
 
             # Labels switch to m:ss past a minute, keeping tenths only while
             # the step is shorter than a second.
@@ -1471,21 +2612,19 @@ class MidiEditorApp(tk.Tk):
                 label = f"{t:.4g}s"
 
             r.create_text(x + 3, r0 + 1, text=label, anchor="nw",
-                          fill="#8fb", font=secondsFont)
-            t += step
+                          fill="#8fb", font=secondsFont, tags="scale")
+            k += 1
 
-        # -- bar numbers (middle row)
+        # -- bar numbers (middle row), from the bar at or before the span
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
         bar = s.mf.division * 4 * num // den
-        n = 1
-        t = 0
+        n = int(t0 // bar)
 
-        while t <= s.maxTick + bar:
-            x = t * self.ppt
-            r.create_line(x, r2 - 7, x, r2, fill="#888")
-            r.create_text(x + 3, r1 + 1, text=str(n), anchor="nw",
-                          fill="#bbb", font=barFont)
-            t += bar
+        while n * bar <= min(t1, s.maxTick + bar):
+            x = n * bar * self.ppt
+            r.create_line(x, r2 - 7, x, r2, fill="#888", tags="scale")
+            r.create_text(x + 3, r1 + 1, text=str(n + 1), anchor="nw",
+                          fill="#bbb", font=barFont, tags="scale")
             n += 1
 
         # -- tempo changes and markers (bottom row)
@@ -1503,8 +2642,9 @@ class MidiEditorApp(tk.Tk):
             last_bpm = bpm
             x = tick * self.ppt
             label = f"{TEMPO_GLYPH}={bpm:g}"
-            r.create_line(x, r2 + 1, x, r3, fill="#d66")
-            r.create_text(x + 3, r2 + 1, text=label, anchor="nw", fill="#f99", font=tempoFont)
+            r.create_line(x, r2 + 1, x, r3, fill="#d66", tags="scale")
+            r.create_text(x + 3, r2 + 1, text=label, anchor="nw", fill="#f99", font=tempoFont,
+                          tags="scale")
             tempoLabels.append((x, x + 3 + tempoFont.measure(label)))
 
         # A marker sharing its tick with a tempo flag moves right of the
@@ -1517,20 +2657,23 @@ class MidiEditorApp(tk.Tk):
                     x = right + 6
 
             r.create_text(x + 2, r3 - 1, text=text, anchor="sw",
-                          fill="#e8d44d", font=tempoFont)
+                          fill="#e8d44d", font=tempoFont, tags="scale")
 
-        # -- chords (bottom row): one label per run, skipped when the run is
-        # narrower than its text so a busy passage does not become a smear.
-        for start, end, name in self._ensureChords():
-            if name == analysis.NO_CHORD:
+        # -- chords (bottom row): one label per run in the span, skipped
+        # when the run is narrower than its text so a busy passage does not
+        # become a smear. A new file's row is drawn once its beats are named.
+        runs = [] if self._chordsPending else self._ensureChords()
+
+        for start, end, name in runs:
+            if name == analysis.NO_CHORD or end * self.ppt < x0 or start * self.ppt > x1:
                 continue
 
-            x1, x2 = start * self.ppt, end * self.ppt
-            r.create_line(x1, r3 + 1, x1, r4, fill="#5a7a9a")
+            cx1, cx2 = start * self.ppt, end * self.ppt
+            r.create_line(cx1, r3 + 1, cx1, r4, fill="#5a7a9a", tags="scale")
 
-            if x2 - x1 >= chordFont.measure(name) + 6:
-                r.create_text(x1 + 3, r3 + 1, text=name, anchor="nw",
-                              fill="#9cf", font=chordFont)
+            if cx2 - cx1 >= chordFont.measure(name) + 6:
+                r.create_text(cx1 + 3, r3 + 1, text=name, anchor="nw",
+                              fill="#9cf", font=chordFont, tags="scale")
 
     def _drawKeys(self, height: int):
         """Redraw the keyboard gutter to the left of the roll.
@@ -1540,30 +2683,40 @@ class MidiEditorApp(tk.Tk):
         """
         k = self.keys
         k.delete("all")
-        k.configure(scrollregion=(0, 0, KEYS_W, height))
+        k.configure(scrollregion=(0, 0, self.keysW, height))
 
         for pitch in range(128):
             y = (127 - pitch) * self.rowH
             black = pitch % 12 in (1, 3, 6, 8, 10)
-            k.create_rectangle(0, y, KEYS_W, y + self.rowH,
-                               fill="#2b2b31" if black else "#e8e8e8",
-                               outline="#555")
+            k.create_rectangle(0, y, self.keysW, y + self.rowH,
+                               fill=theme.ROLL["black"] if black else theme.ROLL["white"],
+                               outline=theme.ROLL["keyEdge"])
 
             # Octave labels on each C, once the rows are tall enough to hold
             # the text.
             if pitch % 12 == 0 and self.rowH >= 7:
-                k.create_text(KEYS_W - 4, y + self.rowH / 2,
+                k.create_text(self.keysW - 4, y + self.rowH / 2,
                               text=gm.noteName(pitch), anchor="e",
-                              fill="#333", font=("TkDefaultFont", 7))
+                              fill=theme.ROLL["keyText"], font=(self.uiFamily, 7))
 
     def _applySelectionStyle(self):
-        """Outline selected notes in white and restore the others' outlines."""
-        for item, note in self.itemToNote.items():
-            if note in self.selection:
-                self.canvas.itemconfigure(item, outline="#ffffff", width=2)
-            else:
-                base = CHANNEL_COLORS[note.channel]
-                self.canvas.itemconfigure(item, outline=_shade(base, 0.5), width=1)
+        """Outline the selected notes in white, the rest in their colour; refresh the inspector.
+
+        Only the notes whose state differs from how they are drawn are
+        restyled, so a click on a large file touches a few items, not every
+        one; `redraw` draws every note plain and forgets what was styled.
+        """
+        for note in self._styledSelection ^ self.selection:
+            selected = note in self.selection
+
+            for item in self.noteItems.get(id(note), ()):
+                if selected:
+                    self.canvas.itemconfigure(item, outline="#ffffff", width=2)
+                else:
+                    self.canvas.itemconfigure(item, outline=self.itemOutline[item], width=1)
+
+        self._styledSelection = set(self.selection)
+        self._refreshInspector()
 
     def zoom(self, factor: float, anchor_x: float | None = None):
         """Zoom horizontally, keeping the tick under `anchor_x` still on screen.
@@ -1592,6 +2745,30 @@ class MidiEditorApp(tk.Tk):
         new_left = canvas_x * (self.zoomX / old) - anchor_x
         self._xview("moveto", max(0.0, new_left / total))
 
+    def _centreOnNotes(self):
+        """Scroll the roll vertically so the middle of the file's pitches is in view.
+
+        The middle is the median pitch of the pitched notes, or of every
+        note when the file holds drums alone. An empty song keeps the view.
+        Before the window is first laid out the canvas has no height yet, so
+        the scroll waits for the canvas's first <Configure>.
+        """
+        if self.canvas.winfo_height() <= 1:
+            self._centrePending = True
+            return
+
+        self._centrePending = False
+        notes = [n.pitch for n in self.song.notes if n.channel != model.DRUM_CHANNEL] \
+            or [n.pitch for n in self.song.notes]
+
+        if not notes:
+            return
+
+        notes.sort()
+        middle = notes[len(notes) // 2]
+        y = (127 - middle) * self.rowH + self.rowH / 2 - self.canvas.winfo_height() / 2
+        self._yview("moveto", max(0.0, y / (128 * self.rowH)))
+
     def vzoom(self, delta: int):
         """Change the note row height, clamped to 4-24 pixels, and redraw.
 
@@ -1603,18 +2780,28 @@ class MidiEditorApp(tk.Tk):
 
     # ------------------------------------------------------------- demand
     def _ensureDemand(self) -> analysis.Demand:
-        """Return the voice-demand sweep, rebuilding it if the notes changed.
+        """Return the voice-demand sweep to draw, rebuilding it if the notes changed.
 
         Returns:
             analysis.Demand: the sweep of the current song.
         """
+        # While a job works the reduction out, the strip shows the last
+        # reduced sweep, or the song's before the first.
+        if self.demand is None and self.reduceVar.get() and self.reduction is None and \
+                self._reducePending():
+            shown = self._lastDemand if self._lastDemand is not None else self._ensureSongDemand()
+            return shown
+
         if self.demand is None:
             if self.reduceVar.get():
                 # Occupancy rather than sound: a voice is busy until its
                 # release has died away.
-                placed = self._ensureReduction().placed
-                spans = [replace(p, end=p.free) if p.release else p for p in placed]
-                self.demand = analysis.sweep(self.song, spans)
+                reduction = self._ensureReduction()
+
+                if self.demand is None:
+                    self.demand = analysis.sweep(self.song, _occupancy(reduction))
+
+                self._lastDemand = self.demand
             else:
                 self.demand = self._ensureSongDemand()
 
@@ -1627,20 +2814,66 @@ class MidiEditorApp(tk.Tk):
             analysis.Demand: the sweep the cards' figures and the pool
             overlap come from.
         """
-        if self.songDemand is None:
+        if self.songDemand is None and self._sweepBase is not None:
+            base, (t0, t1) = self._sweepBase
+            self.songDemand = analysis.resweep(self.song, base, t0, t1, self._ensureNoteIndex())
+        elif self.songDemand is None:
             self.songDemand = analysis.sweep(self.song)
 
+        self._sweepBase = None
         return self.songDemand
 
-    def _invalidateDemand(self):
-        """Forget the sweep, the chords, the reduction and the report after an edit."""
+    def _ensureNoteIndex(self) -> analysis.StepIndex:
+        """Return the notes in start order for bisection, rebuilding after an edit.
+
+        Returns:
+            analysis.StepIndex: the song's notes by start, with their reach.
+        """
+        if self._noteIndex is None:
+            self._noteIndex = analysis.stepIndex(self.song)
+
+        return self._noteIndex
+
+    def _invalidateDemand(self, notesIn: tuple[int, int] | None = None):
+        """Forget the sweep, the chords, the reduction and the report after an edit.
+
+        The chord of each beat is kept and named again only where notes
+        changed, so an edit to one note names a beat or two, not the song,
+        and the sweep before the edit is kept with the span, so the next
+        sweep covers that span alone (`analysis.resweep`).
+
+        Args:
+            notesIn: the ticks within which every changed note started and
+                ended, before and after the edit; an empty span when no note
+                changed but their times in seconds did, as after a tempo
+                edit; None when any note may have.
+        """
+        # Spans of several edits before the next sweep are joined.
+        if notesIn is None or notesIn[1] <= notesIn[0]:
+            self._sweepBase = None
+        elif self.songDemand is not None:
+            self._sweepBase = (self.songDemand, notesIn)
+        elif self._sweepBase is not None:
+            base, (t0, t1) = self._sweepBase
+            self._sweepBase = (base, (min(t0, notesIn[0]), max(t1, notesIn[1])))
+
         self.demand = None
         self.songDemand = None
+        self._noteIndex = None
         self._scheduleOverlap()
         self.chords = None
-        self.reduction = None
+
+        if notesIn is None:
+            self.chordNames = None
+        elif notesIn[1] > notesIn[0]:
+            self._chordStale.append(notesIn)
+
+        # The reduction after an edit is worked out on the main thread, so
+        # an edited note is never drawn from a reduction of the notes before
+        # it; a job asked for meanwhile is not started.
+        self._dropReduction()
+        self._reduceAgain = False
         self.noteWeights = None
-        self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
         self._scheduleDemand()
         self._showReportIfSelected()
@@ -1684,8 +2917,8 @@ class MidiEditorApp(tk.Tk):
         return self.reports[key]
 
     def _showReportIfSelected(self):
-        """Fill the report sub-tab on view when the Report tab is showing."""
-        if self.nb.index(self.nb.select()) != 2:
+        """Fill the report sub-tab on view when the drawer is open on the Report."""
+        if not self.drawerOpen or DRAWER_PAGES[self.nb.index(self.nb.select())] != "Report":
             return
 
         key = self._reportKey()
@@ -1711,14 +2944,90 @@ class MidiEditorApp(tk.Tk):
     def _ensureChords(self) -> list[tuple[int, int, str]]:
         """Return the chord runs, one per beat merged, rebuilding if needed.
 
+        Beats still to be named after a file opened are named here, and the
+        ruler draws its chord row at the next idle moment.
+
         Returns:
             list[tuple[int, int, str]]: (start tick, end tick, name) runs.
         """
+        if self._chordsPending:
+            self._chordsPending = False
+            self.chords = None
+
+            if self._chordAfter is not None:
+                self.after_cancel(self._chordAfter)
+                self._chordAfter = None
+
+            self.after_idle(self._drawRuler)
+
         if self.chords is None:
             beat = self.song.mf.division * 4 // self.song.timeSigs[0][2]
-            self.chords = analysis.chordTrack(self.song, beat)
+            steps = len(range(0, self.song.maxTick, beat))
+            index = analysis.stepIndex(self.song)
+
+            # Name every beat the first time; after that only the beats an
+            # edit touched, and any the song has grown by.
+            if self.chordNames is None:
+                stale = range(steps)
+                names: list[str | None] = [None] * steps
+            else:
+                names = (self.chordNames + [None] * steps)[:steps]
+                touched = {i for t0, t1 in self._chordStale
+                           for i in range(t0 // beat, min(steps, (t1 - 1) // beat + 1))}
+                stale = sorted(touched | {i for i, name in enumerate(names) if name is None})
+
+            for i in stale:
+                names[i] = analysis.chordAt(self.song, index, i * beat, (i + 1) * beat)
+
+            self.chordNames = names
+            self._chordStale = []
+            self.chords = analysis.chordRuns(names, beat)
 
         return self.chords
+
+    def _nameChordsLater(self):
+        """Name a new file's beats in short slices at idle moments, after the window draws."""
+        if self._chordAfter is None:
+            self._chordAfter = self.after_idle(self._nameChordSlice)
+
+    def _nameChordSlice(self):
+        """Name beats for up to `CHORD_SLICE_S`, then queue the next slice or draw the chord row.
+
+        The names go into `chordNames`, where `_ensureChords` finds them, so
+        a beat named here is not named again; an edit meanwhile marks its
+        beats stale as it would after the row was drawn.
+        """
+        self._chordAfter = None
+
+        if not self._chordsPending:
+            return
+
+        beat = self.song.mf.division * 4 // self.song.timeSigs[0][2]
+        steps = len(range(0, self.song.maxTick, beat))
+        names = self.chordNames
+
+        if names is None:
+            names = self.chordNames = [None] * steps
+        elif len(names) < steps:
+            names.extend([None] * (steps - len(names)))
+
+        index = self._ensureNoteIndex()
+        deadline = time.perf_counter() + CHORD_SLICE_S
+        i = 0
+
+        while i < len(names) and time.perf_counter() < deadline:
+            if names[i] is None:
+                names[i] = analysis.chordAt(self.song, index, i * beat, (i + 1) * beat)
+
+            i += 1
+
+        if None in names:
+            self._chordAfter = self.after_idle(self._nameChordSlice)
+            return
+
+        self._chordsPending = False
+        self.chords = None
+        self._drawRuler()
 
     def _chordAt(self, tick: float) -> str:
         """Name the chord sounding at a tick.
@@ -1803,9 +3112,17 @@ class MidiEditorApp(tk.Tk):
         distinct-pitch and pitch-class counts are drawn as lines over the
         stack, and the budget is a horizontal line: with tiers, one at each
         tier's cumulative voices as well. The vertical scale is whichever is
-        larger of the piece's peak and the budget, so the lines always fit.
+        larger of the piece's peak and the budget, so the lines always fit,
+        and it is kept in `_stripScale` for grabbing the budget line. While
+        the budget is dragged, or its line could be grabbed, the line is
+        drawn solid in the accent with a tag giving the number.
         """
-        self._demandAfter = None
+        # A redraw still queued is this one, or made redundant by it.
+        if self._demandAfter is not None:
+            self.after_cancel(self._demandAfter)
+            self._demandAfter = None
+
+        self._stripScale = None
         c = self.demandCanvas
         c.delete("all")
         width = c.winfo_width()
@@ -1814,23 +3131,33 @@ class MidiEditorApp(tk.Tk):
         if width < 2 or height < 2 or not self.song.notes:
             return
 
-        # With one pool the budget cannot usefully exceed the piece's peak,
-        # so the spinbox stops there; with several pools the budget is what
-        # they add up to and the spinbox only displays it.
+        # With one pool the budget cannot usefully exceed the peak of the
+        # song as written, so the spinbox stops there; with several pools the
+        # budget is what they add up to and the spinbox only displays it.
+        # The strip's own peak is the reduced one while the reduction is on,
+        # which the budget caps, so it cannot be the limit.
         demand = self._ensureDemand()
         peak = max(demand.peak, 1)
+        limit = max(self._ensureSongDemand().peak, 1)
         single = len(self.plan.pools) == 1
-        self.budgetSpin.configure(to=peak if single else 64,
-                                  state="normal" if single else "disabled")
+        self.budgetLimit = limit if single else 64
+        self.budgetEditable = single
+        self._paintBudget()
 
-        if single and self.budgetVar.get() > peak:
-            self.budgetVar.set(peak)
+        if single and self.budgetVar.get() > limit:
+            self.budgetVar.set(limit)
 
         self._storePoolControls()
+
+        if self.laneVar.get() != "Demand":
+            self._drawNoteLane(self.laneVar.get())
+            return
+
         budget = max(1, self._totalVoices())
         top = max(peak, budget)
         scale = (height - 6) / top
         base = height - 2
+        self._stripScale = (base, scale)
         channels = self._stackOrder(demand.channels)
         runs = self._demandColumns(width)
 
@@ -1852,7 +3179,7 @@ class MidiEditorApp(tk.Tk):
                     y -= h
 
             if y < yBudget:
-                c.create_rectangle(xa, y, xb, yBudget, fill="#ff5050", stipple="gray50",
+                c.create_rectangle(xa, y, xb, yBudget, fill=theme.ROLL["over"], stipple="gray50",
                                    outline="")
 
         # The two merged counts as step lines over the stack.
@@ -1866,23 +3193,191 @@ class MidiEditorApp(tk.Tk):
             if len(points) >= 4:
                 c.create_line(*points, fill=colour, width=1)
 
-        # Budget lines, each labelled, and the scale at the top.
-        for label, level in self._budgetLevels():
-            y = base - level * scale
-            c.create_line(0, y, width, y, fill="#ff5050", dash=(4, 3))
-            c.create_text(width - 3, y, text=label, anchor="e", fill="#ff5050",
-                          font=("TkDefaultFont", 7))
+        # The budget lines. The one being moved, or under the pointer, is
+        # lit and its tag names the pool it moves; dragging the budget beside
+        # the strip moves the one pool's line.
+        if self._lineDrag is not None:
+            moving = self._lineDrag[0]
+        elif self.budgetDragging and single:
+            moving = self.editPool
+        else:
+            moving = self.budgetLineHover
 
-        c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
-                      font=("TkDefaultFont", 7))
+        tags: list[tuple[float, float, float, float]] = []
+
+        for label, level, pool in self._budgetLevels():
+            lit = pool is not None and pool is moving
+
+            if lit and single:
+                label = f"{pool.voices} voice" + ("s" if pool.voices != 1 else "")
+            elif lit:
+                label = f"{pool.name} {pool.voices}"
+
+            tags.append(self._drawBudgetLine(base - level * scale, width, label, lit, tags))
+
+        # The scale's top figure, unless a tag covers it.
+        figure = c.create_text(width - 3, 2, text=str(top), anchor="ne", fill="#888",
+                               font=(self.uiFamily, 7))
+        fx0, fy0, fx1, fy1 = c.bbox(figure)
+
+        if any(fx0 < x1 and x0 < fx1 and fy0 < y1 and y0 < fy1 for x0, y0, x1, y1 in tags):
+            c.delete(figure)
+
+    def _drawBudgetLine(self, y: float, width: int, label: str, lit: bool,
+                        others: list[tuple[float, float, float, float]]
+                        ) -> tuple[float, float, float, float]:
+        """Draw one budget line with its label on a tag at the right-hand end.
+
+        The line is two pixels wide over a dark halo, so it reads across
+        the stack, in the budget colour, or in the accent when it is lit.
+        A tag that would cover one already drawn steps to its left.
+
+        Args:
+            y: the line's height on the strip.
+            width: the strip's width.
+            label: the tag's text.
+            lit: True for the line being moved or under the pointer.
+            others: the tags drawn so far, as bounding boxes.
+
+        Returns:
+            tuple[float, float, float, float]: the tag's bounding box.
+        """
+        c = self.demandCanvas
+        p = self.palette
+        colour = p["accent"] if lit else theme.ROLL["budget"]
+        c.create_line(0, y, width, y, fill=theme.ROLL["strip"], width=4)
+        c.create_line(0, y, width, y, fill=colour, width=2)
+        text = c.create_text(width - 8, y, text=label, anchor="e", fill=p["ink"],
+                             font=(self.uiFamily, 8, "bold"))
+        x0, y0, x1, y1 = c.bbox(text)
+
+        # At the top of the strip the tag hangs below the line instead.
+        if y0 < 1:
+            c.move(text, 0, (y1 - y0) / 2 + 3)
+            x0, y0, x1, y1 = c.bbox(text)
+
+        box = (x0 - 5, y0 - 1, x1 + 5, y1 + 1)
+        clash = self._tagClash(box, others)
+
+        while clash is not None:
+            shift = box[2] - clash[0] + 4
+            c.move(text, -shift, 0)
+            box = (box[0] - shift, box[1], box[2] - shift, box[3])
+            clash = self._tagClash(box, others)
+
+        tag = c.create_rectangle(*box, fill=colour, outline="")
+        c.tag_lower(tag, text)
+        return box
+
+    @staticmethod
+    def _tagClash(box: tuple[float, float, float, float],
+                  others: list[tuple[float, float, float, float]]
+                  ) -> tuple[float, float, float, float] | None:
+        """Find a tag that a new one would cover or touch.
+
+        Args:
+            box: the new tag's bounding box.
+            others: the tags already drawn.
+
+        Returns:
+            tuple[float, float, float, float] | None: the first tag within
+            two pixels of the new one, or None.
+        """
+        clash = next((o for o in others if box[0] < o[2] + 2 and o[0] < box[2] + 2
+                      and box[1] < o[3] + 2 and o[1] < box[3] + 2), None)
+        return clash
+
+    def _drawNoteLane(self, lane: str):
+        """Draw the Velocity or Weight lane for the visible part of the roll.
+
+        Each note whose start is in view is a bar at its start, as tall as
+        its velocity out of 127 or its weight against the heaviest note in
+        the song. Quiet bars are drawn first so tall ones stay visible, and
+        with the reduction on, the notes it drops are drawn as outlines on
+        top. `laneBars` keeps each bar's extent for the hover report.
+
+        Args:
+            lane: "Velocity" or "Weight".
+        """
+        c = self.demandCanvas
+        width = c.winfo_width()
+        height = c.winfo_height()
+        x0 = self.canvas.canvasx(0)
+        t0, t1 = x0 / self.ppt, (x0 + width) / self.ppt
+        audible = self._audibleChannels()
+        reduction = self._shownReduction() if self.reduceVar.get() else None
+
+        # The value of each note in view, and the top of the scale.
+        if lane == "Weight":
+            weights = self._shownWeights()
+            top = max(weights.values(), default=1.0) or 1.0
+
+            def value(n: model.Note) -> float:
+                return weights.get(id(n), 0.0)
+        else:
+            top = 127.0
+
+            def value(n: model.Note) -> float:
+                return float(n.velocity)
+
+        visible = [n for n in self.song.notes if t0 - 1 <= n.start <= t1]
+        dropped = {id(n) for n in visible if reduction is not None and reduction.isDropped(n)}
+        visible.sort(key=lambda n: (id(n) in dropped, value(n)))
+        scale = (height - 8) / top
+        base = height - 2
+        muted = theme.ROLL["muted"]
+        self.laneBars = []
+
+        for note in visible:
+            xa = note.start * self.ppt - x0
+            xb = xa + 4
+            y = base - value(note) * scale
+            colour = CHANNEL_COLORS[note.channel] if note.channel in audible else muted
+
+            if id(note) in dropped:
+                c.create_rectangle(xa, y, xb, base, outline=colour, fill="")
+            else:
+                c.create_rectangle(xa, y, xb, base, outline="", fill=_shade(colour, 0.9))
+
+            self.laneBars.append((xa, xb, note))
+
+        label = f"{top:.2f}" if lane == "Weight" else "127"
+        c.create_text(width - 3, 2, text=label, anchor="ne", fill=self.palette["muted"],
+                      font=(self.uiFamily, 7))
+
+    def _describeLaneBar(self, x: float):
+        """Report the tallest bar under the pointer in a note lane.
+
+        Args:
+            x: the pointer's x on the strip.
+        """
+        hits = [note for xa, xb, note in self.laneBars if xa - 1 <= x <= xb + 1]
+
+        if hits:
+            self._describeNote(hits[-1])
+
+    def _laneChanged(self):
+        """The lane switch moved: redraw the strip for the lane chosen."""
+        self.laneBars = []
+        self._scheduleDemand()
 
     def _onDemandMotion(self, event):
         """Pointer over the demand strip: report the counts at that column.
 
+        Near the budget line the pointer also shows the line can be grabbed.
+
         Args:
-            event: `x`, the column under the pointer.
+            event: `x` and `y`, the point under the pointer.
         """
+        if not self.budgetDragging:
+            line = self._budgetLineAt(event.y)
+            self._hoverBudgetLine(line[2] if line else None)
+
         if not self.song.notes:
+            return
+
+        if self.laneVar.get() != "Demand":
+            self._describeLaneBar(event.x)
             return
 
         demand = self._ensureDemand()
@@ -1911,121 +3406,957 @@ class MidiEditorApp(tk.Tk):
         self._setStatus(f"bar {bar}:{beat}  {secs:6.2f}s   voices {raw} | pitches {pitches} "
                         f"| classes {classes}{excess}{tiers}   {busiest}")
 
+    # -------------------------------------------------------------- budget
+    def _buildBudget(self, gutter: ttk.Frame):
+        """Build the voice budget in the strip's gutter.
+
+        The budget is a number in the accent colour, centred between a slim
+        arrow at the top and the bottom of the gutter, with a rule down the
+        gutter's edge between it and the strip. A click on an arrow steps
+        it a voice; the number is dragged up or down, stepped with the
+        wheel or the Up and Down keys, or opened for typing with a double
+        click. Presses are bound for every button, alongside the tooltips'
+        own, so the tooltips still close.
+
+        Args:
+            gutter: the frame beside the strip.
+        """
+        dark = theme.ROLL["strip"]
+        tk.Frame(gutter, width=1, bg=self.palette["raised"]).pack(side="right", fill="y")
+        self.budgetArrows: dict[str, tk.Label] = {}
+
+        # The arrows, at the top and the bottom of the gutter.
+        for name, side, pad, delta, tip in (
+                ("budgetUp", "top", (3, 0), 1, "One voice more"),
+                ("budgetDown", "bottom", (0, 3), -1, "One voice fewer")):
+            arrow = tk.Label(gutter, image=self.paintedImages[name], bg=dark, bd=0)
+            arrow.pack(side=side, fill="x", pady=pad)
+            arrow.bind("<ButtonPress>", lambda e, n=name, d=delta: self._pressBudgetArrow(e, n, d),
+                       add="+")
+            arrow.bind("<ButtonRelease-1>", lambda e, n=name: self._showBudgetArrow(n, "Hover"))
+            arrow.bind("<Enter>", lambda e, n=name: self._showBudgetArrow(n, "Hover"), add="+")
+            arrow.bind("<Leave>", lambda e, n=name: self._showBudgetArrow(n, ""), add="+")
+            Tooltip(arrow, tip)
+            self.budgetArrows[name] = arrow
+
+        # The number, in the readout's fixed-width face, centred between
+        # them.
+        mono = theme.pickFont(tkfont.families(self), theme.MONO_FONTS) or self.uiFamily
+        self.budgetFont = (mono, 14, "bold")
+        b = self.budgetBox = tk.Label(gutter, textvariable=self.budgetVar, font=self.budgetFont,
+                                      bg=dark, fg=self.palette["accent"], bd=0, takefocus=1)
+        b.pack(side="top", fill="x", expand=True, padx=5)
+        Tooltip(b, "Voice budget: the line on the demand strip.\n"
+                   "Drag up or down, or use the wheel or the arrows;\n"
+                   "double-click to type a number.")
+        b.bind("<ButtonPress>", self._onBudgetPress, add="+")
+        b.bind("<B1-Motion>", self._onBudgetDrag)
+        b.bind("<ButtonRelease-1>", self._onBudgetRelease)
+        b.bind("<Double-Button-1>", self._editBudget)
+        b.bind("<Up>", lambda e: self._stepBudget(1))
+        b.bind("<Down>", lambda e: self._stepBudget(-1))
+        b.bind("<Enter>", lambda e: self._hoverBudget(True), add="+")
+        b.bind("<Leave>", lambda e: self._hoverBudget(False), add="+")
+
+        for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+            b.bind(seq, self._onBudgetWheel)
+
+    def _paintBudget(self):
+        """Colour the budget and its arrows for their state.
+
+        Dragged, the number fills with the accent under dark text, and
+        under the pointer it brightens. With several pools the budget is
+        their total, so the number and the arrows grey and take no input.
+        """
+        p = self.palette
+        editable = self.budgetEditable
+
+        if not editable:
+            fg, bg = p["muted"], theme.ROLL["strip"]
+        elif self.budgetDragging:
+            fg, bg = p["ink"], p["accent"]
+        else:
+            fg = theme.mix(p["accent"], "#ffffff", 0.3) if self._budgetHover else p["accent"]
+            bg = theme.ROLL["strip"]
+
+        self.budgetBox.configure(fg=fg, bg=bg, cursor="sb_v_double_arrow" if editable else "")
+
+        for name, arrow in self.budgetArrows.items():
+            state = self._budgetArrowStates.get(name, "") if editable else "Disabled"
+            arrow.configure(image=self.paintedImages[name + state],
+                            cursor="hand2" if editable else "")
+
+    def _hoverBudget(self, on: bool):
+        """Track the pointer on the budget.
+
+        Args:
+            on: True when the pointer is on it.
+        """
+        self._budgetHover = on
+        self._paintBudget()
+
+    def _showBudgetArrow(self, name: str, state: str):
+        """Show an arrow plain, under the pointer, or pressed.
+
+        Args:
+            name: "budgetUp" or "budgetDown".
+            state: "", "Hover" or "Pressed".
+        """
+        self._budgetArrowStates[name] = state
+        self._paintBudget()
+
+    def _pressBudgetArrow(self, event, name: str, delta: int):
+        """Press an arrow: show it pressed and step the budget.
+
+        Args:
+            event: the press; only the first button steps.
+            name: "budgetUp" or "budgetDown".
+            delta: +1 or -1.
+        """
+        if event.num == 1 and self.budgetEditable:
+            self._showBudgetArrow(name, "Pressed")
+            self._stepBudget(delta)
+
+    def _setBudget(self, value: int):
+        """Set the budget, held between 1 and its limit, and redraw the strip at once.
+
+        The reduction is left as it was; the caller recomputes it when the
+        change is done.
+
+        Args:
+            value: the budget asked for.
+        """
+        value = max(1, min(self.budgetLimit, value))
+
+        if value != self.budgetVar.get():
+            self.budgetVar.set(value)
+            self._drawDemand()
+
+    def _stepBudget(self, delta: int):
+        """Step the budget a voice, and recompute the reduction once the steps pause.
+
+        Args:
+            delta: +1 or -1.
+        """
+        if not self.budgetEditable:
+            return
+
+        self._setBudget(self.budgetVar.get() + delta)
+        self._settleReduction()
+
+    def _settleReduction(self):
+        """Recompute the reduction once the steps pause.
+
+        Each step restarts the wait, so a run of clicks or wheel turns
+        recomputes once.
+        """
+        if self._settleAfter is not None:
+            self.after_cancel(self._settleAfter)
+
+        self._settleAfter = self.after(BUDGET_SETTLE_MS, self._settled)
+
+    def _settled(self):
+        """The steps have paused: recompute the reduction."""
+        self._settleAfter = None
+        self._reductionChanged()
+
+    def _onBudgetWheel(self, event):
+        """Step the budget with the wheel: up for more voices.
+
+        Args:
+            event: Button-4 or Button-5 on X11, or MouseWheel with a delta.
+        """
+        up = event.num == 4 or getattr(event, "delta", 0) > 0
+        self._stepBudget(1 if up else -1)
+
+    def _onBudgetPress(self, event):
+        """Start a drag on the budget, and take the focus for the arrow keys.
+
+        Args:
+            event: the press, at `y_root`; only the first button drags.
+        """
+        if event.num != 1:
+            return
+
+        self.budgetBox.focus_set()
+
+        if self.budgetEditable:
+            self._startBudgetDrag(event.y_root)
+
+    def _onBudgetDrag(self, event):
+        """Move the budget with the pointer: up for more voices.
+
+        Args:
+            event: the motion, at `y_root`.
+        """
+        if self.budgetDragging and self._budgetEditor is None:
+            y, start = self._budgetDragStart
+            self._setBudget(start + round((y - event.y_root) / BUDGET_DRAG_PX))
+
+    def _startBudgetDrag(self, y: int):
+        """Begin dragging the budget.
+
+        Args:
+            y: the pointer's height on the screen.
+        """
+        self.budgetDragging = True
+        self._lineDrag = None
+        self._budgetDragStart = (y, self.budgetVar.get())
+        self._drawDemand()
+
+    def _onBudgetRelease(self, _event=None):
+        """End a drag of the budget or a budget line, recomputing the reduction if it moved.
+
+        Args:
+            _event: the release; unused.
+        """
+        if not self.budgetDragging:
+            return
+
+        self.budgetDragging = False
+
+        if self._lineDrag is not None:
+            pool, voices, _ = self._lineDrag
+            self._lineDrag = None
+            moved = pool.voices != voices
+        else:
+            moved = self.budgetVar.get() != self._budgetDragStart[1]
+
+        if moved:
+            self._reductionChanged()
+
+        self._drawDemand()
+
+    def _editBudget(self, _event=None):
+        """Open the budget for typing: Return keeps the number, Escape drops it.
+
+        Args:
+            _event: the double click; unused.
+        """
+        if not self.budgetEditable or self._budgetEditor is not None:
+            return
+
+        self.budgetDragging = False
+        entry = ttk.Entry(self.budgetBox.master, justify="center", font=self.budgetFont)
+        entry.insert(0, str(self.budgetVar.get()))
+        entry.select_range(0, "end")
+        entry.place(in_=self.budgetBox, x=0, y=0, relwidth=1, relheight=1)
+        entry.focus_set()
+
+        for seq, keep in (("<Return>", True), ("<KP_Enter>", True), ("<Escape>", False),
+                          ("<FocusOut>", True)):
+            entry.bind(seq, lambda e, k=keep: self._closeBudgetEditor(k))
+
+        self._budgetEditor = entry
+        self._drawDemand()
+
+    def _closeBudgetEditor(self, keep: bool):
+        """Close the typing field, setting the budget from it when asked and it holds a number.
+
+        Args:
+            keep: True to keep what was typed.
+        """
+        entry, self._budgetEditor = self._budgetEditor, None
+
+        if entry is None:
+            return
+
+        text = entry.get().strip()
+        entry.destroy()
+
+        if keep and text.isdigit() and int(text) != self.budgetVar.get():
+            self._setBudget(int(text))
+            self._reductionChanged()
+
+    def _budgetLineAt(self, y: float) -> tuple[str, int, reduce.Pool | None] | None:
+        """Find the budget line a press at a height on the strip would pick up.
+
+        Args:
+            y: the height on the strip.
+
+        Returns:
+            tuple[str, int, reduce.Pool | None] | None: the line, as
+            `_budgetLevels` gives it, when the Demand lane is drawn and a
+            line with a pool to move is within BUDGET_GRAB pixels; else None.
+        """
+        if self._stripScale is None:
+            return None
+
+        base, scale = self._stripScale
+        line = next((line for line in self._budgetLevels()
+                     if line[2] is not None and abs(y - (base - line[1] * scale)) <= BUDGET_GRAB),
+                    None)
+        return line
+
+    def _hoverBudgetLine(self, pool: reduce.Pool | None):
+        """Show the line under the pointer as one that can be grabbed, or none.
+
+        Args:
+            pool: the pool the line under the pointer moves, or None.
+        """
+        if pool is not self.budgetLineHover:
+            self.budgetLineHover = pool
+            self.demandCanvas.configure(cursor="sb_v_double_arrow" if pool else "")
+            self._drawDemand()
+
+    def _onStripPress(self, event):
+        """Pick a budget line up when a press of the first button is near it.
+
+        Args:
+            event: the press, at `y`.
+        """
+        line = self._budgetLineAt(event.y) if event.num == 1 else None
+
+        if line is not None:
+            pool = line[2]
+            self.budgetDragging = True
+            self._lineDrag = (pool, pool.voices, line[1])
+            self._drawDemand()
+
+    def _onStripDrag(self, event):
+        """Move the grabbed line to the pointer, changing its pool's voices in whole voices.
+
+        Args:
+            event: the motion, at `y`.
+        """
+        if self._lineDrag is not None and self._stripScale is not None:
+            base, scale = self._stripScale
+            pool, voices, level = self._lineDrag
+            self._setPoolVoices(pool, voices + round((base - event.y) / scale) - level)
+
     # ----------------------------------------------------------- reduction
     def _buildReducePanel(self, parent: ttk.Frame):
         """Create the reduction controls under the channel strip.
 
+        Top to bottom: the title bar; the switch that turns the reduction
+        on, with the roll's shading beside it, and the result label; the
+        pools table, with its add, remove and tiers buttons; then a display
+        of the selected pool, its name on a tag over its tier, sound and
+        overlap, its transforms as lane toggles, and its three gaps.
+
         Args:
             parent: the left column frame.
         """
-        panel = ttk.LabelFrame(parent, text="Reduce", padding=(6, 2))
-        panel.pack(side="bottom", fill="x", padx=4, pady=(0, 4))
+        box = ttk.Frame(parent)
+        box.pack(side="bottom", fill="x", pady=(6, 0))
+        title = ttk.Frame(box, padding=(6, 2), style="Title.TFrame")
+        title.pack(fill="x")
+        ttk.Label(title, text="Reduce", style="Title.TLabel",
+                  font=(self.uiFamily, 10, "bold")).pack(side="left")
+        panel = ttk.Frame(box, padding=(8, 4))
+        panel.pack(fill="x")
+        # The reduction's switch, and beside it the roll's shading by weight,
+        # which colours every note.
         top = ttk.Frame(panel)
         top.pack(fill="x")
         cb = ttk.Checkbutton(top, text="Reduce to the voice budget", variable=self.reduceVar,
-                             command=self._reductionChanged)
+                             style="Switch.TCheckbutton", command=self._reductionChanged)
         cb.pack(side="left")
         Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
                     "Dropped notes are stippled; the file is not changed.")
-        sh = ttk.Checkbutton(top, text="Shade by weight", variable=self.shadeVar,
-                             command=self.redraw)
-        sh.pack(side="right")
-        Tooltip(sh, "Colour notes by their reduction weight instead of\n"
-                    "velocity: the brighter a note, the harder the\n"
-                    "reduction tries to keep it")
-        self.lossLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8), wraplength=320,
-                                 justify="left")
-        self.lossLbl.pack(fill="x", pady=(2, 0))
+        shade = ttk.Checkbutton(top, text="Shade", variable=self.shadeVar, style="Toggle.TButton",
+                                command=self._redrawNotes)
+        shade.pack(side="right")
+        Tooltip(shade, "Shade by weight: colour notes by their reduction weight\n"
+                       "instead of velocity; the brighter a note, the harder\n"
+                       "the reduction tries to keep it")
+        self.lossLbl = ttk.Label(panel, text="", font=(self.uiFamily, 9), wraplength=350,
+                                 justify="left", foreground=self.palette["muted"])
+        self.lossLbl.pack(fill="x", pady=(2, 4))
 
-        # The pool the controls below edit: pick it, rename it with Return,
-        # add or remove one, and open the tiers.
-        pools = ttk.Frame(panel)
-        pools.pack(fill="x", pady=(2, 0))
-        ttk.Label(pools, text="Pool", font=("TkDefaultFont", 8)).pack(side="left")
-        self.poolCombo = ttk.Combobox(pools, textvariable=self.poolVar, width=10)
-        self.poolCombo.pack(side="left", padx=(2, 4))
-        self.poolCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSelected())
-        self.poolCombo.bind("<Return>", lambda e: self._renamePool())
-        Tooltip(self.poolCombo, "The pool the controls below edit. Type a new name\n"
-                                "and press Return to rename it; channels join a\n"
-                                "pool on their cards")
-        b = ttk.Button(pools, text="Tiers...", width=7, command=self.tiersDialog)
-        b.pack(side="right")
-        Tooltip(b, "The chips the pools' voices come from: channels,\n"
-                   "how many are reserved for effects, and the release\n"
-                   "their patches need")
-        b = ttk.Button(pools, text="-", width=2, command=self.removePool)
-        b.pack(side="right", padx=(2, 2))
-        Tooltip(b, "Remove this pool; its channels leave the reduction\n"
-                   "until they are given another")
-        b = ttk.Button(pools, text="+", width=2, command=self.addPool)
-        b.pack(side="right")
-        Tooltip(b, "Add a pool")
+        # The pools, one line each, with add, remove and the tiers above
+        # them. A line selects its pool for the controls below it.
+        head = ttk.Frame(panel)
+        head.pack(fill="x", pady=(0, 2))
+        ttk.Label(head, text="Pools", font=(self.uiFamily, 9),
+                  foreground=self.palette["muted"]).pack(side="left")
 
-        # The edited pool's voices and tier.
-        budget = ttk.Frame(panel)
-        budget.pack(fill="x", pady=(2, 0))
-        ttk.Label(budget, text="Voices", font=("TkDefaultFont", 8)).pack(side="left")
-        sp = ttk.Spinbox(budget, from_=0, to=64, width=3, textvariable=self.poolVoicesVar,
-                         command=self._reductionChanged)
-        sp.pack(side="left", padx=(2, 8))
-        sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
-        Tooltip(sp, "Voices this pool owns; the strip's budget is every\n"
-                    "pool's voices added up")
-        ttk.Label(budget, text="Tier", font=("TkDefaultFont", 8)).pack(side="left")
-        self.tierCombo = ttk.Combobox(budget, textvariable=self.poolTierVar, state="readonly",
-                                      width=7)
-        self.tierCombo.pack(side="left", padx=(2, 0))
+        for text, command, tip in (
+                ("Tiers...", self.tiersDialog,
+                 "The chips the pools' voices come from: channels,\n"
+                 "how many are reserved for effects, and the release\n"
+                 "their patches need"),
+                ("-", self.removePool,
+                 "Remove the selected pool; its channels leave the\n"
+                 "reduction until they are given another"),
+                ("+", self.addPool, "Add a pool")):
+            b = ttk.Button(head, text=text, style="Title.TButton", command=command)
+            b.pack(side="right", padx=(2, 0))
+            Tooltip(b, tip)
+
+        mono = theme.pickFont(tkfont.families(self), theme.MONO_FONTS) or self.uiFamily
+        self.poolFont = (mono, 11, "bold")
+        self.poolTable = tk.Frame(panel, bg=self.palette["border"])
+        self.poolTable.pack(fill="x", pady=(0, 4))
+
+        # The selected pool's settings on a display in the strip's dark: its
+        # name on a cyan tag, then each setting as a label over its value.
+        p = self.palette
+        display = ttk.Frame(panel, style="Lcd.TFrame", padding=(8, 6))
+        display.pack(fill="x", pady=(2, 0))
+        self.poolHeading = tk.Label(display, text="", bg=p["accent"], fg=p["ink"], padx=6,
+                                    font=(self.uiFamily, 9, "bold"))
+        self.poolHeading.pack(anchor="w")
+        tk.Frame(display, height=1, bg=p["raised"]).pack(fill="x", pady=4)
+
+        # Tier and Sound as drop-downs, and the overlap in amber: how much
+        # the pool's channels play at the same time, low being what makes
+        # sharing its voices work.
+        row = ttk.Frame(display, style="Lcd.TFrame")
+        row.pack(fill="x")
+        self.tierCombo = ttk.Combobox(self._lcdColumn(row, "Tier"), width=5,
+                                      textvariable=self.poolTierVar, state="readonly",
+                                      style="Lcd.TCombobox", font=(self.uiFamily, 9))
+        self.tierCombo.pack(anchor="w")
         self.tierCombo.bind("<<ComboboxSelected>>", lambda e: self._reductionChanged())
         Tooltip(self.tierCombo, "The chip this pool's voices come from")
-        ttk.Label(budget, text="Sound", font=("TkDefaultFont", 8)).pack(side="left", padx=(8, 0))
-        self.soundCombo = ttk.Combobox(budget, textvariable=self.poolSoundVar, state="readonly",
-                                       width=11)
-        self.soundCombo.pack(side="left", padx=(2, 0))
+        self.soundCombo = ttk.Combobox(self._lcdColumn(row, "Sound"), width=14,
+                                       textvariable=self.poolSoundVar, state="readonly",
+                                       style="Lcd.TCombobox", font=(self.uiFamily, 9))
+        self.soundCombo.pack(anchor="w")
         self.soundCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSoundChanged())
-        Tooltip(self.soundCombo, "The sound this pool's voices play on export: a patch\n"
-                                 "or waveform from the target's library, or one chosen\n"
-                                 "for each part from its GM instrument")
-
-        # How much the edited pool's channels play at the same time: low is
-        # what makes sharing its voices work.
-        self.overlapLbl = ttk.Label(panel, text="", font=("TkDefaultFont", 8),
-                                    foreground="#555")
-        self.overlapLbl.pack(fill="x")
+        self.soundTip = Tooltip(self.soundCombo, "")
+        self.overlapLbl = ttk.Label(self._lcdColumn(row, "Overlap"), text="",
+                                    style="Readout.Lcd.TLabel")
+        self.overlapLbl.pack(anchor="w")
         self.overlapTip = Tooltip(self.overlapLbl, "")
+        tk.Frame(display, height=1, bg=p["raised"]).pack(fill="x", pady=4)
 
-        # Transform switches, each one a pool setting.
-        switches = ttk.Frame(panel)
-        switches.pack(fill="x")
+        # The transforms as lane toggles, each one a pool setting.
+        switches = ttk.Frame(display, style="Lcd.TFrame")
+        switches.pack(fill="x", pady=(0, 4))
 
         for text, var, tip in (
-                ("Merge unisons", self.dedupUnisonVar,
-                 "The same pitch struck together on two parts costs one voice"),
-                ("Fold octaves", self.dedupOctaveVar,
-                 "An octave doubling struck together with its note is dropped"),
+                ("Unisons", self.dedupUnisonVar,
+                 "Merge unisons: the same pitch struck together on two\n"
+                 "parts costs one voice"),
+                ("Octaves", self.dedupOctaveVar,
+                 "Fold octaves: an octave doubling struck together with\n"
+                 "its note is dropped"),
                 ("Top line", self.monoTopVar,
                  "Each channel keeps only its highest sounding note")):
-            w = ttk.Checkbutton(switches, text=text, variable=var,
+            w = ttk.Checkbutton(switches, text=text, variable=var, style="Lane.Toggle.TButton",
                                 command=self._reductionChanged)
-            w.pack(side="left", padx=(0, 6))
+            w.pack(side="left", padx=(0, 2))
             Tooltip(w, tip)
 
-        gaps = ttk.Frame(panel)
-        gaps.pack(fill="x", pady=(2, 0))
+        # The three gaps as cyan readouts.
+        gaps = ttk.Frame(display, style="Lcd.TFrame")
+        gaps.pack(fill="x")
 
-        for text, var, limit, tip in (
-                ("Tremolo", self.tremoloVar, 480,
-                 "Ticks: a pitch re-struck within this gap continues; 0 is off"),
-                ("Legato", self.legatoVar, 960,
-                 "Ticks: a note reaches the next onset within this gap; 0 is off"),
-                ("Chord", self.maxChordVar, 8,
-                 "Notes kept per chord on a channel, outer voices first; 0 is all")):
-            ttk.Label(gaps, text=text, font=("TkDefaultFont", 8)).pack(side="left")
-            sp = ttk.Spinbox(gaps, from_=0, to=limit, width=4, textvariable=var,
-                             command=self._reductionChanged)
-            sp.pack(side="left", padx=(2, 8))
-            sp.bind("<KeyRelease>", lambda e: self._reductionChanged())
-            Tooltip(sp, tip)
+        for text, var, limit, step, zero, tip in (
+                ("Tremolo", self.tremoloVar, 480, GAP_STEP, "off",
+                 "Ticks: a pitch re-struck within this gap continues"),
+                ("Legato", self.legatoVar, 960, GAP_STEP, "off",
+                 "Ticks: a note reaches the next onset within this gap"),
+                ("Chord", self.maxChordVar, 8, 1, "all",
+                 "Notes kept per chord on a channel, outer voices first")):
+            self._buildGap(self._lcdColumn(gaps, text), var, limit, step, zero, tip)
+
+    def _lcdColumn(self, row: ttk.Frame, label: str) -> ttk.Frame:
+        """Add a column to a row of the Reduce panel's display, with its label at the top.
+
+        Args:
+            row: the display's row.
+            label: the setting's name.
+
+        Returns:
+            ttk.Frame: the column, for the value under the label.
+        """
+        column = ttk.Frame(row, style="Lcd.TFrame")
+        column.pack(side="left", anchor="n", padx=(0, 14))
+        ttk.Label(column, text=label, style="Lcd.TLabel").pack(anchor="w")
+        return column
+
+    def _buildGap(self, column: ttk.Frame, var: tk.IntVar, limit: int, step: int, zero: str,
+                  tip: str):
+        """Put a gap's readout in its column, following its variable.
+
+        The readout drags up or down, steps with the wheel and the Up and
+        Down keys, and opens for typing with a double click.
+
+        Args:
+            column: the gap's column on the display.
+            var: the gap's variable, which the panel stores into the pool.
+            limit: the largest value.
+            step: what a drag step, a wheel turn or an arrow key moves it by.
+            zero: the word shown for 0.
+            tip: what the gap does.
+        """
+        label = tk.Label(column, bg=theme.ROLL["strip"], fg=self.palette["accent"],
+                         font=(self.uiFamily, 9), anchor="w", width=4,
+                         cursor="sb_v_double_arrow", takefocus=1)
+        label.pack(anchor="w")
+        gap = GapReadout(label, var, limit, step, zero)
+        var.trace_add("write", lambda *a: self._showGap(gap))
+        self._showGap(gap)
+        self.gapReadouts.append(gap)
+
+        for seq, handler in (
+                ("<ButtonPress>", lambda e: self._onGapPress(e, gap)),
+                ("<B1-Motion>", lambda e: self._onGapDrag(e, gap)),
+                ("<ButtonRelease-1>", self._onGapRelease),
+                ("<Double-Button-1>", lambda e: self._editGap(gap)),
+                ("<Button-4>", lambda e: self._stepGap(gap, 1)),
+                ("<Button-5>", lambda e: self._stepGap(gap, -1)),
+                ("<MouseWheel>", lambda e: self._stepGap(gap, 1 if e.delta > 0 else -1)),
+                ("<Up>", lambda e: self._stepGap(gap, 1)),
+                ("<Down>", lambda e: self._stepGap(gap, -1))):
+            gap.label.bind(seq, handler, add="+")
+
+        Tooltip(label, f"{tip}; {zero} at 0.\n"
+                       "Drag up or down, use the wheel, or double-click to type")
+
+    def _gapValue(self, gap: GapReadout) -> int:
+        """Read a gap's value, 0 while its variable holds no number.
+
+        Args:
+            gap: the gap.
+
+        Returns:
+            int: the value.
+        """
+        try:
+            value = gap.var.get()
+        except tk.TclError:
+            value = 0
+
+        return value
+
+    def _showGap(self, gap: GapReadout):
+        """Show a gap's value on its readout, or its word for 0.
+
+        Args:
+            gap: the gap.
+        """
+        value = self._gapValue(gap)
+        gap.label.configure(text=str(value) if value else gap.zero)
+
+    def _setGap(self, gap: GapReadout, value: int):
+        """Set a gap's value within its range; the readout follows its variable.
+
+        Args:
+            gap: the gap.
+            value: the value asked for.
+        """
+        gap.var.set(max(0, min(gap.limit, value)))
+
+    def _stepGap(self, gap: GapReadout, delta: int):
+        """Step a gap, and recompute the reduction once the steps pause.
+
+        Args:
+            gap: the gap.
+            delta: +1 or -1, in the gap's steps.
+        """
+        self._setGap(gap, self._gapValue(gap) + delta * gap.step)
+        self._settleReduction()
+
+    def _onGapPress(self, event, gap: GapReadout):
+        """Start dragging a gap, filled with the accent, and take the focus.
+
+        Args:
+            event: the press, at `y_root`; only the first button drags.
+            gap: the gap.
+        """
+        if event.num != 1:
+            return
+
+        gap.label.focus_set()
+        gap.label.configure(bg=self.palette["accent"], fg=self.palette["ink"])
+        self._gapDrag = (gap, event.y_root, self._gapValue(gap))
+
+    def _onGapDrag(self, event, gap: GapReadout):
+        """Move a gap with the pointer: up for more.
+
+        Args:
+            event: the motion, at `y_root`.
+            gap: the gap.
+        """
+        drag = self._gapDrag
+
+        if drag is not None and drag[0] is gap:
+            steps = round((drag[1] - event.y_root) / BUDGET_DRAG_PX)
+            self._setGap(gap, drag[2] + steps * gap.step)
+
+    def _onGapRelease(self, _event=None):
+        """End a drag of a gap, recomputing the reduction if it moved.
+
+        Args:
+            _event: the release; unused.
+        """
+        drag, self._gapDrag = self._gapDrag, None
+
+        if drag is None:
+            return
+
+        gap = drag[0]
+        gap.label.configure(bg=theme.ROLL["strip"], fg=self.palette["accent"])
+
+        if self._gapValue(gap) != drag[2]:
+            self._reductionChanged()
+
+    def _editGap(self, gap: GapReadout):
+        """Open a gap for typing.
+
+        Args:
+            gap: the gap.
+        """
+        self._gapDrag = None
+
+        def done(typed: str | None):
+            if typed is not None and typed.isdigit():
+                self._setGap(gap, int(typed))
+                self._reductionChanged()
+
+        self._openPoolEditor(gap.label, str(self._gapValue(gap)), done)
+
+    # ------------------------------------------------------------ pools table
+    def _refreshPoolTable(self):
+        """Show the plan's pools in the table, marking the one the panel edits.
+
+        The lines are built again when the pools themselves change (added,
+        removed, renamed, moved to another tier, or given other channels),
+        and otherwise restyled in place, so a click or a double click on a
+        line keeps its widgets. Nothing changes while a value is dragged or
+        typed.
+        """
+        if self._poolDrag is not None or self._poolEditor is not None:
+            return
+
+        key = tuple((id(p), p.name, p.tier, len(p.channels)) for p in self.plan.pools)
+
+        if key != self._poolTableKey:
+            self._poolTableKey = key
+
+            for w in self.poolTable.winfo_children():
+                w.destroy()
+
+            self.poolRows.clear()
+
+            for pool in self.plan.pools:
+                self._buildPoolRow(pool)
+
+        for pool in self.plan.pools:
+            self._stylePoolRow(pool)
+
+    def _buildPoolRow(self, pool: reduce.Pool):
+        """Add a pool's line to the table.
+
+        The line holds a bar that marks the edited pool, the pool's name
+        and tier, its voices in a value box with small arrows beside it,
+        its peak, and its channel count. A click selects the pool and a
+        double click on the name renames it. The value box drags up or
+        down, steps with the wheel, the arrows and the Up and Down keys,
+        and opens for typing with a double click.
+
+        Args:
+            pool: the pool.
+        """
+        p = self.palette
+        row = tk.Frame(self.poolTable)
+        row.pack(fill="x", pady=(0, 1))
+        bar = tk.Frame(row, width=3)
+        bar.pack(side="left", fill="y")
+        name = tk.Label(row, text=pool.name, anchor="w", width=8, fg=p["text"])
+        name.pack(side="left", padx=(5, 0))
+        tier = tk.Label(row, text=pool.tier or "-", anchor="w", width=5, fg=p["muted"],
+                        font=(self.uiFamily, 9))
+        tier.pack(side="left")
+        box = tk.Label(row, width=3, font=self.poolFont, bg=p["field"],
+                       cursor="sb_v_double_arrow", takefocus=1)
+        box.pack(side="left", pady=2)
+        arrows = tk.Frame(row)
+        arrows.pack(side="left", padx=(2, 8))
+
+        # The arrows show pressed until the button comes up.
+        for image, delta in (("poolUp", 1), ("poolDown", -1)):
+            a = tk.Label(arrows, image=self.paintedImages[image], bd=0, cursor="hand2")
+            a.pack(side="top")
+            a.bind("<ButtonPress-1>", lambda e, w=a, i=image, d=delta:
+                   self._pressPoolArrow(w, i, pool, d))
+            a.bind("<ButtonRelease-1>", lambda e, w=a, i=image:
+                   w.configure(image=self.paintedImages[i]))
+
+        figure = tk.Label(row, anchor="w", font=(self.uiFamily, 9))
+        figure.pack(side="left")
+        count = tk.Label(row, text=f"{len(pool.channels)} ch", anchor="e", fg=p["muted"],
+                         font=(self.uiFamily, 9))
+        count.pack(side="right", padx=(0, 6))
+
+        # A click anywhere but the voices selects the pool.
+        for w in (row, bar, name, tier, figure, count):
+            w.bind("<Button-1>", lambda e: self._selectPool(pool))
+
+        name.bind("<Double-Button-1>", lambda e: self._editPoolName(pool))
+
+        for seq, handler in (
+                ("<ButtonPress>", lambda e: self._onPoolPress(e, pool)),
+                ("<B1-Motion>", lambda e: self._onPoolDrag(e, pool)),
+                ("<ButtonRelease-1>", self._onPoolRelease),
+                ("<Double-Button-1>", lambda e: self._editPoolVoices(pool)),
+                ("<Button-4>", lambda e: self._stepPool(pool, 1)),
+                ("<Button-5>", lambda e: self._stepPool(pool, -1)),
+                ("<MouseWheel>", lambda e: self._stepPool(pool, 1 if e.delta > 0 else -1)),
+                ("<Up>", lambda e: self._stepPool(pool, 1)),
+                ("<Down>", lambda e: self._stepPool(pool, -1))):
+            box.bind(seq, handler, add="+")
+
+        Tooltip(name, "Click to edit this pool below; double-click to rename it")
+        Tooltip(box, "Voices this pool owns: drag up or down, use the wheel\n"
+                     "or the arrows, or double-click to type. A pool takes\n"
+                     "no more than its tier has left")
+        Tooltip(figure, "The most notes this pool's channels sound at once in\n"
+                        "the song; amber when it is above the pool's voices")
+        self.poolRows[id(pool)] = {"row": row, "bar": bar, "name": name, "tier": tier,
+                                   "box": box, "arrows": arrows, "figure": figure,
+                                   "count": count}
+
+    def _stylePoolRow(self, pool: reduce.Pool):
+        """Colour a pool's line: the edited pool lit, its voices, and its peak.
+
+        Args:
+            pool: the pool.
+        """
+        widgets = self.poolRows.get(id(pool))
+
+        if widgets is None:
+            return
+
+        p = self.palette
+        chosen = pool is self.editPool
+        bg = p["active"] if chosen else p["panel"]
+        peak = self._poolPeak(pool)
+
+        for key in ("row", "name", "tier", "arrows", "figure", "count"):
+            widgets[key].configure(bg=bg)
+
+        for arrow in widgets["arrows"].winfo_children():
+            arrow.configure(bg=bg)
+
+        widgets["bar"].configure(bg=p["accent"] if chosen else bg)
+        widgets["name"].configure(font=(self.uiFamily, 9, "bold" if chosen else "normal"))
+        widgets["box"].configure(text=str(pool.voices), bg=p["field"], fg=p["accent"])
+        widgets["figure"].configure(text=f"peak {peak}",
+                                    fg=p["warn"] if peak > pool.voices else p["muted"])
+
+    def _poolPeak(self, pool: reduce.Pool) -> int:
+        """Find the most notes a pool's channels sound at once in the song as written.
+
+        Args:
+            pool: the pool.
+
+        Returns:
+            int: the peak.
+        """
+        demand = self._ensureSongDemand()
+        counts = [demand.channels[ch] for ch in pool.channels if ch in demand.channels]
+        peak = max((sum(column) for column in zip(*counts)), default=0)
+        return peak
+
+    def _poolRoom(self, pool: reduce.Pool) -> int:
+        """Find the most voices a pool can be given.
+
+        A pool on a tier has what the tier's voices leave after its
+        reservation and its other pools; a lone pool, as the strip's
+        budget, goes no higher than the song's peak; other pools stop at 64.
+
+        Args:
+            pool: the pool.
+
+        Returns:
+            int: the most voices.
+        """
+        tier = next((t for t in self.plan.tiers if t.name == pool.tier), None)
+        room = 64
+
+        if tier is not None:
+            others = sum(p.voices for p in self.plan.pools
+                         if p.tier == pool.tier and p is not pool)
+            room = max(0, tier.capacity - tier.reserved - others)
+
+        if len(self.plan.pools) == 1:
+            room = min(room, self.budgetLimit)
+
+        return room
+
+    def _selectPool(self, pool: reduce.Pool):
+        """Make a pool the one the panel's controls below edit.
+
+        The budget lines follow, as a tier's line moves the selected pool.
+
+        Args:
+            pool: the pool.
+        """
+        if pool is self.editPool:
+            return
+
+        self._storePoolControls()
+        self.poolVar.set(pool.name)
+        self._poolSelected()
+        self._drawDemand()
+
+    def _setPoolVoices(self, pool: reduce.Pool, value: int):
+        """Set a pool's voices, held to what it can be given, and redraw the strip at once.
+
+        A lone pool keeps at least one voice, as it is the strip's budget.
+        The panel writes its controls into the edited pool at every redraw,
+        so they follow; with several pools the strip's budget is their
+        total. The reduction is left as it was; the caller recomputes it
+        when the change is done.
+
+        Args:
+            pool: the pool.
+            value: the voices asked for.
+        """
+        least = 1 if len(self.plan.pools) == 1 else 0
+        value = max(least, min(self._poolRoom(pool), value))
+
+        if value == pool.voices:
+            return
+
+        pool.voices = value
+
+        if pool is self.editPool:
+            self.poolVoicesVar.set(value)
+
+        if len(self.plan.pools) != 1:
+            self.budgetVar.set(self._totalVoices())
+
+        self._stylePoolRow(pool)
+        self._drawDemand()
+
+    def _stepPool(self, pool: reduce.Pool, delta: int):
+        """Step a pool's voices, and recompute the reduction once the steps pause.
+
+        Args:
+            pool: the pool.
+            delta: +1 or -1.
+        """
+        self._setPoolVoices(pool, pool.voices + delta)
+        self._settleReduction()
+
+    def _pressPoolArrow(self, arrow: tk.Label, image: str, pool: reduce.Pool, delta: int):
+        """Press a table arrow: show it pressed and step its pool.
+
+        Args:
+            arrow: the arrow.
+            image: its painted image's name.
+            pool: the pool.
+            delta: +1 or -1.
+        """
+        arrow.configure(image=self.paintedImages[image + "Pressed"])
+        self._stepPool(pool, delta)
+
+    def _onPoolPress(self, event, pool: reduce.Pool):
+        """Start dragging a pool's voices, filled with the accent, and take the focus.
+
+        Args:
+            event: the press, at `y_root`; only the first button drags.
+            pool: the pool.
+        """
+        if event.num != 1:
+            return
+
+        box = self.poolRows[id(pool)]["box"]
+        box.focus_set()
+        box.configure(bg=self.palette["accent"], fg=self.palette["ink"])
+        self._poolDrag = (pool, event.y_root, pool.voices)
+
+    def _onPoolDrag(self, event, pool: reduce.Pool):
+        """Move a pool's voices with the pointer: up for more.
+
+        Args:
+            event: the motion, at `y_root`.
+            pool: the pool.
+        """
+        drag = self._poolDrag
+
+        if drag is not None and drag[0] is pool:
+            self._setPoolVoices(pool, drag[2] + round((drag[1] - event.y_root) / BUDGET_DRAG_PX))
+            self.poolRows[id(pool)]["box"].configure(bg=self.palette["accent"],
+                                                     fg=self.palette["ink"])
+
+    def _onPoolRelease(self, _event=None):
+        """End a drag of a pool's voices, recomputing the reduction if they moved.
+
+        Args:
+            _event: the release; unused.
+        """
+        drag, self._poolDrag = self._poolDrag, None
+
+        if drag is None:
+            return
+
+        self._stylePoolRow(drag[0])
+
+        if drag[0].voices != drag[2]:
+            self._reductionChanged()
+
+    def _openPoolEditor(self, over: tk.Label, text: str, done: Callable[[str | None], None]):
+        """Open a typing field over a table cell.
+
+        Return or leaving the field keeps what was typed, and Escape drops
+        it; either way `done` receives the result.
+
+        Args:
+            over: the cell.
+            text: the text to start from.
+            done: called with what was typed, or None when it was dropped.
+        """
+        entry = ttk.Entry(over.master, font=over.cget("font"))
+        entry.insert(0, text)
+        entry.select_range(0, "end")
+        entry.place(in_=over, x=0, y=0, relwidth=1, relheight=1)
+        entry.focus_set()
+
+        def close(keep: bool):
+            if self._poolEditor is not entry:
+                return
+
+            self._poolEditor = None
+            typed = entry.get().strip()
+            entry.destroy()
+            done(typed if keep else None)
+
+        for seq, keep in (("<Return>", True), ("<KP_Enter>", True), ("<Escape>", False),
+                          ("<FocusOut>", True)):
+            entry.bind(seq, lambda e, k=keep: close(k))
+
+        self._poolEditor = entry
+
+    def _editPoolVoices(self, pool: reduce.Pool):
+        """Open a pool's voices for typing.
+
+        Args:
+            pool: the pool.
+        """
+        self._poolDrag = None
+
+        def done(typed: str | None):
+            if typed is not None and typed.isdigit():
+                self._setPoolVoices(pool, int(typed))
+                self._reductionChanged()
+
+            self._stylePoolRow(pool)
+
+        self._openPoolEditor(self.poolRows[id(pool)]["box"], str(pool.voices), done)
+
+    def _editPoolName(self, pool: reduce.Pool):
+        """Open a pool's name for typing; Return renames the pool.
+
+        Args:
+            pool: the pool.
+        """
+        self._selectPool(pool)
+
+        def done(typed: str | None):
+            if typed:
+                self.poolVar.set(typed)
+                self._renamePool()
+
+            self._refreshPoolTable()
+
+        self._openPoolEditor(self.poolRows[id(pool)]["name"], pool.name, done)
 
     def _currentPlan(self) -> reduce.Plan:
         """The plan as the controls have it.
@@ -2048,17 +4379,31 @@ class MidiEditorApp(tk.Tk):
         return self.plan
 
     def _ensureReduction(self) -> reduce.Reduction:
-        """Return the reduction for the current plan, computing it if needed.
+        """Return the reduction for the current plan, waiting for or computing it if needed.
 
-        A plan whose pools no longer fit their tiers is refused by the
-        reducer; that is shown on the panel label and nothing is placed.
+        A job working it out for the current inputs is waited for and its
+        result taken, and the views it changes are refreshed at the next
+        idle moment; otherwise it is computed here. A plan whose pools no
+        longer fit their tiers is refused by the reducer; that is shown on
+        the panel label and nothing is placed.
 
         Returns:
             reduce.Reduction: the result.
         """
+        job = self._reduceJob
+
+        if self.reduction is None and job is not None and job.generation == self._reduceGen:
+            job.join()
+            self._endReduceJob()
+            self._landReduceJob(job)
+            self.after_idle(self._reductionLanded)
+
         if self.reduction is None:
+            self._reduceAgain = False
+
             try:
-                self.reduction = reduce.reduce(self.song, self._currentPlan())
+                self.reduction = reduce.reduce(self.song, self._currentPlan(),
+                                               self._ensureWeights())
             except ValueError as exc:
                 self.reduction = reduce.Reduction()
                 self.lossLbl.config(text=f"plan refused: {exc}")
@@ -2066,19 +4411,218 @@ class MidiEditorApp(tk.Tk):
                 self._showLoss(self.reduction)
 
             self.reducedSong = None
+            self._lastReduction = self.reduction
 
         return self.reduction
 
-    def _ensureWeights(self) -> dict[int, float]:
-        """Return every note's reduction weight under the current plan, computing it if needed.
+    def _dropReduction(self):
+        """Forget the reduction and what is built from it, as its inputs have changed.
+
+        The count of changes moves on, so a job started before is known to
+        be stale when it ends.
+        """
+        self._reduceGen += 1
+        self.reduction = None
+        self.reducedSong = None
+        self.reports["reduced"] = None
+
+    def _reducePending(self) -> bool:
+        """Report whether a reduction for the current inputs is on its way from a job.
+
+        Returns:
+            bool: True while a job for them runs, or one is to start when the
+            running one ends.
+        """
+        job = self._reduceJob
+        pending = job is not None and (job.generation == self._reduceGen or self._reduceAgain)
+        return pending
+
+    def _startReduceJob(self):
+        """Set the reduction and any stale weights to be worked out on a thread of their own.
+
+        One job runs at a time: a change while one runs asks for another
+        when it ends, from the inputs as they are then. The plan is copied
+        here, on the main thread, as the panel keeps writing to it. The job
+        counts as on its way at once, and its thread starts once the idle
+        work already queued, such as the strip's redraw, is done: a widget
+        call made while the thread runs waits a switch interval for the
+        interpreter, and a redraw makes hundreds of them.
+        """
+        if self._reduceJob is not None:
+            self._reduceAgain = True
+            return
+
+        self._reduceAgain = False
+        self._reduceJob = ReduceJob(self._reduceGen, self._priorities(), self.song,
+                                    copy.deepcopy(self._currentPlan()), self._currentWeights(),
+                                    self.reduceVar.get())
+        self._reduceStart = self.after_idle(self._queueReduceJob)
+
+    def _queueReduceJob(self):
+        """Start the job's thread at the idle moment after this one, behind the work queued now."""
+        self._reduceStart = self.after_idle(self._runReduceJob)
+
+    def _runReduceJob(self):
+        """Start the job's thread and look for its end.
+
+        The main thread gives the interpreter up for each Tk call and waits a
+        switch interval to have it back while the thread runs, so the
+        interval is cut until the job ends.
+        """
+        self._reduceStart = None
+        job = self._reduceJob
+
+        if job is None or job.thread is not None or job.done:
+            return
+
+        self._switchInterval = sys.getswitchinterval()
+        sys.setswitchinterval(REDUCE_SWITCH_S)
+        job.start()
+        self._reducePoll = self.after(REDUCE_POLL_MS, self._pollReduceJob)
+
+    def _pollReduceJob(self):
+        """Take the job's result once it ends, if its inputs still stand, and start the next."""
+        self._reducePoll = None
+        job = self._reduceJob
+
+        if job is None:
+            return
+
+        if not job.done:
+            self._reducePoll = self.after(REDUCE_POLL_MS, self._pollReduceJob)
+            return
+
+        self._endReduceJob()
+
+        if job.generation == self._reduceGen:
+            self._landReduceJob(job)
+            self._reductionLanded()
+
+        if self._reduceAgain:
+            self._startReduceJob()
+
+    def _endReduceJob(self):
+        """Forget the ended job and give the interpreter its switch interval back."""
+        if self._reduceJob is not None and self._reduceJob.thread is not None:
+            sys.setswitchinterval(self._switchInterval)
+
+        self._reduceJob = None
+
+    def _landReduceJob(self, job: ReduceJob):
+        """Take a finished job's weights, reduction and sweep as the current ones.
+
+        Args:
+            job: the job, for the current inputs.
+
+        Raises:
+            Exception: whatever the job raised, as its inputs did not change
+                under it.
+        """
+        if job.error is not None:
+            raise job.error
+
+        self.noteWeights = job.weights
+        self._weightsFor = job.priorities
+
+        if not job.wantReduction:
+            return
+
+        self.reduction = job.reduction
+        self.demand = job.demand
+        self.reducedSong = None
+        self._lastReduction = self.reduction
+        self._lastDemand = self.demand
+
+        if job.refused is not None:
+            self.lossLbl.config(text=f"plan refused: {job.refused}")
+        else:
+            self._showLoss(job.reduction)
+
+    def _reductionLanded(self):
+        """Draw what a newly taken reduction changes: notes, strip, inspector and report."""
+        self._redrawNotes()
+        self._refreshInspector()
+        self._showReportIfSelected()
+
+    def _shownReduction(self) -> reduce.Reduction | None:
+        """Return the reduction to draw: the current one, or the last while a job works one out.
+
+        Returns:
+            reduce.Reduction | None: the reduction, or None when a job works
+            out the first.
+        """
+        if self.reduction is None and self._reducePending():
+            shown = self._lastReduction
+        else:
+            shown = self._ensureReduction()
+
+        return shown
+
+    def _shownWeights(self) -> dict[int, float]:
+        """Return the weights to draw: the current ones, or the last while a job scores them.
 
         Returns:
             dict[int, float]: keyed by `id(note)`.
         """
-        if self.noteWeights is None:
+        current = self._currentWeights()
+
+        if current is None and self._reducePending() and self.noteWeights is not None:
+            current = self.noteWeights
+
+        shown = current if current is not None else self._ensureWeights()
+        return shown
+
+    def _priorities(self) -> tuple[tuple[int, float], ...]:
+        """List the plan's priority for every channel, which the weights depend on.
+
+        Returns:
+            tuple[tuple[int, float], ...]: (channel, priority) in channel order.
+        """
+        plan = self._currentPlan()
+        priorities = tuple((ch, plan.priorityOf(ch)) for ch in sorted(self.song.channels))
+        return priorities
+
+    def _currentWeights(self) -> dict[int, float] | None:
+        """Return the cached weights while the priorities they were scored under stand.
+
+        Returns:
+            dict[int, float] | None: keyed by `id(note)`, or None when stale.
+        """
+        current = self.noteWeights if self._weightsFor == self._priorities() else None
+        return current
+
+    def _ensureWeights(self) -> dict[int, float]:
+        """Return every note's reduction weight under the current plan, computing it if needed.
+
+        The weights depend on the notes and the channel priorities alone, so
+        a change of budget, pool or transform keeps them.
+
+        Returns:
+            dict[int, float]: keyed by `id(note)`.
+        """
+        if self._currentWeights() is None:
+            self._weightsFor = self._priorities()
             self.noteWeights = reduce.weights(self.song, self._currentPlan())
 
         return self.noteWeights
+
+    def _noteWeight(self, note: model.Note) -> float:
+        """Return one note's reduction weight, from the cache or by scoring it alone.
+
+        Args:
+            note: the note.
+
+        Returns:
+            float: the weight under the current plan.
+        """
+        cached = self._currentWeights()
+
+        if cached is not None:
+            weight = cached[id(note)]
+        else:
+            weight = reduce.noteWeight(self.song, self._currentPlan(), note)
+
+        return weight
 
     def _invalidateReducedSong(self):
         """Discard the playable copy of the reduction after a channel event edit.
@@ -2132,25 +4676,40 @@ class MidiEditorApp(tk.Tk):
         self.lossLbl.config(text=f"{self._lossText(reduction)}\n{detail}")
 
     def _reductionChanged(self):
-        """A reduction control changed: store it, recompute and redraw what depends on it."""
+        """A reduction control changed: store it, and start working out what depends on it."""
         self._storePoolControls()
+        self._refreshPoolTable()
 
         if len(self.plan.pools) != 1:
             self.budgetVar.set(self._totalVoices())
 
-        self.reduction = None
-        self.noteWeights = None
-        self.reducedSong = None
+        self._dropReduction()
         self.demand = None
-        self.reports["reduced"] = None
 
-        if self.reduceVar.get() or self.shadeVar.get():
-            self.redraw()
+        # The reduction, and the weights when the priorities changed and
+        # the roll or the strip shows them, are worked out off the main
+        # thread; the notes stay as drawn until they land.
+        # The job counts as on its way from here, so the drawing below shows
+        # the last reduction, and its thread starts once that drawing is done.
+        staleWeights = self._currentWeights() is None and (
+            self.shadeVar.get() or self.laneVar.get() == "Weight")
+        wanted = self.reduceVar.get() or staleWeights
+
+        if wanted:
+            self._startReduceJob()
         else:
-            self.lossLbl.config(text="")
-            self._scheduleDemand()
+            self._reduceAgain = False
 
-        self._showReportIfSelected()
+        if not self.reduceVar.get():
+            self.lossLbl.config(text="")
+
+        if wanted:
+            self._scheduleDemand()
+        else:
+            self._redrawNotes()
+            self._showReportIfSelected()
+
+        self._refreshInspector()
 
         if self.playStart is not None:
             self._liveUpdate()
@@ -2394,34 +4953,42 @@ class MidiEditorApp(tk.Tk):
         order = sorted(channels, key=lambda ch: (rank.get(ch, last), ch))
         return order
 
-    def _budgetLevels(self) -> list[tuple[str, int]]:
-        """The strip's budget lines.
+    def _budgetLevels(self) -> list[tuple[str, int, reduce.Pool | None]]:
+        """The strip's budget lines, and the pool a drag of each one moves.
 
         Returns:
-            list[tuple[str, int]]: (label, voices) per line: one per tier
-            with voices, at its cumulative total and named after it, then
-            the plan's total when that differs.
+            list[tuple[str, int, reduce.Pool | None]]: (label, voices,
+            pool) per line: one per tier with voices, at its cumulative
+            total and named after it, then the plan's total when that
+            differs. A tier's line moves the edited pool when it is on that
+            tier, otherwise the tier's last pool. The total's line moves the
+            edited pool when it has no tier or every pool has one, otherwise
+            the last pool without one.
         """
-        levels: list[tuple[str, int]] = []
+        levels: list[tuple[str, int, reduce.Pool | None]] = []
         running = 0
+        edit = self.editPool
 
         for tier in self.plan.tiers:
-            voices = sum(p.voices for p in self.plan.pools if p.tier == tier.name)
+            pools = [p for p in self.plan.pools if p.tier == tier.name]
+            voices = sum(p.voices for p in pools)
 
             if voices:
                 running += voices
-                levels.append((f"{tier.name} {running}", running))
+                pool = edit if any(p is edit for p in pools) else pools[-1]
+                levels.append((f"{tier.name} {running}", running, pool))
 
         total = self._totalVoices()
 
         if not levels or total != running:
-            levels.append((str(total), total))
+            loose = [p for p in self.plan.pools if not p.tier]
+            pool = edit if not loose or any(p is edit for p in loose) else loose[-1]
+            levels.append((str(total), total, pool))
 
         return levels
 
     def _refreshPoolLists(self):
         """Put the current pool and tier names into every box that lists them."""
-        self.poolCombo.configure(values=[p.name for p in self.plan.pools])
         names = self._poolNames()
 
         for combo in self.poolCombos:
@@ -2442,6 +5009,8 @@ class MidiEditorApp(tk.Tk):
         for ch, var in self.releaseVars.items():
             var.set(f"{self.plan.release[ch]:g}" if ch in self.plan.release else "")
 
+        self._refreshPoolTable()
+
     def _loadPoolControls(self):
         """Show the edited pool's voices, tier and transforms in the panel."""
         self._refreshPoolLists()
@@ -2453,9 +5022,11 @@ class MidiEditorApp(tk.Tk):
 
         if pool is None:
             self.poolVar.set("")
+            self.poolHeading.configure(text="")
             return
 
         self.poolVar.set(pool.name)
+        self.poolHeading.configure(text=pool.name)
         self.poolVoicesVar.set(pool.voices)
         self.poolTierVar.set(pool.tier or NO_TIER)
         self._loadSoundBox(pool)
@@ -2466,6 +5037,7 @@ class MidiEditorApp(tk.Tk):
         self.legatoVar.set(pool.legatoGap)
         self.maxChordVar.set(pool.maxChord)
         self._refreshOverlap()
+        self._refreshPoolTable()
 
     def _scheduleOverlap(self):
         """Refresh the overlap figures once the current burst of edits is over."""
@@ -2477,8 +5049,9 @@ class MidiEditorApp(tk.Tk):
 
         A card's figure is the share of that channel's playing time during
         which the rest of the edited pool already sounds, so a low figure
-        marks a channel that could share the pool's voices; the panel's line
-        is the worst of the pool's own members.
+        marks a channel that could share the pool's voices; the panel's
+        readout is the worst of the pool's own members, and "-" for a pool
+        of fewer than two.
         """
         self._overlapAfter = None
         pool = self.editPool
@@ -2486,13 +5059,16 @@ class MidiEditorApp(tk.Tk):
         if pool is None or not self.song.notes:
             self.overlapLbl.config(text="")
             self.overlapTip.text = ""
+            self.overlapShares = {}
 
             for ch, lbl in self.usageLabels.items():
                 lbl.config(text=self.usageText[ch])
 
+            self._refreshInspector()
             return
 
         shares = analysis.poolOverlap(self._ensureSongDemand(), pool.channels)
+        self.overlapShares = shares
 
         for ch, lbl in self.usageLabels.items():
             lbl.config(text=f"{self.usageText[ch]} | overlaps {pool.name} {shares.get(ch, 0):.0%}")
@@ -2500,16 +5076,19 @@ class MidiEditorApp(tk.Tk):
         members = [ch for ch in pool.channels if ch in shares]
 
         if len(members) < 2:
-            text = f"{pool.name}: {'one channel' if members else 'no channels'}"
-            self.overlapTip.text = "A pool of one channel has nothing to share"
+            text = "-"
+            self.overlapTip.text = ("A pool of one channel has nothing to share" if members
+                                    else "A pool with no channels has nothing to share")
         else:
             worst = max(shares[ch] for ch in members)
-            text = f"{pool.name}: its channels overlap {worst:.0%} at most"
+            text = f"{worst:.0%}"
             lines = "\n".join(f"ch {ch + 1}: {shares[ch]:.0%}" for ch in members)
-            self.overlapTip.text = ("Share of each channel's playing time during which\n"
-                                    "the rest of the pool already sounds:\n" + lines)
+            self.overlapTip.text = ("The most of a channel's playing time during which\n"
+                                    "the rest of the pool already sounds; the lower,\n"
+                                    "the better its channels share voices:\n" + lines)
 
         self.overlapLbl.config(text=text)
+        self._refreshInspector()
 
     def _targetFor(self, pool: reduce.Pool) -> str | None:
         """The export target whose chip a pool's tier names.
@@ -2527,7 +5106,12 @@ class MidiEditorApp(tk.Tk):
         return key
 
     def _loadSoundBox(self, pool: reduce.Pool):
-        """Fill the Sound box with a pool's target's sounds and show its choice.
+        """Fill the Sound box with the sounds of a pool's chip and show its choice.
+
+        A choice the chip has no sound for shows as `BY_INSTRUMENT`, which
+        is what the export plays for it. A pool whose tier names no chip has
+        no sounds, so the box is disabled and reads `NO_CHIP`, and its
+        tooltip says how to give the pool one.
 
         Args:
             pool: the edited pool.
@@ -2535,11 +5119,19 @@ class MidiEditorApp(tk.Tk):
         key = self._targetFor(pool)
 
         if key is None:
-            self.soundCombo.configure(values=[BY_INSTRUMENT], state="disabled")
-            self.poolSoundVar.set(BY_INSTRUMENT)
+            self.soundCombo.configure(values=[NO_CHIP], state="disabled")
+            self.poolSoundVar.set(NO_CHIP)
+            self.soundTip.text = ("Sounds belong to a chip: choose a Tier for this\n"
+                                  "pool, after setting the tiers up with Tiers...")
             return
 
-        names = [BY_INSTRUMENT] + list(export.TARGETS[key].SOUNDS)
+        self.soundTip.text = ("The sound this pool's voices play on export: one from\n"
+                              "its chip's library, or one chosen for each part from\n"
+                              "its GM instrument")
+
+        chip = self.plan.tierOf(pool.tier).chip
+        sounds = next(c.sounds for c in export.TARGETS[key].CHIPS if c.name == chip)
+        names = [BY_INSTRUMENT] + list(sounds)
         chosen = self.planTargets.get(key, {}).get("sounds", {}).get(pool.name, BY_INSTRUMENT)
         self.soundCombo.configure(values=names, state="readonly")
         self.poolSoundVar.set(chosen if chosen in names else BY_INSTRUMENT)
@@ -2995,9 +5587,8 @@ class MidiEditorApp(tk.Tk):
             message: status bar text.
         """
         self._markDirty()
-        self._invalidateDemand()
+        self._invalidateDemand((0, 0))
         self.redraw()
-        self._fillEvents()
         self._updateSummary()
         self._setStatus(message)
         self._liveUpdate()
@@ -3173,6 +5764,9 @@ class MidiEditorApp(tk.Tk):
         # else moves. The original geometry of every selected note is kept
         # so onDrag applies the offset from the press point each time rather
         # than accumulating rounded steps.
+        # The sweep is settled before the notes move, so the one after the
+        # drag can start from it.
+        self._ensureSongDemand()
         item = self.noteToItem[id(note)]
         x2 = self.canvas.coords(item)[2]
         mode = "resize" if x2 - x <= 5 else "move"
@@ -3245,10 +5839,12 @@ class MidiEditorApp(tk.Tk):
         # grows when notes were dragged past the end, so the scrollregion and
         # ruler follow on the next redraw.
         if self.drag and self.drag["moved"]:
+            spans = list(self.drag["orig"].values()) + [(n.start, n.end) for n in self.selection]
             self._markDirty()
-            self._invalidateDemand()
+            self._invalidateDemand((min(sp[0] for sp in spans), max(sp[1] for sp in spans)))
             self.song.maxTick = max(self.song.maxTick,
                                      max((n.end for n in self.selection), default=0))
+            self._refreshInspector()
             n = len(self.selection)
             verb = "Resized" if self.drag["mode"] == "resize" else "Moved"
             self._setStatus(f"{verb} {n} note{'s' if n != 1 else ''}")
@@ -3266,17 +5862,13 @@ class MidiEditorApp(tk.Tk):
         if self._noteAt(x, y):
             return
 
-        # The start snaps down to the grid; the length is one grid step, or a
-        # sixteenth note when snapping is off.
+        # The note fills the slot the pointer has lit.
         tick, pitch = self._posToTickPitch(x, y)
-        snap = self._snapTicks()
-        start = (tick // snap) * snap
-        length = snap if snap > 1 else self.song.mf.division // 4
-        note = self.song.addNote(self.activeChannel, pitch, 100,
-                                  start, start + length)
+        start, end = self._newNoteSpan(tick)
+        note = self.song.addNote(self.activeChannel, pitch, 100, start, end)
         self.selection = {note}
         self._markDirty()
-        self._invalidateDemand()
+        self._invalidateDemand((start, end))
         self.redraw()
         self._describeNote(note)
 
@@ -3315,12 +5907,13 @@ class MidiEditorApp(tk.Tk):
         menu.tk_popup(event.x_root, event.y_root)
 
     def onMotion(self, event):
-        """Track the pointer in the status bar as musical time and pitch.
+        """Track the pointer: light its bar and note, and report it in the status bar.
 
         Args:
             event: `x` and `y`, the pointer position.
         """
         x, y = self._eventPos(event)
+        self._hover(x, y)
         tick, pitch = self._posToTickPitch(x, y)
         bar, beat = self.song.barBeat(tick)
         secs = self.song.tickToSeconds(tick)
@@ -3338,6 +5931,196 @@ class MidiEditorApp(tk.Tk):
                     else gm.noteName(pitch))
             self._setStatus(f"{where}  {name}")
 
+    def _gridSpans(self, tick: float) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Find the bar and the beat of the roll's grid that hold a tick.
+
+        The grid draws its bars and beats from the first time signature, and
+        so does this, so the spans match the lines on the roll.
+
+        Args:
+            tick: a position on the roll.
+
+        Returns:
+            tuple[tuple[int, int], tuple[int, int]]: the bar and the beat,
+            each as its first tick and the first tick after it.
+        """
+        num, den = self.song.timeSigs[0][1], self.song.timeSigs[0][2]
+        beat = self.song.mf.division * 4 // den
+        bar = beat * num
+        barStart = int(tick // bar) * bar
+        beatStart = int(tick // beat) * beat
+        spans = ((barStart, barStart + bar), (beatStart, beatStart + beat))
+        return spans
+
+    def _newNoteSpan(self, tick: float) -> tuple[int, int]:
+        """Find where a note added at a tick would lie.
+
+        The start snaps down to the grid; the length is one grid step, or a
+        sixteenth note when snapping is off.
+
+        Args:
+            tick: the position of the click.
+
+        Returns:
+            tuple[int, int]: the note's start and end ticks.
+        """
+        snap = self._snapTicks()
+        start = int(tick // snap) * snap
+        length = snap if snap > 1 else self.song.mf.division // 4
+        span = (start, start + length)
+        return span
+
+    def _hover(self, x: float, y: float):
+        """Light the bar, beat and note slot under the pointer, and the note under it.
+
+        Each level is a step lighter than the one around it: the bar, the
+        beat within it, and the slot a double-click would fill, at the
+        pointer's pitch. Each is repainted only when the pointer leaves it.
+        The note is lit by mixing its fill towards white, and given its own
+        fill back when the pointer leaves it.
+
+        Args:
+            x: canvas x coordinate.
+            y: canvas y coordinate.
+        """
+        tick, pitch = self._posToTickPitch(x, y)
+        bar, beat = self._gridSpans(tick)
+        cell = (*self._newNoteSpan(tick), pitch)
+
+        if bar != self._hoverBar:
+            self._hoverBar = bar
+            self._paintHover("bar")
+
+        if beat != self._hoverBeat:
+            self._hoverBeat = beat
+            self._paintHover("beat")
+
+        if cell != self._hoverCell:
+            self._hoverCell = cell
+            self._paintHover("cell")
+
+        # The topmost note item under the pointer: with the reduction on, a
+        # sounding segment lies over its stippled ghost.
+        items = [i for i in self.canvas.find_overlapping(x, y, x, y) if i in self.itemToNote]
+        item = items[-1] if items else None
+        lit = self._hoverItem[0] if self._hoverItem else None
+
+        if item != lit:
+            self._unhoverNote()
+
+            if item is not None:
+                fill = self.canvas.itemcget(item, "fill")
+                self._hoverItem = (item, fill)
+                self.canvas.itemconfigure(item, fill=theme.mix(fill, "#ffffff", NOTE_HOVER_MIX))
+
+    def _unhoverNote(self):
+        """Give the lit note its own fill back."""
+        if self._hoverItem is not None:
+            item, fill = self._hoverItem
+            self._hoverItem = None
+
+            if item in self.itemToNote:
+                self.canvas.itemconfigure(item, fill=fill)
+
+    def _clearHover(self, _event=None):
+        """The pointer left the roll: take down the lit bar, beat, slot and note.
+
+        Args:
+            _event: the <Leave> event; unused.
+        """
+        self._hoverBar = self._hoverBeat = self._hoverCell = None
+        self._unhoverNote()
+
+        for level in HOVER_LEVELS:
+            self._paintHover(level)
+
+    def _paintHover(self, level: str):
+        """Draw one level of the lit area under the pointer, or clear it.
+
+        Tk canvases have no alpha, so each level is opaque and a few percent
+        lighter than what it covers. The bar and the beat are a lighter
+        base under everything, the beat's over the bar's, and lighter pieces
+        of the black-key rows over their own shading; the slot is one cell
+        over all of those. The lines and the notes stay on top. The bar is
+        lit on the ruler too.
+
+        Args:
+            level: "bar", "beat" or "cell".
+        """
+        c = self.canvas
+        tag = f"hover{level.title()}"
+        c.delete(tag)
+
+        if level == "bar":
+            self.ruler.delete(tag)
+
+        span = {"bar": self._hoverBar, "beat": self._hoverBeat, "cell": self._hoverCell}[level]
+
+        if span is None:
+            return
+
+        x0, x1 = span[0] * self.ppt, span[1] * self.ppt
+
+        # The slot: one cell at the pitch, in the tone of its row.
+        if level == "cell":
+            pitch = span[2]
+            y = (127 - pitch) * self.rowH
+            fill = theme.ROLL["hoverCellRow" if pitch % 12 in BLACK_KEYS else "hoverCell"]
+            c.create_rectangle(x0, y, x1, y + self.rowH, fill=fill, outline="", tags=tag)
+
+        # The bar or the beat: a column of the base tone, and the
+        # black-key rows across it in the row tone.
+        else:
+            c.create_rectangle(x0, 0, x1, 128 * self.rowH, fill=theme.ROLL[tag],
+                               outline="", tags=(tag, f"{tag}Base"))
+
+            for pitch in range(128):
+                if pitch % 12 in BLACK_KEYS:
+                    y = (127 - pitch) * self.rowH
+                    c.create_rectangle(x0, y, x1, y + self.rowH,
+                                       fill=theme.ROLL[f"{tag}Row"], outline="",
+                                       tags=(tag, f"{tag}Row"))
+
+        if level == "bar":
+            band = self.ruler.create_rectangle(x0, 0, x1, self.rulerRows[4],
+                                               fill=theme.ROLL["hoverRuler"], outline="",
+                                               tags=tag)
+            self.ruler.tag_lower(band)
+
+        # Stack the new level, from bottom to top: the bar's base, the
+        # beat's base, the row shading, the bar's rows, the beat's rows, the
+        # slot, then the lines and the notes. A raise puts the items just
+        # over the named ones, so the levels already there keep their order.
+        if level == "bar":
+            c.tag_lower("hoverBarBase")
+            self._raiseOver("hoverBarRow", "rowShade")
+        elif level == "beat":
+            if not self._raiseOver("hoverBeatBase", "hoverBarBase"):
+                c.tag_lower("hoverBeatBase")
+
+            self._raiseOver("hoverBeatRow", "hoverBarRow", "rowShade")
+        else:
+            self._raiseOver("hoverCell", "hoverBeatRow", "hoverBarRow", "rowShade")
+
+    def _raiseOver(self, tag: str, *under: str) -> bool:
+        """Raise a tag's items just over the first of some other tags on the roll.
+
+        Args:
+            tag: the items to move.
+            under: tags to try, in order.
+
+        Returns:
+            bool: True when one of `under` was on the roll to raise over.
+        """
+        c = self.canvas
+        found = next((t for t in under if c.find_withtag(t)), None)
+
+        if found is not None and c.find_withtag(tag):
+            c.tag_raise(tag, found)
+
+        raised = found is not None
+        return raised
+
     def _describeNote(self, note: model.Note, prefix: str = ""):
         """Show a note's pitch, velocity, channel, ticks and track in the
         status bar.
@@ -3350,8 +6133,7 @@ class MidiEditorApp(tk.Tk):
                  else gm.noteName(note.pitch))
         info = self.song.channels.get(note.channel)
         inst = info.instrument if info else "?"
-        weight = (f" | weight {self._ensureWeights()[id(note)]:.2f}"
-                  if self.shadeVar.get() else "")
+        weight = f" | weight {self._noteWeight(note):.2f}" if self.shadeVar.get() else ""
         self._setStatus(
             f"{prefix}{pname} vel {note.velocity} | ch {note.channel + 1} ({inst}) | "
             f"tick {note.start}-{note.end} ({note.length}) | track {note.track}{weight}")
@@ -3400,10 +6182,12 @@ class MidiEditorApp(tk.Tk):
             return
 
         n = len(self.selection)
+        span = (min(note.start for note in self.selection),
+                max(note.end for note in self.selection))
         self.song.deleteNotes(list(self.selection))
         self.selection.clear()
         self._markDirty()
-        self._invalidateDemand()
+        self._invalidateDemand(span)
         self.redraw()
         self._setStatus(f"Deleted {n} note{'s' if n != 1 else ''}")
 
@@ -3419,6 +6203,118 @@ class MidiEditorApp(tk.Tk):
         self.song.dirty = True
         self._refreshAll()
         self._setStatus(message)
+
+    def _freeChannel(self, drums: bool) -> int | None:
+        """Find the channel a new part would take.
+
+        Args:
+            drums: the drum channel, for a drum part.
+
+        Returns:
+            int | None: the drum channel or the lowest other unused channel,
+            or None when it is taken.
+        """
+        if drums:
+            free = [model.DRUM_CHANNEL]
+        else:
+            free = [ch for ch in range(16) if ch != model.DRUM_CHANNEL]
+
+        channel = next((ch for ch in free if ch not in self.song.channels), None)
+        return channel
+
+    def addChannel(self, drums: bool = False):
+        """Start a channel on the lowest free one, or on the drum channel, and make it active.
+
+        It plays Acoustic Grand Piano, or the standard kit on the drum
+        channel, from a program change at tick 0, and joins the pool the
+        Reduce panel has selected.
+
+        Args:
+            drums: start the drum channel.
+        """
+        ch = self._freeChannel(drums)
+
+        if ch is None:
+            self._setStatus("Ch 10 is in use" if drums else "Every channel is in use")
+            return
+
+        self.song.addChannel(ch)
+
+        if self.editPool is not None:
+            self.editPool.channels = sorted(self.editPool.channels + [ch])
+
+        self.activeChannel = ch
+        self._channelsAltered(f"Added Ch {ch + 1} {self.song.channels[ch].instrument}")
+
+    def deleteChannel(self):
+        """Delete the active channel and every event on it, once confirmed.
+
+        The channel leaves its pool and loses its priority and release; the
+        next channel up becomes active, or the last one left.
+        """
+        ch = self.activeChannel
+        info = self.song.channels.get(ch)
+
+        if info is None:
+            return
+
+        notes = f"its {info.noteCount} note{'s' if info.noteCount != 1 else ''}"
+
+        if not messagebox.askyesno("Delete channel",
+                                   f"Delete Ch {ch + 1} {info.instrument} and {notes}?\n"
+                                   "The file on disk is not changed until it is saved.",
+                                   parent=self):
+            return
+
+        removed = self.song.removeChannel(ch)
+        self.selection.clear()
+
+        # The plan and the row variables forget the channel.
+        for pool in self.plan.pools:
+            if ch in pool.channels:
+                pool.channels.remove(ch)
+
+        self.plan.priority.pop(ch, None)
+        self.plan.release.pop(ch, None)
+
+        for table in (self.muteVars, self.soloVars, self.poolVars, self.priorityVars,
+                      self.releaseVars):
+            table.pop(ch, None)
+
+        remaining = sorted(self.song.channels)
+        self.activeChannel = next((c for c in remaining if c > ch),
+                                  remaining[-1] if remaining else 0)
+        self._channelsAltered(f"Deleted Ch {ch + 1} {info.instrument} and "
+                              f"{removed} note{'s' if removed != 1 else ''}")
+
+    def _channelsAltered(self, message: str):
+        """Bring every view up to date after a channel was added or deleted.
+
+        Args:
+            message: shown in the status bar.
+        """
+        self._markDirty()
+        self._invalidateDemand()
+        self._buildChannelRows()
+        self._syncCardsToPlan()
+        self._loadPoolControls()
+        self.redraw()
+        self._updateSummary()
+        self._refreshInspector()
+        self._refreshChannelCommands()
+        self._liveUpdate()
+        self._setStatus(message)
+
+    def _refreshChannelCommands(self):
+        """Enable adding a channel while one is free and deleting one while any exists."""
+        free = "normal" if self._freeChannel(False) is not None else "disabled"
+        drums = "normal" if self._freeChannel(True) is not None else "disabled"
+        used = "normal" if self.song.channels else "disabled"
+        self.addChannelBtn.configure(state=free)
+        self.removeChannelBtn.configure(state=used)
+        self.editMenu.entryconfigure("Add Channel", state=free)
+        self.editMenu.entryconfigure("Add Drum Channel", state=drums)
+        self.editMenu.entryconfigure("Delete Channel...", state=used)
 
     def splitChannelDialog(self):
         """Ask for a part count and split the active channel into parts.
@@ -3586,11 +6482,55 @@ class MidiEditorApp(tk.Tk):
         self.playStart = time.monotonic()
         return True
 
+    def _showReadout(self, seconds: float, speed: float = 1.0):
+        """Show a position on the toolbar readout: time, bar and beat, and tempo.
+
+        Args:
+            seconds: song time of the position.
+            speed: playback speed factor, which scales the tempo shown.
+        """
+        tick = self.song.secondsToTick(seconds)
+        bar, beat = self.song.barBeat(tick)
+        bpm = self.song.tempoAt(tick) * speed
+        self.timeLbl.config(text=f"{int(seconds) // 60}:{seconds % 60:05.2f}")
+        self.posLbl.config(text=f"bar {bar}:{beat}   {TEMPO_GLYPH}={bpm:.0f}")
+
     def _speedChanged(self):
-        """Speed slider moved: update its label and restart the synth if
+        """Tempo slider moved: update its label and restart the synth if
         playing."""
         self.speedLbl.config(text=f"{self.speedVar.get()}%")
         self._liveUpdate()
+
+    def _resetTempo(self, _event=None) -> str:
+        """Put the playback tempo back to 100%.
+
+        Args:
+            _event: the double click; unused.
+
+        Returns:
+            str: "break", so the scale's own press does not step it on.
+        """
+        self.speedVar.set(100)
+        self._speedChanged()
+        return "break"
+
+    def _masterChanged(self):
+        """Master volume slider moved: update its figure and restart the synth if playing."""
+        self.volLbl.config(text=f"{self.masterVar.get()}%")
+        self._liveUpdate()
+
+    def _resetVolume(self, _event=None) -> str:
+        """Put the master volume back to 100%.
+
+        Args:
+            _event: the double click; unused.
+
+        Returns:
+            str: "break", so the scale's own press does not step it on.
+        """
+        self.masterVar.set(100)
+        self._masterChanged()
+        return "break"
 
     def _liveUpdate(self, delay: int = 300):
         """Restart the synth at the current position after a live change.
@@ -3638,7 +6578,7 @@ class MidiEditorApp(tk.Tk):
         self.playStart = None
         self.playOffset = 0.0
         self.playBtn.config(text=f"{PLAY_GLYPH} Play")
-        self.posLbl.config(text="")
+        self._showReadout(0.0)
 
         if self.cursorItem:
             self.canvas.delete(self.cursorItem)
@@ -3672,11 +6612,7 @@ class MidiEditorApp(tk.Tk):
         # scaled by the playback speed.
         tick = self.song.secondsToTick(elapsed)
         x = tick * self.ppt
-        bar, beat = self.song.barBeat(tick)
-        bpm = self.song.tempoAt(tick) * self.playSpeed
-        self.posLbl.config(text=(
-            f"{int(elapsed) // 60}:{elapsed % 60:04.1f} "
-            f"bar {bar}:{beat} {TEMPO_GLYPH}={bpm:.0f}"))
+        self._showReadout(elapsed, self.playSpeed)
 
         # The cursor line is created on the first tick after a redraw and
         # moved on every tick after that.
@@ -3684,7 +6620,7 @@ class MidiEditorApp(tk.Tk):
             self.canvas.coords(self.cursorItem, x, 0, x, 128 * self.rowH)
         else:
             self.cursorItem = self.canvas.create_line(
-                x, 0, x, 128 * self.rowH, fill="#ffffff", width=1)
+                x, 0, x, 128 * self.rowH, fill=self.palette["accent"], width=2)
 
         # The strip is a viewport, so its cursor sits at the roll's x less
         # the scroll offset; the strip's own redraw forgets it, and it is
@@ -3696,7 +6632,7 @@ class MidiEditorApp(tk.Tk):
             self.demandCanvas.coords(self.demandCursorItem, stripX, 0, stripX, stripH)
         else:
             self.demandCursorItem = self.demandCanvas.create_line(
-                stripX, 0, stripX, stripH, fill="#ffffff", width=1)
+                stripX, 0, stripX, stripH, fill=self.palette["accent"], width=2)
 
         # keep the cursor on screen: once it leaves the visible span, scroll
         # so it sits 40 px in from the left edge
@@ -3713,12 +6649,16 @@ class MidiEditorApp(tk.Tk):
     def _fillEvents(self):
         """Refill the Events tab with every event of every track in tick order.
 
+        `_showEventsIfSelected` calls it when the page is on view and out of
+        date, so a file opens without filling a page no one is looking at.
+
         The list is capped at MAX_EVENT_ROWS, with a final row saying how
         many events were left out, to keep the Treeview responsive on large
         files.
         """
         tree = self.evTree
         tree.delete(*tree.get_children())
+        self._eventsStale = False
         s = self.song
         rows = []
 
@@ -3744,6 +6684,7 @@ class MidiEditorApp(tk.Tk):
             tree.insert("", "end", values=(
                 "", "", "", "", "", "...",
                 f"{len(rows) - MAX_EVENT_ROWS} more events not shown"))
+
 
     @staticmethod
     def _evType(e: smf.Event) -> str:

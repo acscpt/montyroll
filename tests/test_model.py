@@ -292,6 +292,73 @@ class TestEdits:
         assert fresh.path is None
 
 
+class TestChannels:
+    """Starting a channel and removing one."""
+
+    def testAddChannelGetsANamedTrack(self, song: model.Song) -> None:
+        """A new channel's program change goes on a track of its own, named after it."""
+        notes = list(song.notes)
+        tracks = len(song.mf.tracks)
+        song.addChannel(3, 40)
+        assert song.channels[3].program == 40
+        assert song.channels[3].instrument == "Violin"
+        assert len(song.mf.tracks) == tracks + 1
+        name, change = song.mf.tracks[-1]
+        assert (name.metaType, bytes(name.data)) == (smf.META_TRACK_NAME, b"Violin")
+        assert (change.tick, change.status, bytes(change.data)) == (0, 0xC3, bytes([40]))
+        assert song.trackNames[-1] == "Violin"
+        assert song.channels[3].tracks == {tracks}
+        assert song.notes == notes and song.dirty
+
+    def testAddChannelRefusesOneInUse(self, song: model.Song) -> None:
+        """A channel already in use cannot be started again."""
+        with pytest.raises(ValueError):
+            song.addChannel(0)
+
+    def testAddChannelToFormatZero(self) -> None:
+        """A format 0 file keeps its one track, which takes the program change."""
+        tempo = smf.Event(0, smf.META, bytearray((500_000).to_bytes(3, "big")), smf.META_TEMPO)
+        fresh = model.Song(smf.MidiFile(format=0, division=DIVISION, tracks=[[tempo]]))
+        fresh.addChannel(2, 5)
+        assert len(fresh.mf.tracks) == 1
+        assert any(e.status == 0xC2 and e.data[0] == 5 for e in fresh.mf.tracks[0])
+        assert fresh.channels[2].tracks == {0}
+
+    def testAddedChannelSurvivesSaveAndReload(self, song: model.Song, tmp_path: Path) -> None:
+        """A new channel with no notes yet comes back from disk with its instrument."""
+        song.addChannel(3, 40)
+        out = tmp_path / "added.mid"
+        song.save(str(out))
+        reloaded = model.Song.load(str(out))
+        assert reloaded.channels[3].program == 40
+        assert reloaded.trackNames[-1] == "Violin"
+
+    def testRemoveChannelDropsItsEventsAndEmptiedTracks(self, song: model.Song) -> None:
+        """Every event on the channel goes, and so do the tracks it alone filled."""
+        count = sum(1 for n in song.notes if n.channel == 1)
+        assert song.removeChannel(1) == count
+        assert 1 not in song.channels
+        assert all(e.channel != 1 for track in song.mf.tracks for e in track)
+        assert song.trackNames == ["Conductor", "Piano", "Drums", "Extras"]
+        assert all(n.channel != 1 for n in song.notes) and song.dirty
+
+    def testRemoveChannelKeepsATrackWithOtherEvents(self, song: model.Song) -> None:
+        """A track that carries other events keeps them and stays."""
+        tracks = len(song.mf.tracks)
+        assert song.removeChannel(2) == 0
+        assert 2 not in song.channels
+        assert len(song.mf.tracks) == tracks
+        assert any(e.status == smf.SYSEX for e in song.mf.tracks[-1])
+
+    def testRemovingTheLastChannelKeepsATrack(self) -> None:
+        """The file keeps one track when its only channel goes."""
+        track = [smf.Event(0, smf.META, bytearray(b"Solo"), smf.META_TRACK_NAME),
+                 smf.Event(0, 0x90, bytearray([60, 100])), smf.Event(480, 0x80, bytearray([60, 0]))]
+        fresh = model.Song(smf.MidiFile(format=0, division=DIVISION, tracks=[track]))
+        assert fresh.removeChannel(0) == 1
+        assert len(fresh.mf.tracks) == 1 and fresh.notes == []
+
+
 class TestBuildSlice:
     """Playback copies that start mid-song."""
 

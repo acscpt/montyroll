@@ -15,7 +15,7 @@ MontyRoll is written in Python and uses the standard library alone, with tkinter
 
 The [documentation](https://github.com/acscpt/montyroll/blob/develop/docs/README.md) starts with a quick start on the demo file and goes on to every control, the plan file, and the Commander X16 export.
 
-<a href="docs/images/demo-reduced.png"><img src="docs/images/demo-reduced.png" width="600" alt="The demo file reduced to four voices: dropped notes stippled on the roll, and the strip level with the budget line"></a> <a href="docs/images/events-tab.png"><img src="docs/images/events-tab.png" width="600" alt="The Events tab listing every event in the demo file, decoded"></a>
+<a href="docs/images/demo-reduced.png"><img src="docs/images/demo-reduced.png" width="600" alt="The demo file reduced to four voices: dropped notes stippled on the roll, and the strip level with the budget line"></a> <a href="docs/images/events-tab.png"><img src="docs/images/events-tab.png" width="600" alt="The drawer under the roll open on the Events page, listing every event in the demo file, decoded"></a>
 
 ## Requirements
 
@@ -58,17 +58,17 @@ The demo is an original arrangement of Chopsticks (Euphemia Allen, 1877, public 
 
 **Reading a file**
 
-The piano roll draws every note in the colour of its channel, shaded by velocity, against a bar and beat grid with a piano keyboard down the side. Above the roll, a four-row ruler gives the time in seconds, the bar numbers, the tempo changes and markers of the file, and the chord in each beat, merged into runs. A file can hold any number of tempo changes, and the seconds row stretches and compresses against the bars to follow them. Beside the roll, a card for each channel gives its instrument, its note count, its pitch range, its instrument family, and whether it uses pitch bend. The status bar follows the pointer in musical time and names the chord and the note or drum sound under it.
+The piano roll draws every note in the colour of its channel, shaded by velocity, against a bar and beat grid with a piano keyboard down the side. Above the roll, a four-row ruler gives the time in seconds, the bar numbers, the tempo changes and markers of the file, and the chord in each beat, merged into runs. A file can hold any number of tempo changes, and the seconds row stretches and compresses against the bars to follow them. Beside the roll, a row for each channel gives its instrument, its mute and solo, and its volume, and the active row adds its note count, its pitch range, its instrument family, and whether it uses pitch bend. The inspector on the right describes the active channel and the selected note, and folds away to give the roll its width. The status bar follows the pointer in musical time and names the chord and the note or drum sound under it.
 
-Under the roll, the voice-demand strip stacks the sounding notes of each channel in the colours of the roll. Two lines over the stack count the distinct pitches, so that a unison counts once, and the distinct pitch classes, so that an octave doubling counts once too. The **Events** tab lists every event decoded, with its tick, its time, and its bar and beat. The **Report** tab gives the analysis as text, including the key, how many instruments play at once, and which channels rarely play together.
+Under the roll, the voice-demand strip stacks the sounding notes of each channel in the colours of the roll. Two lines over the stack count the distinct pitches, so that a unison counts once, and the distinct pitch classes, so that an octave doubling counts once too. The strip can show each note's velocity or reduction weight in place of the demand. A drawer under the roll holds two more pages: **Events** lists every event decoded, with its tick, its time, and its bar and beat, and **Report** gives the analysis as text, including the key, how many instruments play at once, and which channels rarely play together.
 
 **Editing**
 
-Notes are added, moved, resized, and deleted with the mouse, on a grid from whole notes down to 1/32 or with no grid at all. A selection can be given one velocity. Each channel card changes the instrument and the volume of its channel. The tempo can be set from any bar, a tempo change removed, or every tempo in the file scaled by a percentage. A save writes the original tracks back, so any event the editor does not understand is written back unchanged.
+Notes are added, moved, resized, and deleted with the mouse, on a grid from whole notes down to 1/32 or with no grid at all. A selection can be given one velocity. The inspector changes the instrument of the active channel, and each row changes the volume of its own. The tempo can be set from any bar, a tempo change removed, or every tempo in the file scaled by a percentage. A save writes the original tracks back, so any event the editor does not understand is written back unchanged.
 
 **Playing**
 
-**Play** or `Space` plays the file through the synth, with a cursor that follows the tempo map and scrolls the roll. Each channel has a mute and a solo, and its instrument can be previewed in the pitch range of that channel. Master volume and playback speed (25-300%) change what is heard and leave the file as it is. A change to any of these during playback takes effect from the cursor.
+**Play** or `Space` plays the file through the synth, with a cursor that follows the tempo map and scrolls the roll. Each channel has a mute and a solo, and its instrument can be previewed in the pitch range of that channel. The master volume and the playback tempo (25-300%) change what is heard and leave the file as it is. A change to any of these during playback takes effect from the cursor.
 
 **Reducing**
 
@@ -78,7 +78,7 @@ Pools divide the channels into groups that share voices. Tiers describe the chip
 
 **Arranging**
 
-Three commands on the **Edit** menu add parts to an arrangement that has voices to spare. **Split Channel into Parts...** gives each part of a channel a channel of its own. **Double Channel...** copies a channel onto a free channel at an interval, and **Echo Channel...** copies it after a delay.
+Three commands on the **Edit** menu add parts to an arrangement that has voices to spare. **Split Channel into Parts...** gives each part of a channel a channel of its own. **Double Channel...** copies a channel onto a free channel at an interval, and **Echo Channel...** copies it after a delay. **+** at the head of the channel strip starts an empty part on a free channel, and **-** deletes the active channel.
 
 **Exporting**
 

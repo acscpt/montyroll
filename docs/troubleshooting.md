@@ -25,7 +25,7 @@ In most cases the message names the cause on its own. The entries here match eac
 | [The exported music distorts](#the-exported-music-distorts) | Many voices at full level |
 | [Exported notes end with a click](#exported-notes-end-with-a-click) | A voice was taken during its release |
 | [The toolbar is cut off](#the-toolbar-is-cut-off) | The toolbar is wider than the window at a high display scale |
-| [The Events tab stops at 8000 events](#the-events-tab-stops-at-8000-events) | The tab lists the first 8000 events of a large file |
+| [The Events page stops at 8000 events](#the-events-page-stops-at-8000-events) | The page lists the first 8000 events of a large file |
 
 ## Start-up
 
@@ -129,17 +129,17 @@ If `aplaymidi` is the one program installed, add `timidity`. `aplaymidi` sends n
 
 ### Playback pauses when a control moves
 
-The pause is expected. A synth plays a file from its first event, so to apply a change MontyRoll starts the synth again from the cursor. A mute, a solo, a volume, and the speed all restart it. The restart comes about a third of a second after the control stops moving, which lets a dragged slider settle first.
+The pause is expected. A synth plays a file from its first event, so to apply a change MontyRoll starts the synth again from the cursor. A mute, a solo, a volume, and the playback tempo all restart it. The restart comes about a third of a second after the control stops moving, which lets a dragged slider settle first.
 
 [^ Index](#index)
 
 ### One channel is silent
 
-Three controls can silence a channel, and all three are on the channel cards.
+Three controls can silence a channel, and all three are on the channel rows.
 
-The first is **M** on the card of the channel itself. A ticked **M** mutes the channel, and its notes are dimmed on the roll. The second is **S** on any other card. A ticked **S** plays the soloed channels alone, which silences every channel that is left unsoloed. **Clear** at the head of the strip resets every mute and solo in one click.
+The first is the speaker on the row of the channel itself. With the speaker on, drawn solid, the channel is muted, and its notes are dimmed on the roll. The second is the headphones on any other row. With the headphones on, the soloed channels play alone, which silences every channel that is left unsoloed. **Clear** at the head of the strip resets every mute and solo in one click.
 
-The third is the volume slider on the card. With the slider at the far left the channel plays at volume zero, and a drag to the right brings it back.
+The third is the volume slider on the row. With the slider at the far left the channel plays at volume zero, and a drag to the right brings it back.
 
 [^ Index](#index)
 
@@ -151,7 +151,7 @@ Error message: the result label reads `plan refused`, as in `plan refused: tier 
 
 The pools of one tier ask for more voices than the tier has.
 
-There are two ways out. Select a pool on that tier and lower its **Voices** until the pools fit. Or open **Tiers...** and lower **Reserved** on the tier, which gives its pools more voices to share.
+There are two ways out. Lower the voices of a pool on that tier in the pools table until the pools fit. Or open **Tiers...** and lower **Reserved** on the tier, which gives its pools more voices to share.
 
 [^ Index](#index)
 
@@ -159,13 +159,13 @@ There are two ways out. Select a pool on that tier and lower its **Voices** unti
 
 The result label counts many `no voice` drops. Each one is a note that found every voice of its pool busy with a note that weighs more. Five changes lower the count, in order of cost to the music.
 
-1. Raise **Voices** on the pool, up to what its tier has.
+1. Raise the pool's voices in the pools table, up to what its tier has.
 
-2. Tick **Fold octaves** on the pool.
+2. Turn on **Octaves** on the pool, which folds octave doublings.
 
 3. Move a channel to a pool with voices to spare.
 
-4. Raise **Pri** on the card of the channel that must stay whole.
+4. Raise **Pri** under the row of the channel that must stay whole.
 
 5. Lower **Release ms** on the tier, so that each voice is free sooner.
 
@@ -175,7 +175,7 @@ The result label counts many `no voice` drops. Each one is a note that found eve
 
 Error message: an export dialog with `has no tier, so its voices have no chip`.
 
-The export places each pool on the chip of its tier, so every pool needs one. Open **Tiers...** on the Reduce panel, click the preset for the machine, and close the dialog with **OK**. The tiers of the machine are now in the plan. Then select the pool in the **Pool** box and set its **Tier** to one of them.
+The export places each pool on the chip of its tier, so every pool needs one. Open **Tiers...** on the Reduce panel, click the preset for the machine, and close the dialog with **OK**. The tiers of the machine are now in the plan. Then click the pool in the pools table and set its **Tier** to one of them.
 
 [^ Index](#index)
 
@@ -183,7 +183,7 @@ The export places each pool on the chip of its tier, so every pool needs one. Op
 
 Error message: a `Split channel` dialog with `has no notes to split`.
 
-The split works on the active channel, which is the card clicked last. Click the card of the channel to split, then choose **Edit > Split Channel into Parts...** again.
+The split works on the active channel, which is the row clicked last. Click the row of the channel to split, then choose **Edit > Split Channel into Parts...** again.
 
 [^ Index](#index)
 
@@ -203,7 +203,7 @@ Loud passages distort on the target. Many voices at full level add up past the r
 
 ### Exported notes end with a click
 
-A voice was taken while its last note was still in its release, and the result label counts each case under `tails clipped`. Raise **Release ms** on the tier, or raise **Rel** on the card of the channel, so that the allocator holds each voice for longer.
+A voice was taken while its last note was still in its release, and the result label counts each case under `tails clipped`. Raise **Release ms** on the tier, or raise **Rel** under the row of the channel, so that the allocator holds each voice for longer.
 
 [^ Index](#index)
 
@@ -211,12 +211,12 @@ A voice was taken while its last note was still in its release, and the result l
 
 ### The toolbar is cut off
 
-At a high display scale the toolbar is wider than the window, and the summary of the file at its right end is clipped. Widen the window or maximise it.
+At a high display scale the toolbar can be wider than the window, and the zoom buttons at its right end are clipped. The file summary has a line of its own under the toolbar and stays whole. Widen the window or maximise it.
 
 [^ Index](#index)
 
-### The Events tab stops at 8000 events
+### The Events page stops at 8000 events
 
-The tab ends with a row that reads `N more events not shown`. It lists the first 8000 events of a large file. The song holds every event, and a save writes them all.
+The page ends with a row that reads `N more events not shown`. It lists the first 8000 events of a large file. The song holds every event, and a save writes them all.
 
 [^ Index](#index)

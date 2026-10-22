@@ -39,7 +39,7 @@ cd montyroll
 python3 -m montyroll resources/chopsticks.mid
 ```
 
-The window opens on the demo file, with four channel cards on the left and the piano roll filling the rest. Any other MIDI file opens the same way, with its path in place of the demo. Given no path at all, MontyRoll starts on an empty song.
+The window opens on the demo file, with four channel rows on the left, the piano roll in the middle, and the inspector on the right. Any other MIDI file opens the same way, with its path in place of the demo. Given no path at all, MontyRoll starts on an empty song.
 
 ## Install the release from PyPI
 

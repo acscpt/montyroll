@@ -16,3 +16,4 @@ class Chip:
     capacity: int           # channels
     release: float = 0.0    # default milliseconds a voice stays busy after its note
     reserved: int = 0       # channels a preset keeps for something other than music
+    sounds: tuple[str, ...] = ()  # names a pool on this chip may be given

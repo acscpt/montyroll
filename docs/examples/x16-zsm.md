@@ -34,7 +34,7 @@ cp resources/chopsticks.mid ~/x16-demo/
 python3 -m montyroll ~/x16-demo/chopsticks.mid
 ```
 
-The window opens with four channel cards: Acoustic Grand Piano on Ch 1, Vibraphone on Ch 2, Acoustic Bass on Ch 3, and the drum kit on Ch 10. The right end of the toolbar reads:
+The window opens with four channel rows: Acoustic Grand Piano on Ch 1, Vibraphone on Ch 2, Acoustic Bass on Ch 3, and the drum kit on Ch 10. The right end of the toolbar reads:
 
 ```text
 chopsticks.mid   fmt 1 | 5 trk | 480 tpq | 3/4 | 150 bpm | 371 notes | 38.6s | C major
@@ -56,33 +56,33 @@ The **Tier** box on the Reduce panel now offers `(none)`, `opm`, and `psg`. The 
 
 A pool is a set of channels that share voices, and each pool draws its voices from one tier. The file opens with a single pool, `all`, that holds every channel. A second pool moves the bass onto the PSG.
 
-1. Click **+**. The **Pool** box shows `pool 2`.
+1. Click **+**. A line for `pool 2` appears in the pools table, selected.
 
-2. Type `bass` in the **Pool** box and press Return.
+2. Double-click `pool 2` in the table, type `bass`, and press Return.
 
-3. Set **Voices** to 2.
+3. Set the voices of `bass` in the table to 2.
 
 4. Set **Tier** to `psg`.
 
-5. On the `Ch 3` card, set **Pool** to `bass`.
+5. Click the `Ch 3` row and set **Pool** under it to `bass`.
 
-The line under **Voices** now reads `bass: one channel`.
+**Overlap** on the display under the table now reads `-`, as the pool has a single channel.
 
 ## Put the keyboards on the YM2151
 
 The first pool, `all`, still holds the piano and the vibraphone, and it takes the YM2151. The Commander X16 target plays pitched sounds, so the drum kit leaves the reduction.
 
-1. In the **Pool** box on the Reduce panel, choose `all`.
+1. Click `all` in the pools table on the Reduce panel.
 
 2. Set **Tier** to `opm`.
 
-3. On the `Ch 10` card, set **Pool** to `(none)`.
+3. Click the `Ch 10` row and set **Pool** under it to `(none)`.
 
-Two red dashed lines now cross the strip, one for each tier, labelled `opm 8` and `psg 10`.
+Two red lines now cross the strip, one for each tier, labelled `opm 8` and `psg 10`.
 
 ## Check the reduction
 
-Tick **Reduce to the voice budget**. The result label under the tick box reads:
+Switch on **Reduce to the voice budget**. The result label under the switch reads:
 
 ```text
 kept 340 of 371 notes, 0 cut, 0 tails clipped, loss 673

@@ -15,7 +15,7 @@ cd montyroll
 python3 -m montyroll resources/chopsticks.mid
 ```
 
-The window opens with the channels on the left and the piano roll on the right. Each channel has a card that names its instrument:
+The window opens with the channels on the left, the piano roll in the middle, and the inspector on the right. Each channel has a row that names its instrument:
 
 1. Acoustic Grand Piano on Ch 1
 2. Vibraphone on Ch 2
@@ -28,25 +28,25 @@ Under the roll sits the voice-demand strip. The strip is a stacked view, also co
 
 Note that the stack is low while the piano plays alone and climbs at bar 17 when the rest of the instruments begin to join in.
 
-![The demo file open in MontyRoll: four channel cards, the piano roll from bar 12 to bar 24, and the voice-demand strip rising at bar 17](images/demo-open.png)
+![The demo file open in MontyRoll: four channel rows, the piano roll from bar 12 to bar 24, the voice-demand strip rising at bar 17, and the inspector on the right](images/demo-open.png)
 
-The dashed line along the top of the strip is the voice *budget*, the number of voices that the arrangement is allowed to use. It automatically starts at the peak of the file, which for this file is 8.
+The red line along the top of the strip is the voice *budget*, the number of voices that the arrangement is allowed to use. It automatically starts at the peak of the file, which for this file is 8.
 
 ## Reduce to four voices
 
 The main purpose of MontyRoll is to allow a multi-voice MIDI arrangement to be trimmed to a smaller number of simultaneous voices, which is useful for playback on hardware with a limited set of channels.
 
-Set the desired voice budget via the **Voices** control located just to the left of the demand strip.
+The voice budget is the number under **Voices**, just to the left of the demand strip.
 
-1. Set **Voices** to 4. The budget line drops, and a red wash marks each stretch where the stack rises above it.
+1. Set **Voices** to 4, with the arrows beside the number or by double-clicking it and typing 4. The budget line drops, and a red wash marks each stretch where the stack rises above it.
 
-2. Tick **Reduce to the voice budget** on the Reduce panel, under the channel cards.
+2. Switch on **Reduce to the voice budget** on the Reduce panel, under the channel rows.
 
 The strip now stays at or under the line, and the roll stipples every note that the reduction drops.
 
 ![The demo file reduced to four voices: dropped notes stippled on the roll, and the strip level with the budget line](images/demo-reduced.png)
 
-The result label under the tick box counts what happened:
+The result label under the switch counts what happened:
 
 ```text
 kept 292 of 371 notes, 0 cut, 0 tails clipped, loss 9,328
@@ -57,13 +57,13 @@ The second line gives a reason for each of the 79 dropped notes. The 31 `unison`
 
 ## Hear the result
 
-Press **Play** (or `Space`) to hear the reduction from the first bar. To hear the original again untick **Reduce to the voice budget** and press **Play** to allow easy comparison.
+Press **Play** (or `Space`) to hear the reduction from the first bar. To hear the original again switch off **Reduce to the voice budget** and press **Play** to allow easy comparison.
 
 ## Choose what gives way
 
-Every note is assigned a weight, and at a full budget the note with the least weight gives way. **Pri** on a channel card multiplies the weight of every note on that channel, so it decides which channels keep their notes.
+Every note is assigned a weight, and at a full budget the note with the least weight gives way. **Pri**, under the active channel's row, multiplies the weight of every note on that channel, so it decides which channels keep their notes.
 
-Set **Pri** on the Ch 10 card to 2.0. The label still counts 48 `no voice` drops, as the budget is still four voices, but the drum kit now loses 10 notes where previously it lost 41. The vibraphone gives way in its place, and its stippled notes show on the roll.
+Click the Ch 10 row and set **Pri** under it to 2.0. The label still counts 48 `no voice` drops, as the budget is still four voices, but the drum kit now loses 10 notes where previously it lost 41. The vibraphone gives way in its place, and its stippled notes show on the roll.
 
 ## Where to go next
 

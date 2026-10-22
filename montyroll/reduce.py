@@ -262,6 +262,50 @@ class Reduction:
 
 
 # ---------------------------------------------------------------- weights
+def _score(n: model.Note, context: list[model.Note], plan: Plan) -> float:
+    """Score one note against the notes sounding at its onset.
+
+    Args:
+        n: the note.
+        context: every note sounding at its onset, itself and the notes
+            starting with it included.
+        plan: for the priorities.
+
+    Returns:
+        float: the weight.
+    """
+    tick = n.start
+    sameChannel = [a for a in context if a.channel == n.channel]
+    others = [a for a in context if a.channel != n.channel and a is not n]
+    pitches = sorted(a.pitch for a in sameChannel)
+
+    if len(pitches) == 1 or n.pitch == pitches[-1]:
+        texture = 1.5          # the line, or alone on its channel
+    elif n.pitch == pitches[0]:
+        texture = 1.3
+    else:
+        texture = 1.0
+
+    # A note doubles another when that other started earlier or, starting
+    # together, sits on a lower channel: the first part in the file is the
+    # original and the later one the doubling.
+    originals = [a for a in others if a.channel != model.DRUM_CHANNEL
+                 and (a.start < tick or a.channel < n.channel)]
+
+    if n.channel == model.DRUM_CHANNEL:
+        doubling = 1.0
+    elif any(a.pitch == n.pitch for a in originals):
+        doubling = 0.1
+    elif any(a.pitch % 12 == n.pitch % 12 for a in originals):
+        doubling = 0.5
+    else:
+        doubling = 1.0
+
+    velocity = 0.5 + 0.5 * n.velocity / 127
+    score = plan.priorityOf(n.channel) * velocity * texture * doubling
+    return score
+
+
 def weights(song: model.Song, plan: Plan) -> dict[int, float]:
     """Score every note by what is lost if it is not played.
 
@@ -301,39 +345,33 @@ def weights(song: model.Song, plan: Plan) -> dict[int, float]:
         context = active + group
 
         for n in group:
-            sameChannel = [a for a in context if a.channel == n.channel]
-            others = [a for a in context if a.channel != n.channel and a is not n]
-            pitches = sorted(a.pitch for a in sameChannel)
-
-            if len(pitches) == 1 or n.pitch == pitches[-1]:
-                texture = 1.5          # the line, or alone on its channel
-            elif n.pitch == pitches[0]:
-                texture = 1.3
-            else:
-                texture = 1.0
-
-            # A note doubles another when that other started earlier or,
-            # starting together, sits on a lower channel: the first part in
-            # the file is the original and the later one the doubling.
-            originals = [a for a in others if a.channel != model.DRUM_CHANNEL
-                         and (a.start < tick or a.channel < n.channel)]
-
-            if n.channel == model.DRUM_CHANNEL:
-                doubling = 1.0
-            elif any(a.pitch == n.pitch for a in originals):
-                doubling = 0.1
-            elif any(a.pitch % 12 == n.pitch % 12 for a in originals):
-                doubling = 0.5
-            else:
-                doubling = 1.0
-
-            velocity = 0.5 + 0.5 * n.velocity / 127
-            result[id(n)] = plan.priorityOf(n.channel) * velocity * texture * doubling
+            result[id(n)] = _score(n, context, plan)
 
         active.extend(group)
         i = j
 
     return result
+
+
+def noteWeight(song: model.Song, plan: Plan, note: model.Note) -> float:
+    """Score one note as `weights` scores it, without scoring the rest.
+
+    Its context is every note that starts with it and every earlier note
+    still sounding at its onset, so the figure matches `weights` exactly.
+
+    Args:
+        song: the song.
+        plan: for the priorities.
+        note: the note.
+
+    Returns:
+        float: the weight.
+    """
+    tick = note.start
+    context = [a for a in song.notes
+               if a.start == tick or (a.start < tick and a.end > tick)]
+    score = _score(note, context, plan)
+    return score
 
 
 # ------------------------------------------------------------- transforms
@@ -369,6 +407,7 @@ def dedupUnison(placed: list[Placed], reduction: Reduction) -> list[Placed]:
     """
     byKey: dict[tuple[int, int], Placed] = {}
     survivors: list[Placed] = []
+    beaten: set[int] = set()        # id() of survivors a heavier unison replaced
 
     for p in placed:
         # A drum key is a sound, not a pitch: two parts on one key are two
@@ -384,14 +423,15 @@ def dedupUnison(placed: list[Placed], reduction: Reduction) -> list[Placed]:
             byKey[key] = p
             survivors.append(p)
         elif p.weight > other.weight:
-            survivors.remove(other)
+            beaten.add(id(other))
             reduction.dropped[id(other.note)] = "unison"
             byKey[key] = p
             survivors.append(p)
         else:
             reduction.dropped[id(p.note)] = "unison"
 
-    return survivors
+    kept = [p for p in survivors if id(p) not in beaten]
+    return kept
 
 
 def dedupOctave(placed: list[Placed], reduction: Reduction) -> list[Placed]:
@@ -409,6 +449,7 @@ def dedupOctave(placed: list[Placed], reduction: Reduction) -> list[Placed]:
     """
     byKey: dict[tuple[int, int], Placed] = {}
     survivors: list[Placed] = []
+    beaten: set[int] = set()        # id() of survivors a heavier octave replaced
 
     for p in placed:
         key = (p.start, p.pitch % 12)
@@ -418,14 +459,15 @@ def dedupOctave(placed: list[Placed], reduction: Reduction) -> list[Placed]:
             byKey.setdefault(key, p)
             survivors.append(p)
         elif p.weight > other.weight or (p.weight == other.weight and p.pitch < other.pitch):
-            survivors.remove(other)
+            beaten.add(id(other))
             reduction.dropped[id(other.note)] = "octave"
             byKey[key] = p
             survivors.append(p)
         else:
             reduction.dropped[id(p.note)] = "octave"
 
-    return survivors
+    kept = [p for p in survivors if id(p) not in beaten]
+    return kept
 
 
 def mergeTremolo(placed: list[Placed], gap: int, reduction: Reduction) -> list[Placed]:
@@ -534,8 +576,10 @@ def monoTop(placed: list[Placed], reduction: Reduction) -> list[Placed]:
                     if segment is not None:
                         segment.end = tick
 
+                        # The segment is the last one begun, so it is the
+                        # last in the list.
                         if segment.end <= segment.start:
-                            out.remove(segment)
+                            out.pop()
 
                     current = p
                     segment = Placed(p.note, tick, p.end, p.pitch, p.velocity, p.channel,
@@ -1006,12 +1050,14 @@ def loadPlan(path: str) -> Plan:
 
 
 # ------------------------------------------------------------------ drive
-def reduce(song: model.Song, plan: Plan) -> Reduction:
+def reduce(song: model.Song, plan: Plan, weight: dict[int, float] | None = None) -> Reduction:
     """Apply a plan to a song.
 
     Args:
         song: the song; never modified.
         plan: the tiers, pools and priorities.
+        weight: the notes' `weights` under the plan's priorities, when the
+            caller holds them; scored here when omitted.
 
     Returns:
         Reduction: the result, with voices numbered as one contiguous range
@@ -1022,7 +1068,7 @@ def reduce(song: model.Song, plan: Plan) -> Reduction:
         ValueError: the plan's pools do not fit its tiers.
     """
     plan.validate()
-    weight = weights(song, plan)
+    weight = weight if weight is not None else weights(song, plan)
     reduction = Reduction()
     base = 0
 

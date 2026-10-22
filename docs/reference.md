@@ -12,15 +12,15 @@ The sections run from the outside in: the command line and the keys, then each a
 | [Command line](#command-line) | The one argument, and what an empty song holds |
 | [Environment](#environment) | The two environment variables that MontyRoll reads |
 | [Keyboard and mouse](#keyboard-and-mouse) | Every key and mouse action |
-| [Toolbar](#toolbar) | Playback level, speed, snap, and zoom |
+| [Toolbar](#toolbar) | The transport and readout, the master volume, the playback tempo, snap, zoom, and the file summary |
 | [File menu](#file-menu) | Opening, saving, plans, and exports |
 | [Edit menu](#edit-menu) | Selection, velocity, the arrange commands, and tempo |
-| [Channel strip](#channel-strip) | The controls and the two text lines of a channel card |
-| [Piano Roll tab](#piano-roll-tab) | The four rows of the ruler |
-| [Events tab](#events-tab) | The columns of the event list |
-| [Report tab](#report-tab) | The two reports |
-| [Demand strip](#demand-strip) | What each line and colour of the strip counts |
-| [Reduce panel](#reduce-panel) | The pool controls and the transform switches |
+| [Channel strip](#channel-strip) | The controls of a channel row, and the detail under the active one |
+| [Inspector](#inspector) | The channel and note cards, and the fold |
+| [Piano roll](#piano-roll) | The four rows of the ruler, and how the notes are drawn |
+| [Lanes](#lanes) | The Demand, Velocity, and Weight lanes under the roll |
+| [Drawer](#drawer) | The Events and Report pages under the roll |
+| [Reduce panel](#reduce-panel) | The pool controls and the transform toggles |
 | [Reduction order and drop reasons](#reduction-order-and-drop-reasons) | The order of the transforms and the reason each one records |
 | [Note weight](#note-weight) | The four factors of a weight and their values |
 | [Tiers dialog](#tiers-dialog) | The fields of a tier |
@@ -34,7 +34,7 @@ The sections run from the outside in: the command line and the keys, then each a
 
 - A name in bold, such as **Voices**, is a label on the window. A control with no label is named in plain text, such as the volume slider.
 
-- Channels are numbered 1 to 16, as on the channel cards and in the plan file. Ch 10 is the General MIDI drum channel.
+- Channels are numbered 1 to 16, as on the channel rows and in the plan file. Ch 10 is the General MIDI drum channel.
 
 - Lengths and gaps are in ticks. The file sets the number of ticks in a quarter note, and the toolbar summary shows it as `tpq`.
 
@@ -65,7 +65,7 @@ MontyRoll reads two variables from the environment.
 
 ## Keyboard and mouse
 
-The keys act on the window as a whole. The mouse actions belong to the roll, the ruler, and the channel cards.
+The keys act on the window as a whole. The mouse actions belong to the roll, the ruler, the channel rows, and the panes around them.
 
 | Action | Control |
 | --- | --- |
@@ -88,25 +88,33 @@ The keys act on the window as a whole. The mouse actions belong to the roll, the
 | Set the tempo from a bar | Double-click the tempo row of the ruler |
 | Set or remove a tempo change | Right-click the tempo row of the ruler |
 | Scale every tempo | Right-click the tempo row of the ruler |
-| Make a channel active | Click its card |
-| Resize the demand strip | Drag the bar above the strip |
+| Make a channel active | Click its row |
+| Resize the lanes under the roll | Drag the bar above the lane switch |
+| Change the voice budget | Drag the number under **Voices**, click the arrows beside it, or turn the mouse wheel over it |
+| Type the voice budget | Double-click the number under **Voices** |
+| Move a budget line | Drag a red line on the Demand lane |
+| Change a pool's voices | Drag its number in the pools table, click the arrows beside it, or turn the mouse wheel over it |
+| Rename a pool | Double-click its name in the pools table |
+| Fold or open the inspector | Click the burger button at its top |
+| Open or close the drawer | Click **Events** or **Report** along the bottom |
+| Resize the drawer | Drag the bar above it |
 
 ## Toolbar
 
-The toolbar runs across the top of the window, from **Open** on the left to the summary of the file on the right.
+The toolbar runs across the top of the window: **Open** and **Save**, then the transport and the master volume, then the playback tempo and the view controls at the right-hand end. **Vol** and **Tempo** change only what is heard and exported, never the file. The header line under it carries the summary of the file.
 
 | Control | Values | Effect |
 | --- | --- | --- |
 | **Open** | | Opens a file. |
 | **Save** | | Saves the file. |
 | **Play** | | Starts or stops playback. |
-| **Vol** | 0 to 150% | Scales note velocities in the playback copy. Sets the level of an export. 100% and above export at full level. |
-| **Speed** | 25 to 300% | Scales the tempo of the playback copy. |
-| Position | | Shows the playback position: the time, the bar and beat, and the tempo at the cursor. |
+| Readout | | Shows the playback position: the time, the bar and beat, and the tempo at the cursor. While stopped it shows the first bar and the opening tempo. |
+| **Vol** | 0 to 150% | A slider beside the readout, with its figure. Scales note velocities in the playback copy, and sets the level of an export: 100% and above export at full level. A double click resets it to 100%. |
+| **Tempo** | 25 to 300% | Scales the tempo of the playback copy, without changing the pitch. A double click resets it to 100%. |
 | **Snap** | `1/1`, `1/2`, `1/4`, `1/8`, `1/16`, `1/32`, `off` | Sets the grid for a note that is added or changed. |
 | **H+**, **H-** | | Zoom in and out horizontally. |
 | **V+**, **V-** | | Make the note rows taller and shorter. |
-| Summary | | Shows the file name, the format, the number of tracks, the ticks per quarter note, the time signature, the tempo, the note count, the length, and the key. |
+| Summary, on the header line | | Shows the file name, the format, the number of tracks, the ticks per quarter note, the time signature, the tempo, the note count, the length, and the key. |
 
 ## File menu
 
@@ -136,6 +144,9 @@ The **Edit** menu acts on the selected notes, on the active channel, or on the t
 | **Select All** | Selects every note. |
 | **Delete Selection** | Deletes the selected notes. |
 | **Set Velocity...** | Sets the velocity of the selected notes, 1 to 127. |
+| **Add Channel** | Starts the lowest free channel other than Ch 10, playing Acoustic Grand Piano, on a track of its own, and makes it active. Greyed out while every channel is in use. |
+| **Add Drum Channel** | Starts Ch 10 with the standard kit. Greyed out while Ch 10 is in use. |
+| **Delete Channel...** | Deletes the active channel after a confirmation: every event on it, and any track left with nothing else. |
 | **Split Channel into Parts...** | Splits the active channel into 2 to 8 parts, each on its own channel. |
 | **Double Channel...** | Copies the active channel onto the lowest free channel at 70% velocity. The copy sits -24 to +24 semitones away. |
 | **Echo Channel...** | Copies the active channel onto the lowest free channel at 50% velocity. The copy is delayed by a number of ticks. |
@@ -144,30 +155,64 @@ The **Edit** menu acts on the selected notes, on the active channel, or on the t
 
 ## Channel strip
 
-Three buttons head the strip.
+Five buttons head the strip.
 
 | Button | Effect |
 | --- | --- |
+| **+** | Adds a channel, as **Edit > Add Channel**. |
+| **-** | Deletes the active channel, as **Edit > Delete Channel...**. |
 | **Clear** | Clears every mute and solo and restores the instruments the file opened with. |
 | **Change All** | Sets every channel except Ch 10 to one instrument. |
 | **Mute All** | Mutes every channel. |
 
-Each channel in use has a card.
+Each channel in use has a row, and a click on a row makes its channel the active one. The active row's bar is lit, with its name in bold, and its figures and reduction controls open under it.
 
 | Control | Values | Effect |
 | --- | --- | --- |
-| Note button | | Plays a short sample of the instrument in the channel's pitch range. |
-| Instrument list | GM programs 0 to 127 | Writes a program change into the file. Ch 10 shows `Drum Kit (GM percussion)`. |
-| **M** | on, off | Mutes the channel in playback and dims its notes. |
-| **S** | on, off | Plays the soloed channels alone. |
+| Number swatch | | The channel's number on a block in the colour of its notes, at the left of the bar. Every swatch is as wide as the largest number in the file, so the names line up. |
+| Instrument name | | The GM instrument of the channel. The inspector changes it. A name too long for the row ends in an ellipsis. |
+| Speaker icon | on, off | Mutes the channel in playback and dims its notes. |
+| Headphones icon | on, off | Plays the soloed channels alone. |
 | Volume slider | 0 to 127 | Writes a `CC7` volume event into the file. |
+
+The active channel's row also shows its detail.
+
+| Control | Values | Effect |
+| --- | --- | --- |
 | Summary line | | Shows the note count, the pitch range, and the instrument family. |
 | Demand line | | Shows the peak notes at once, the mean while the channel sounds, the share of the piece that the channel plays, and its overlap with the edited pool. |
 | **Pool** | Pool names, `(none)` | Puts the channel in a pool. `(none)` leaves the channel out of the reduction. |
 | **Rel** | 0 to 5000 ms, blank | Sets the release for the channel. Blank takes the release of the tier. |
 | **Pri** | 0.5 to 5.0 | Sets the priority of the channel. 1.0 is neutral. |
 
-## Piano Roll tab
+## Inspector
+
+The inspector is the right-hand pane. It describes the active channel and the selected note in two cards. The burger button at its top folds it to a narrow strip, and the roll, the ruler, and the lanes take the width. A second click opens it at the width it had.
+
+The channel card describes the active channel.
+
+| Field | Values | Effect |
+| --- | --- | --- |
+| Instrument list | GM programs 0 to 127 | Writes a program change into the file. Ch 10 shows `Drum Kit (GM percussion)`. |
+| Note button | | Plays a short sample of the instrument in the channel's pitch range. |
+| Pool, Release, Priority | | The reduction settings of the channel, as under its row. |
+| Notes, Range, Family | | The note count, the pitch range, and the instrument family. |
+| Peak, Mean, Plays | | The peak notes at once, the mean while the channel sounds, and the share of the piece that the channel plays. |
+| Overlap | | The share of the channel's playing time during which the edited pool already sounds. |
+
+The note card describes one selected note. With no note selected the card says so, and with several it counts them.
+
+| Field | Values | Meaning |
+| --- | --- | --- |
+| Pitch | | The note name, or the drum name on Ch 10. |
+| Velocity | 1 to 127 | The velocity of the note. |
+| Starts | bar and beat | Where the note starts. |
+| Ticks | start-end (length) | The note's extent in ticks. |
+| Track | | The track the note belongs to. |
+| Reduction | `kept`, a drop reason, `cut short`, `reduction off`, `working it out` | What the reduction does with the note. `working it out` shows for the moment the first reduction is being worked out after the switch is turned on. |
+| Weight | | The note's weight under the current plan, with a bar out of the most a note can weigh under it: 1.5 times the highest channel priority. |
+
+## Piano roll
 
 The ruler has four rows.
 
@@ -178,55 +223,71 @@ The ruler has four rows.
 | 3 | Tempo changes and markers |
 | 4 | The chord in each beat |
 
-Each note is a block in the colour of its channel, brighter at a higher velocity. A dashed vertical line marks each tempo change.
+Each note is a block in the colour of its channel, brighter at a higher velocity, with an edge a little darker than its fill. A selected note has a white edge. The bar under the pointer is lit faintly, down through the ruler and the roll. Within it the beat under the pointer is a step lighter, and at the pointer's pitch the slot that a double click would fill is a step lighter again. A note under the pointer is lit a little above its own colour. A dashed vertical line marks each tempo change. The roll opens scrolled to the middle of the pitches of the file.
 
-## Events tab
+## Lanes
 
-The tab lists every event in the file in seven columns: `Tick`, `Time`, `Bar`, `Track`, `Ch`, `Type`, and `Detail`.
+The strip under the roll shows one of three lanes, chosen with the switch above it, on the same horizontal scale as the roll. **Voices** heads the gutter beside the strip, and the number under it is the budget, whichever lane is on view. The arrows above and below the number step it by one voice, as do the mouse wheel over it and the `Up` and `Down` keys once it is clicked. Dragging the number up or down changes it a voice at a time, and a double click opens it for typing, where `Return` keeps the number and `Esc` drops it. Every budget line on the Demand lane can be dragged too, and the Reduce panel says which pool each one moves. The reduction is worked out again once the budget stops changing.
 
-For a file of more than 8000 events, the tab lists the first 8000 and ends with a row that counts the rest.
+### Demand
 
-## Report tab
-
-The **Original** sub-tab reports on the song. The **Reduced** sub-tab reports on the reduction while **Reduce to the voice budget** is ticked. **Save report...** writes the report on view as a text file.
-
-## Demand strip
-
-The strip under the roll plots the voice demand against time, on the same horizontal scale as the roll.
+The Demand lane plots the voice demand against time.
 
 | Element | Meaning |
 | --- | --- |
 | Coloured stack | The notes that sound at each moment, one layer for each channel. |
 | White line | The count of distinct pitches. A unison on two channels counts once. |
 | Yellow line | The count of distinct pitch classes. An octave doubling counts once. |
-| Red dashed line | The voice budget. With tiers, one line for each tier, labelled with the tier and its running total. |
+| Red line | The voice budget, labelled on a tag at its right-hand end. With tiers, one line for each tier, labelled with the tier and its running total. A line under the pointer, or being dragged, turns blue, and its tag names the pool that it moves. |
 | Red wash | The demand above the budget. |
-| **Voices** | The budget. With one pool it runs from 1 to the peak of the file. With several pools it shows the sum of their voices. |
+| **Voices** | The budget. With one pool it runs from 1 to the peak of the file. With several pools it shows the sum of their voices, greyed, and the pools set it. |
 
-While the reduction is on, the strip shows each voice as busy until its release ends. The status bar reports the counts under the pointer.
+While the reduction is on, the lane shows each voice as busy until its release ends. The status bar reports the counts under the pointer.
+
+### Velocity and Weight
+
+In the Velocity and Weight lanes each note whose start is in view is a bar at its start, in the colour of its channel. A Velocity bar is as tall as the note's velocity out of 127. A Weight bar is as tall as the note's weight against the heaviest note in the song, whose weight the top right corner shows. While the reduction is on, the notes it drops are drawn as outlines. Pointing at a bar names its note on the status bar.
+
+## Drawer
+
+Two buttons along the bottom of the window, **Events** and **Report**, open the drawer under the roll on that page. The same button again closes it, and the bar above the drawer sets its height. The count of events in the file sits at the right of the buttons.
+
+### Events
+
+The page lists every event in the file in seven columns: `Tick`, `Time`, `Bar`, `Track`, `Ch`, `Type`, and `Detail`.
+
+For a file of more than 8000 events, the page lists the first 8000 and ends with a row that counts the rest.
+
+### Report
+
+The **Original** sub-tab reports on the song. The **Reduced** sub-tab reports on the reduction while **Reduce to the voice budget** is on. **Save report...** writes the report on view as a text file.
 
 ## Reduce panel
 
-The Reduce panel sits under the channel cards. Its first rows switch the reduction on and report the result, and the rest edit one pool at a time.
+The Reduce panel sits under the channel rows. Its first rows switch the reduction on, set the shading of the roll, and report the result. A table of the pools follows. Under it, a display shows the pool selected in the table: its name on a blue tag, then each setting of that pool as a label over its value.
 
 | Control | Values | Effect |
 | --- | --- | --- |
-| **Reduce to the voice budget** | on, off | Draws and plays the reduction. |
-| **Shade by weight** | on, off | Colours each note by its weight in place of its velocity. |
+| **Reduce to the voice budget** | on, off | A switch that draws and plays the reduction. |
+| **Shade** | on, off | Colours each note on the roll by its weight in place of its velocity. |
 | Result label | | Shows the notes kept, the notes cut, the tails clipped, and the loss, then the drops by reason. |
-| **Pool** | Pool names | Chooses the pool that the panel edits. Return renames the pool to the typed text. |
-| **+**, **-** | | Add a pool and remove the edited pool. |
+| **+**, **-** | | Add a pool and remove the selected pool. |
 | **Tiers...** | | Opens the tiers dialog. |
-| **Voices** | 0 to 64 | The voices that the pool owns. |
-| **Tier** | Tier names, `(none)` | The tier that the pool's voices come from. |
-| **Sound** | Sound names, `(by instrument)` | The sound of the pool in an export. |
-| Overlap line | | Shows the highest overlap among the channels of the pool. |
-| **Merge unisons** | on, off | Drops a note that starts with the same pitch on another channel. On by default. |
-| **Fold octaves** | on, off | Drops a note that starts with its octave on another channel. |
+| Pools table | | One line for each pool: its name, its tier, its voices, its peak, and its channel count. A click selects the pool for the controls below, and a double click on the name opens it for renaming. |
+| Voices, in the table | 0 to what the tier has left | The voices that the pool owns. A drag on the number up or down, its arrows, and the mouse wheel change it, and a double click opens it for typing. |
+| Peak, in the table | | The most notes that the pool's channels sound at once in the file, in amber while it is above the pool's voices, when the pool must drop notes. |
+| Name tag | | Names the selected pool at the top of the display. |
+| **Tier** | Tier names, `(none)` | The tier that the selected pool's voices come from. |
+| **Sound** | The sounds of the pool's chip, `(by instrument)` | The sound of the pool in an export. For a pool with no chip the box reads `(no chip)` and is greyed, as sounds belong to a chip. |
+| **Overlap** | | The highest overlap among the channels of the pool, in amber. `-` for a pool of fewer than two channels. |
+| **Unisons** | on, off | Merges unisons: drops a note that starts with the same pitch on another channel. On by default. |
+| **Octaves** | on, off | Folds octaves: drops a note that starts with its octave on another channel. |
 | **Top line** | on, off | Keeps the highest sounding note of each channel. |
-| **Tremolo** | 0 to 480 ticks | Continues a pitch that is struck again within the gap. 0 is off. |
-| **Legato** | 0 to 960 ticks | Extends a note to the next onset within the gap. 0 is off. |
-| **Chord** | 0 to 8 notes | Keeps that many notes of each chord, the top and the bottom first. 0 keeps every note. |
+| **Tremolo** | 0 to 480 ticks | Continues a pitch that is struck again within the gap. Reads `off` at 0. |
+| **Legato** | 0 to 960 ticks | Extends a note to the next onset within the gap. Reads `off` at 0. |
+| **Chord** | 0 to 8 notes | Keeps that many notes of each chord, the top and the bottom first. Reads `all` at 0, which keeps every note. |
+
+The values of **Tremolo**, **Legato** and **Chord** change as the voices in the table do: a drag up or down, the mouse wheel, the Up and Down keys, or a double click to type. A step is 10 ticks on the two gaps and one note on **Chord**.
 
 ## Reduction order and drop reasons
 
@@ -250,7 +311,7 @@ The weight of a note is the product of four factors.
 
 | Factor | Value |
 | --- | --- |
-| Priority | **Pri** on the channel's card |
+| Priority | **Pri** under the channel's row |
 | Velocity | `0.5 + 0.5 * velocity / 127` |
 | Texture, highest note of its channel or a note alone | 1.5 |
 | Texture, lowest note of its channel | 1.3 |
@@ -302,7 +363,7 @@ A soundfont is a `.sf2` or `.sf3` file in `/usr/share/sounds/sf2`, `/usr/share/s
 
 ## Plan file
 
-A plan file is JSON with the suffix `.monty`. Channel numbers in the file run from 1 to 16, as on the cards.
+A plan file is JSON with the suffix `.monty`. Channel numbers in the file run from 1 to 16, as on the rows.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -330,10 +391,10 @@ A plan file is JSON with the suffix `.monty`. Channel numbers in the file run fr
 
 | Field | Type | Control on the Reduce panel |
 | --- | --- | --- |
-| `name` | string | **Pool** |
+| `name` | string | The name in the pools table |
 | `tier` | string | **Tier** |
-| `voices` | number | **Voices** |
-| `channels` | list of numbers | **Pool** on each channel card |
+| `voices` | number | The voices in the pools table |
+| `channels` | list of numbers | **Pool** under each channel's row |
 | `dedupUnison` | true or false | **Merge unisons** |
 | `dedupOctave` | true or false | **Fold octaves** |
 | `tremoloGap` | number of ticks | **Tremolo** |
@@ -433,7 +494,7 @@ The target writes a ZSM version 1 file for the YM2151 and the VERA PSG at 60 fra
 | `opm` | YM2151 | 8 | 0 | 300 ms |
 | `psg` | VERA PSG | 16 | 4 | 0 ms |
 
-The **Sound** box offers six YM2151 patches and four PSG waveforms.
+The **Sound** box offers six YM2151 patches to a pool on `opm` and four PSG waveforms to a pool on `psg`.
 
 | Sound | Chip | Definition |
 | --- | --- | --- |

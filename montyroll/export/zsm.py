@@ -492,7 +492,7 @@ PSG_SOUNDS: dict[str, PsgSound] = {
     "saw": PsgSound(PSG_SAW, 32),
     "triangle": PsgSound(PSG_TRIANGLE, 32),
 }
-SOUNDS = tuple(name for name in PATCHES if name != "default") + tuple(PSG_SOUNDS)
+OPM_SOUNDS = tuple(name for name in PATCHES if name != "default")
 
 
 def psgVoice(channel: int, wave: int = PSG_PULSE, width: int = 32) -> list[tuple[int, int]]:
@@ -713,8 +713,10 @@ def chromaticScale(chip: str, low: int = 36, high: int = 84, hold: int = 20,
 
 
 # --------------------------------------------------------------- export
-CHIPS = (Chip("opm", 8, 300.0), Chip("psg", PSG_CHANNELS, 0.0, 4))
+CHIPS = (Chip("opm", 8, 300.0, sounds=OPM_SOUNDS),
+         Chip("psg", PSG_CHANNELS, 0.0, 4, sounds=tuple(PSG_SOUNDS)))
 CHIP_NAMES = tuple(c.name for c in CHIPS)
+SOUNDS = tuple(name for c in CHIPS for name in c.sounds)
 
 
 def frameOf(song: model.Song, tick: float, rate: int = FRAME_RATE) -> int:
