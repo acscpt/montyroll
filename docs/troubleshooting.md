@@ -129,7 +129,7 @@ If `aplaymidi` is the one program installed, add `timidity`. `aplaymidi` sends n
 
 ### Playback pauses when a control moves
 
-The pause is expected. A synth plays a file from its first event, so to apply a change MontyRoll starts the synth again from the cursor. A mute, a solo, a volume, and the speed all restart it. The restart comes about a third of a second after the control stops moving, which lets a dragged slider settle first.
+The pause is expected. A synth plays a file from its first event, so to apply a change MontyRoll starts the synth again from the cursor. A mute, a solo, a volume, and the playback tempo all restart it. The restart comes about a third of a second after the control stops moving, which lets a dragged slider settle first.
 
 [^ Index](#index)
 

@@ -51,6 +51,7 @@ CORNER_FONT_PT = 8   # the Voices heading, the size of the lane switch's text
 BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
 BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
+MASTER_MAX = 150     # the master volume's top, in percent
 GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
 NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
 ROW_PAD = "1.5p"     # space above and below a channel row's name, which sets the bar's height
@@ -680,8 +681,8 @@ class MidiEditorApp(tk.Tk):
         """Build the toolbar across the top of the window, then the header line under it.
 
         Left to right: Open and Save, then the transport, which is Play/Stop
-        and the position readout. At the right-hand end: master volume,
-        speed, grid snap and the four zoom buttons.
+        and the position readout, then the master volume. At the right-hand
+        end: the playback tempo, grid snap and the four zoom buttons.
         """
         bar = ttk.Frame(self, padding=(6, 5))
         bar.pack(fill="x")
@@ -723,36 +724,45 @@ class MidiEditorApp(tk.Tk):
                     "no tempo events, this stays constant even when the\n"
                     "music speeds up - the rubato is in the note spacing.)")
 
+        # Master volume, beside the readout, laid out as the tempo is: its
+        # name, the slider and its figure. It scales note velocities in the
+        # playback copy and sets the level of an export; the file is not
+        # changed. _masterChanged updates the figure and feeds _liveUpdate,
+        # and a double click puts it back to 100%.
+        ttk.Label(bar, text="Vol").pack(side="left", padx=(14, 0))
+        self.masterVar = tk.IntVar(value=100)
+        mv = ttk.Scale(bar, from_=0, to=MASTER_MAX, orient="horizontal", length=90,
+                       variable=self.masterVar, command=lambda v: self._masterChanged())
+        mv.pack(side="left", padx=(4, 0))
+        mv.bind("<Double-Button-1>", self._resetVolume)
+        self.volLbl = ttk.Label(bar, text="100%", width=5)
+        self.volLbl.pack(side="left", padx=(4, 0))
+        Tooltip(mv, f"Master volume (0-{MASTER_MAX}%): scales note velocities for\n"
+                "playback and sets the level of an export - the file\n"
+                "is not changed. Applies live while playing.\n"
+                "Double-click for 100%.")
+
         # The view controls sit together at the right-hand end.
         view = ttk.Frame(bar)
         view.pack(side="right")
 
-        # Master volume scales note velocities in the playback copy only. The
-        # slider's command goes through _liveUpdate, so moving it during
-        # playback restarts the synth once the drag settles.
-        ttk.Label(view, text="Vol").pack(side="left")
-        self.masterVar = tk.IntVar(value=100)
-        mv = ttk.Scale(view, from_=0, to=150, orient="horizontal", length=90,
-                       variable=self.masterVar, command=lambda v: self._liveUpdate())
-        mv.pack(side="left", padx=(4, 12))
-        Tooltip(mv, "Master playback volume (0-150%).\n"
-                "Scales note velocities in the playback copy only -\n"
-                "the file is not changed. Applies live while playing.")
-
-        # Speed scales the tempo events in the playback copy. The label beside
-        # the slider mirrors its value; _speedChanged updates it and then
-        # feeds _liveUpdate like the other live controls.
-        ttk.Label(view, text="Speed").pack(side="left")
+        # Tempo scales the tempo events in the playback copy. The label
+        # beside the slider mirrors its value; _speedChanged updates it and
+        # then feeds _liveUpdate like the other live controls. A double
+        # click puts it back to 100% and stops the scale's own press, which
+        # would step it on from there.
+        ttk.Label(view, text="Tempo").pack(side="left")
         self.speedVar = tk.IntVar(value=100)
         sv = ttk.Scale(view, from_=25, to=300, orient="horizontal", length=90,
                        variable=self.speedVar, command=lambda v: self._speedChanged())
         sv.pack(side="left", padx=(4, 0))
+        sv.bind("<Double-Button-1>", self._resetTempo)
         self.speedLbl = ttk.Label(view, text="100%", width=5)
         self.speedLbl.pack(side="left", padx=(4, 0))
-        Tooltip(sv, "Playback speed (25-300%): scales the file's tempo\n"
+        Tooltip(sv, "Playback tempo (25-300%): scales the file's tempo\n"
                 "in the playback copy only - pitch is unaffected and\n"
                 "the file is not changed. Applies live while playing.\n"
-                "Handy for files sequenced at the wrong base tempo.")
+                "Double-click for 100%.")
 
         # Grid snap: read back by _snapTicks whenever a note is moved,
         # resized or added.
@@ -5872,10 +5882,41 @@ class MidiEditorApp(tk.Tk):
         self.posLbl.config(text=f"bar {bar}:{beat}   {TEMPO_GLYPH}={bpm:.0f}")
 
     def _speedChanged(self):
-        """Speed slider moved: update its label and restart the synth if
+        """Tempo slider moved: update its label and restart the synth if
         playing."""
         self.speedLbl.config(text=f"{self.speedVar.get()}%")
         self._liveUpdate()
+
+    def _resetTempo(self, _event=None) -> str:
+        """Put the playback tempo back to 100%.
+
+        Args:
+            _event: the double click; unused.
+
+        Returns:
+            str: "break", so the scale's own press does not step it on.
+        """
+        self.speedVar.set(100)
+        self._speedChanged()
+        return "break"
+
+    def _masterChanged(self):
+        """Master volume slider moved: update its figure and restart the synth if playing."""
+        self.volLbl.config(text=f"{self.masterVar.get()}%")
+        self._liveUpdate()
+
+    def _resetVolume(self, _event=None) -> str:
+        """Put the master volume back to 100%.
+
+        Args:
+            _event: the double click; unused.
+
+        Returns:
+            str: "break", so the scale's own press does not step it on.
+        """
+        self.masterVar.set(100)
+        self._masterChanged()
+        return "break"
 
     def _liveUpdate(self, delay: int = 300):
         """Restart the synth at the current position after a live change.

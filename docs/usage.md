@@ -68,7 +68,7 @@ Playback goes through [a synth](install.md#add-a-synth-for-sound), and a cursor 
 
 Each channel row carries two icons for listening to part of the arrangement, beside its volume. The speaker mutes the channel, and its notes are dimmed on the roll. The headphones solo the channel, so that the soloed channels are heard alone. An icon that is on is drawn solid.
 
-**Vol** and **Speed** on the toolbar set the loudness and the speed of playback. Both change what is heard, and the file is left as it is.
+**Vol**, beside the readout, and **Tempo**, at the right of the toolbar, set the loudness and the speed of playback. Both change what is heard, and the file is left as it is. A double click on either puts it back to 100%.
 
 All of these can be changed while the music plays. The synth restarts from the cursor to pick up the change, which is heard as a short pause.
 

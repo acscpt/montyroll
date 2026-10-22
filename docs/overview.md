@@ -26,7 +26,7 @@ Edits are added directly as events of the loaded file and only persisted if save
 
 ### Playing
 
-Pressing play plays the file from the first bar via the configured software synth. Channels can be muted or made to play solo. The toolbar has a master volume and a speed control. They do not affect the file, only the current playback.
+Pressing play plays the file from the first bar via the configured software synth. Channels can be muted or made to play solo. The toolbar has a master volume and a playback tempo control. They do not affect the file, only the current playback.
 
 ### Reducing
 

@@ -37,6 +37,7 @@ from montyroll.app import (
     KEYS_W,
     LANE_GAP,
     LANE_PAD,
+    MASTER_MAX,
     MAX_EVENT_ROWS,
     NO_CHIP,
     NO_POOL,
@@ -2428,6 +2429,45 @@ class TestEventList:
         """Each event kind decodes to its readable type and detail text."""
         assert MidiEditorApp._evType(event) == kind
         assert MidiEditorApp._evDetail(event) == detail
+
+
+class TestTransportControls:
+    """The master volume beside the readout and the playback tempo."""
+
+    def testVolumeSitsBesideTheReadout(self, app: MidiEditorApp) -> None:
+        """Vol follows the readout on the left, its slider between its name and figure."""
+        bar = app.volLbl.master
+        parts = bar.pack_slaves()
+        readout = app.timeLbl.master
+        at = parts.index(readout)
+        assert str(parts[at + 1].cget("text")) == "Vol"
+        assert isinstance(parts[at + 2], ttk.Scale)
+        assert parts[at + 3] is app.volLbl
+        assert parts[at + 2].cget("to") == MASTER_MAX
+
+    def testVolumeShowsItsFigureAndResets(self, app: MidiEditorApp) -> None:
+        """The figure follows the slider, and a double click puts it back to 100%."""
+        parts = app.volLbl.master.pack_slaves()
+        scale = parts[parts.index(app.volLbl) - 1]
+        app.masterVar.set(40)
+        app._masterChanged()
+        assert app.volLbl.cget("text") == "40%"
+        assert "_resetVolume" in scale.bind("<Double-Button-1>")
+        assert app._resetVolume() == "break"
+        assert app.masterVar.get() == 100 and app.volLbl.cget("text") == "100%"
+
+    def testTempoIsNamedAndResetsOnDoubleClick(self, app: MidiEditorApp) -> None:
+        """The slider is labelled Tempo, and a double click puts it back to 100%."""
+        labels = [str(w.cget("text")) for w in app.speedLbl.master.winfo_children()
+                  if isinstance(w, ttk.Label)]
+        assert "Tempo" in labels and "Speed" not in labels
+        app.speedVar.set(200)
+        app._speedChanged()
+        assert app.speedLbl.cget("text") == "200%"
+        scale = next(w for w in app.speedLbl.master.winfo_children() if isinstance(w, ttk.Scale))
+        assert "_resetTempo" in scale.bind("<Double-Button-1>")
+        assert app._resetTempo() == "break"
+        assert app.speedVar.get() == 100 and app.speedLbl.cget("text") == "100%"
 
 
 class TestPlayback:

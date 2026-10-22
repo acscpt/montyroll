@@ -183,7 +183,7 @@ Two kinds of decision run through the code. Constraints hold everywhere and limi
   - An edit clears all four, and each is rebuilt when something next draws it.
 
 - **A live change restarts the synth.**
-  - A synth plays a file from its first event. A mute, a volume, or a speed change therefore stops it and starts it again from the cursor.
+  - A synth plays a file from its first event. A mute, a volume, or a playback tempo change therefore stops it and starts it again from the cursor.
   - `Song.buildSlice` builds the copy for the restart, with the tempo, the programs, and the controllers in force at that tick.
   - A wait of 300 ms groups a dragged slider into one restart.
 

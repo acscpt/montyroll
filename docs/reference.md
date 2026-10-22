@@ -12,7 +12,7 @@ The sections run from the outside in: the command line and the keys, then each a
 | [Command line](#command-line) | The one argument, and what an empty song holds |
 | [Environment](#environment) | The two environment variables that MontyRoll reads |
 | [Keyboard and mouse](#keyboard-and-mouse) | Every key and mouse action |
-| [Toolbar](#toolbar) | The transport and readout, playback level, speed, snap, zoom, and the file summary |
+| [Toolbar](#toolbar) | The transport and readout, the master volume, the playback tempo, snap, zoom, and the file summary |
 | [File menu](#file-menu) | Opening, saving, plans, and exports |
 | [Edit menu](#edit-menu) | Selection, velocity, the arrange commands, and tempo |
 | [Channel strip](#channel-strip) | The controls of a channel row, and the detail under the active one |
@@ -101,16 +101,16 @@ The keys act on the window as a whole. The mouse actions belong to the roll, the
 
 ## Toolbar
 
-The toolbar runs across the top of the window: **Open** and **Save**, then the transport, then the view controls at the right-hand end. The header line under it carries the summary of the file.
+The toolbar runs across the top of the window: **Open** and **Save**, then the transport and the master volume, then the playback tempo and the view controls at the right-hand end. **Vol** and **Tempo** change only what is heard and exported, never the file. The header line under it carries the summary of the file.
 
 | Control | Values | Effect |
 | --- | --- | --- |
 | **Open** | | Opens a file. |
 | **Save** | | Saves the file. |
 | **Play** | | Starts or stops playback. |
-| **Vol** | 0 to 150% | Scales note velocities in the playback copy. Sets the level of an export. 100% and above export at full level. |
-| **Speed** | 25 to 300% | Scales the tempo of the playback copy. |
 | Readout | | Shows the playback position: the time, the bar and beat, and the tempo at the cursor. While stopped it shows the first bar and the opening tempo. |
+| **Vol** | 0 to 150% | A slider beside the readout, with its figure. Scales note velocities in the playback copy, and sets the level of an export: 100% and above export at full level. A double click resets it to 100%. |
+| **Tempo** | 25 to 300% | Scales the tempo of the playback copy, without changing the pitch. A double click resets it to 100%. |
 | **Snap** | `1/1`, `1/2`, `1/4`, `1/8`, `1/16`, `1/32`, `off` | Sets the grid for a note that is added or changed. |
 | **H+**, **H-** | | Zoom in and out horizontally. |
 | **V+**, **V-** | | Make the note rows taller and shorter. |
