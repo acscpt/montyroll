@@ -147,6 +147,8 @@ class Song:
         self.channels: dict[int, ChannelInfo] = {}
         self.trackNames: list[str] = []
         self.tempoMap: list[tuple[int, int, float]] = []  # (tick, uspb, sec_at_tick)
+        self.tempoTicks: list[int] = []        # the map's ticks, for bisection
+        self.tempoSeconds: list[float] = []    # and its times
         self.timeSigs: list[tuple[int, int, int]] = []    # (tick, num, denom)
         self.markers: list[tuple[int, str]] = []
         self.maxTick = 0
@@ -342,7 +344,7 @@ class Song:
         """
         # Find the tempo segment in force at tick and extrapolate from its
         # start time; index 0 also serves any tick before the first entry.
-        i = bisect_right([t for t, _, _ in self.tempoMap], tick) - 1
+        i = bisect_right(self.tempoTicks, tick) - 1
         t0, uspb, sec = self.tempoMap[max(i, 0)]
         return sec + (tick - t0) * uspb / 1e6 / self.mf.division
 
@@ -357,7 +359,7 @@ class Song:
         """
         # Find the tempo segment whose start time precedes seconds and
         # extrapolate from its start tick; index 0 also serves negative times.
-        i = bisect_right([s for _, _, s in self.tempoMap], seconds) - 1
+        i = bisect_right(self.tempoSeconds, seconds) - 1
         t0, uspb, sec = self.tempoMap[max(i, 0)]
         return t0 + (seconds - sec) * 1e6 * self.mf.division / uspb
 
@@ -784,7 +786,7 @@ class Song:
         """Recompute the tempo map from the tempo events after an edit.
 
         The notes, channel summaries and markers are untouched; only the
-        tick-to-seconds table changes.
+        tick-to-seconds table and its two lists for bisection change.
         """
         tempos: list[tuple[int, int]] = []
 
@@ -806,6 +808,9 @@ class Song:
                 sec = psec + (tick - ptick) * puspb / 1e6 / self.mf.division
 
             self.tempoMap.append((tick, uspb, sec))
+
+        self.tempoTicks = [t for t, _, _ in self.tempoMap]
+        self.tempoSeconds = [sec for _, _, sec in self.tempoMap]
 
     # ------------------------------------------------------------- playback
     def buildSlice(self, start_tick: int) -> smf.MidiFile:

@@ -293,6 +293,8 @@ class MidiEditorApp(tk.Tk):
         # of scroll events costs one redraw.
         self.demand: analysis.Demand | None = None
         self.songDemand: analysis.Demand | None = None   # the song as written, reduced or not
+        # The last sweep with the span edited since, for analysis.resweep.
+        self._sweepBase: tuple[analysis.Demand, tuple[int, int]] | None = None
         self.chords: list[tuple[int, int, str]] | None = None
         self.chordNames: list[str] | None = None     # per beat, before smoothing
         self._chordStale: list[tuple[int, int]] = []    # tick spans whose beats need naming
@@ -1324,6 +1326,7 @@ class MidiEditorApp(tk.Tk):
         self.chordNames = None
         self._chordStale = []
         self._noteIndex = None
+        self._sweepBase = None
         self.reduction = None
         self.noteWeights = None
         self.reducedSong = None
@@ -2288,7 +2291,6 @@ class MidiEditorApp(tk.Tk):
         and selection find the items, and the selection is outlined again.
         """
         c = self.canvas
-        s = self.song
         c.delete("note")
         self.itemToNote.clear()
         self.noteToItem.clear()
@@ -2305,10 +2307,7 @@ class MidiEditorApp(tk.Tk):
         t0, t1 = max(0.0, left / self.ppt), right / self.ppt
         self._drawnSpan = (t0, t1)
 
-        if self._noteIndex is None:
-            self._noteIndex = analysis.stepIndex(s)
-
-        index = self._noteIndex
+        index = self._ensureNoteIndex()
         notes = [n for n in index.notes[bisect_right(index.reach, t0):
                                         bisect_left(index.starts, t1)] if n.end >= t0]
 
@@ -2630,22 +2629,49 @@ class MidiEditorApp(tk.Tk):
             analysis.Demand: the sweep the cards' figures and the pool
             overlap come from.
         """
-        if self.songDemand is None:
+        if self.songDemand is None and self._sweepBase is not None:
+            base, (t0, t1) = self._sweepBase
+            self.songDemand = analysis.resweep(self.song, base, t0, t1, self._ensureNoteIndex())
+        elif self.songDemand is None:
             self.songDemand = analysis.sweep(self.song)
 
+        self._sweepBase = None
         return self.songDemand
+
+    def _ensureNoteIndex(self) -> analysis.StepIndex:
+        """Return the notes in start order for bisection, rebuilding after an edit.
+
+        Returns:
+            analysis.StepIndex: the song's notes by start, with their reach.
+        """
+        if self._noteIndex is None:
+            self._noteIndex = analysis.stepIndex(self.song)
+
+        return self._noteIndex
 
     def _invalidateDemand(self, notesIn: tuple[int, int] | None = None):
         """Forget the sweep, the chords, the reduction and the report after an edit.
 
         The chord of each beat is kept and named again only where notes
-        changed, so an edit to one note names a beat or two, not the song.
+        changed, so an edit to one note names a beat or two, not the song,
+        and the sweep before the edit is kept with the span, so the next
+        sweep covers that span alone (`analysis.resweep`).
 
         Args:
             notesIn: the ticks within which every changed note started and
                 ended, before and after the edit; an empty span when no note
-                changed; None when any note may have.
+                changed but their times in seconds did, as after a tempo
+                edit; None when any note may have.
         """
+        # Spans of several edits before the next sweep are joined.
+        if notesIn is None or notesIn[1] <= notesIn[0]:
+            self._sweepBase = None
+        elif self.songDemand is not None:
+            self._sweepBase = (self.songDemand, notesIn)
+        elif self._sweepBase is not None:
+            base, (t0, t1) = self._sweepBase
+            self._sweepBase = (base, (min(t0, notesIn[0]), max(t1, notesIn[1])))
+
         self.demand = None
         self.songDemand = None
         self._noteIndex = None
@@ -5284,6 +5310,9 @@ class MidiEditorApp(tk.Tk):
         # else moves. The original geometry of every selected note is kept
         # so onDrag applies the offset from the press point each time rather
         # than accumulating rounded steps.
+        # The sweep is settled before the notes move, so the one after the
+        # drag can start from it.
+        self._ensureSongDemand()
         item = self.noteToItem[id(note)]
         x2 = self.canvas.coords(item)[2]
         mode = "resize" if x2 - x <= 5 else "move"

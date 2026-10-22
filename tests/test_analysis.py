@@ -13,6 +13,8 @@ pin the figures the voice plan was sized against.
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from conftest import ROOT
@@ -247,6 +249,82 @@ def testSweepIsFast() -> None:
     analysis.sweep(song)
     elapsed = time.perf_counter() - started
     assert elapsed < 2.0
+
+
+def _editAt(song: model.Song, rng: random.Random) -> tuple[int, int]:
+    """Make one random edit to a song: move, resize, repitch, delete or add a note.
+
+    Args:
+        song: the song, changed in place.
+        rng: the source of the choices.
+
+    Returns:
+        tuple[int, int]: the ticks the edit touched, before and after.
+    """
+    note = rng.choice(song.notes)
+    old = (note.start, note.end)
+    kind = rng.choice(["move", "resize", "pitch", "delete", "add"])
+
+    if kind == "move":
+        shift = rng.randint(-960, 960)
+        note.start = max(0, note.start + shift)
+        note.end = max(note.start + 1, note.end + shift)
+        note.apply()
+    elif kind == "resize":
+        note.end = max(note.start + 1, note.end + rng.randint(-480, 480))
+        note.apply()
+    elif kind == "pitch":
+        note.pitch = rng.randint(30, 90)
+        note.apply()
+    elif kind == "delete":
+        song.deleteNotes([note])
+    else:
+        start = rng.randint(0, song.maxTick + 2000)
+        note = song.addNote(rng.choice([0, 1, 5, 13]), rng.randint(30, 90), 100, start,
+                            start + rng.randint(1, 900))
+        old = (note.start, note.end)
+
+    span = (min(old[0], note.start), max(old[1], note.end))
+    return span
+
+
+def testResweepEqualsAFullSweep(song: model.Song) -> None:
+    """After any edit, sweeping the edited span again gives exactly the full sweep."""
+    rng = random.Random(7)
+
+    for _ in range(300):
+        before = analysis.sweep(song)
+        t0, t1 = _editAt(song, rng)
+        assert analysis.resweep(song, before, t0, t1) == analysis.sweep(song)
+
+
+def testResweepAtTheStartAndOfEverything(song: model.Song) -> None:
+    """An edit at the first note, and one that deletes every note, still match."""
+    first = min(song.notes, key=lambda n: n.start)
+    before = analysis.sweep(song)
+    note = song.addNote(0, 50, 100, first.start, first.start + 240)
+    assert analysis.resweep(song, before, note.start, note.end) == analysis.sweep(song)
+    before = analysis.sweep(song)
+    span = (min(n.start for n in song.notes), max(n.end for n in song.notes))
+    song.deleteNotes(list(song.notes))
+    assert analysis.resweep(song, before, *span) == analysis.sweep(song)
+
+
+def testResweepIsQuickOnALargeFile() -> None:
+    """On a large file, an edit's sweep takes a fraction of a full one and matches it."""
+    import time
+
+    song = _localSong("JSBD-1.mid")
+    rng = random.Random(3)
+    before = analysis.sweep(song)
+    t0, t1 = _editAt(song, rng)
+    started = time.perf_counter()
+    again = analysis.resweep(song, before, t0, t1)
+    partial = time.perf_counter() - started
+    started = time.perf_counter()
+    full = analysis.sweep(song)
+    assert again == full
+    assert partial < (time.perf_counter() - started) / 3
 
 
 def _profile(*classes: int, weights: list[float] | None = None) -> list[float]:
