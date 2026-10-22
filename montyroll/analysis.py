@@ -728,6 +728,17 @@ def _omissionCost(interval: int) -> float:
     return cost
 
 
+# Every template on every root, ready to score: the root, its pitch classes
+# as a bit mask and in the template's order, the cost of each one being
+# absent by pitch class, the template's own cost, and the chord's name.
+_CANDIDATES = tuple(
+    (root, sum(1 << ((root + i) % 12) for i in intervals),
+     tuple((root + i) % 12 for i in intervals),
+     {(root + i) % 12: _omissionCost(i) for i in intervals},
+     RARE_CHORD_COST.get(suffix, 0.0), f"{PITCH_CLASS_NAMES[root]}{suffix}")
+    for root in range(12) for suffix, intervals in CHORD_TEMPLATES)
+
+
 def nameChord(profile: list[float], bass: int | None = None, threshold: float = 0.6) -> str:
     """Name the chord a pitch-class profile most resembles.
 
@@ -763,34 +774,37 @@ def nameChord(profile: list[float], bass: int | None = None, threshold: float = 
 
     useBass = bass is not None and sounding >= 3
     best = (-1.0, NO_CHORD)
+    present = sum(1 << pc for pc, w in enumerate(profile) if w != 0)
 
-    for root in range(12):
-        for suffix, intervals in CHORD_TEMPLATES:
-            absent = [i for i in intervals if profile[(root + i) % 12] == 0]
+    for root, mask, classes, omission, rare, name in _CANDIDATES:
+        absent = mask & ~present
 
-            # A chord may lack one of its tones but not two: a seventh is
-            # never named from two notes.
-            if len(absent) > 1:
-                continue
+        # A chord may lack one of its tones but not two: a seventh is never
+        # named from two notes.
+        if absent & (absent - 1):
+            continue
 
-            covered = sum(profile[(root + i) % 12] for i in intervals)
+        covered = 0
 
-            # Coverage less a cost for the absent tone that follows how
-            # dispensable it is: a fifth is dropped all the time, a third
-            # less often, a root rarely. C and A are therefore A minor
-            # without its fifth rather than F without its root, and a bare
-            # fifth is C rather than a seventh. The bass breaks ties between
-            # readings of a fuller chord.
-            score = covered / total - RARE_CHORD_COST.get(suffix, 0.0)
+        for pc in classes:
+            covered += profile[pc]
 
-            if absent:
-                score -= _omissionCost(absent[0])
+        # Coverage less a cost for the absent tone that follows how
+        # dispensable it is: a fifth is dropped all the time, a third less
+        # often, a root rarely. C and A are therefore A minor without its
+        # fifth rather than F without its root, and a bare fifth is C rather
+        # than a seventh. The bass breaks ties between readings of a fuller
+        # chord.
+        score = covered / total - rare
 
-            if useBass and root == bass:
-                score += 0.2
+        if absent:
+            score -= omission[absent.bit_length() - 1]
 
-            if score > best[0]:
-                best = (score, f"{PITCH_CLASS_NAMES[root]}{suffix}")
+        if useBass and root == bass:
+            score += 0.2
+
+        if score > best[0]:
+            best = (score, name)
 
     name = best[1] if best[0] >= threshold else NO_CHORD
     return name

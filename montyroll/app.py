@@ -256,6 +256,8 @@ class MidiEditorApp(tk.Tk):
         self.noteToItem: dict[int, int] = {}
         self.itemOutline: dict[int, str] = {}        # canvas item -> its unselected edge
         self.noteItems: dict[int, list[int]] = {}    # id(note) -> every item drawing it
+        self._eventsStale = True    # the Events page is filled when next on view
+        self._eventsAfter: str | None = None
         self._drawnSpan: tuple[float, float] = (0.0, 0.0)   # ticks whose notes are drawn
         self._noteIndex: analysis.StepIndex | None = None   # the notes by start, for the span
         self._notesAfter: str | None = None
@@ -1082,7 +1084,8 @@ class MidiEditorApp(tk.Tk):
             self.reportTexts[key] = text
 
         self.nb.bind("<<NotebookTabChanged>>",
-                     lambda e: (self._updateDrawerButtons(), self._showReportIfSelected()))
+                     lambda e: (self._updateDrawerButtons(), self._showReportIfSelected(),
+                                self._showEventsIfSelected()))
         self.reportNb.bind("<<NotebookTabChanged>>", lambda e: self._showReportIfSelected())
 
         # Mouse bindings for the roll. Wheel events are bound on the ruler and
@@ -1171,6 +1174,7 @@ class MidiEditorApp(tk.Tk):
         self.nb.select(DRAWER_PAGES.index(page))
         self._updateDrawerButtons()
         self._showReportIfSelected()
+        self._showEventsIfSelected()
 
     def closeDrawer(self):
         """Close the drawer; the roll takes the whole centre column again."""
@@ -1364,7 +1368,7 @@ class MidiEditorApp(tk.Tk):
         self._loadPoolControls()
         self.redraw()
         self.after_idle(self._centreOnNotes)
-        self._fillEvents()
+        self._eventsChanged()
         self._updateTitle()
         self._updateSummary()
         self._showReadout(0.0)
@@ -1390,9 +1394,35 @@ class MidiEditorApp(tk.Tk):
         self.title(f"MontyRoll - {name}{star}")
 
     def _markDirty(self):
-        """Flag the song as modified and show the star in the title."""
+        """Flag the song as modified, show the star in the title, and date the Events page."""
         self.song.dirty = True
         self._updateTitle()
+        self._eventsChanged()
+
+    def _eventsChanged(self):
+        """Count the events and date the Events page, filling it at the next idle if on view."""
+        total = sum(len(track) for track in self.song.mf.tracks)
+        self.eventCountLbl.config(text=f"{total:,} events")
+        self._eventsStale = True
+
+        if self._eventsAfter is None and self._eventsOnView():
+            self._eventsAfter = self.after_idle(self._showEventsIfSelected)
+
+    def _eventsOnView(self) -> bool:
+        """Report whether the drawer is open on the Events page.
+
+        Returns:
+            bool: True when the event list can be seen.
+        """
+        onView = self.drawerOpen and DRAWER_PAGES[self.nb.index(self.nb.select())] == "Events"
+        return onView
+
+    def _showEventsIfSelected(self):
+        """Fill the Events page when it is on view and out of date."""
+        self._eventsAfter = None
+
+        if self._eventsStale and self._eventsOnView():
+            self._fillEvents()
 
     def _setStatus(self, text: str):
         """Show a message in the status bar.
@@ -5170,7 +5200,6 @@ class MidiEditorApp(tk.Tk):
         self._markDirty()
         self._invalidateDemand((0, 0))
         self.redraw()
-        self._fillEvents()
         self._updateSummary()
         self._setStatus(message)
         self._liveUpdate()
@@ -5881,7 +5910,6 @@ class MidiEditorApp(tk.Tk):
         self._syncCardsToPlan()
         self._loadPoolControls()
         self.redraw()
-        self._fillEvents()
         self._updateSummary()
         self._refreshInspector()
         self._refreshChannelCommands()
@@ -6232,12 +6260,16 @@ class MidiEditorApp(tk.Tk):
     def _fillEvents(self):
         """Refill the Events tab with every event of every track in tick order.
 
+        `_showEventsIfSelected` calls it when the page is on view and out of
+        date, so a file opens without filling a page no one is looking at.
+
         The list is capped at MAX_EVENT_ROWS, with a final row saying how
         many events were left out, to keep the Treeview responsive on large
         files.
         """
         tree = self.evTree
         tree.delete(*tree.get_children())
+        self._eventsStale = False
         s = self.song
         rows = []
 
@@ -6264,7 +6296,6 @@ class MidiEditorApp(tk.Tk):
                 "", "", "", "", "", "...",
                 f"{len(rows) - MAX_EVENT_ROWS} more events not shown"))
 
-        self.eventCountLbl.config(text=f"{len(rows):,} events")
 
     @staticmethod
     def _evType(e: smf.Event) -> str:

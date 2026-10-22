@@ -2332,6 +2332,7 @@ class TestTempoEditing:
         assert app.song.dirty
         assert "Tempo 90 bpm from bar 2" in app.status.cget("text")
         assert len(app.canvas.find_withtag("tempo")) == 2
+        app.openDrawer("Events")
         rows = [app.evTree.item(i)["values"] for i in app.evTree.get_children()]
         assert any(r[5] == "tempo" and r[6] == "90.0 bpm" for r in rows)
 
@@ -2515,9 +2516,28 @@ class TestEventList:
     """The decoded event table."""
 
     def testEveryEventIsListed(self, app: MidiEditorApp) -> None:
-        """One row per event, all of them for a small file."""
+        """One row per event, all of them for a small file, once the page is on view."""
+        assert not app.evTree.get_children()
+        app.openDrawer("Events")
         total = sum(len(t) for t in app.song.mf.tracks)
         assert len(app.evTree.get_children()) == total
+
+    def testAnEditOnViewRefillsThePage(self, app: MidiEditorApp) -> None:
+        """A note added while the page is on view is listed at the next idle moment;
+        one added while it is hidden is listed when it opens."""
+        app.openDrawer("Events")
+        before = len(app.evTree.get_children())
+        app.song.addNote(0, 90, 100, 0, 480)
+        app._markDirty()
+        app.update()
+        assert len(app.evTree.get_children()) == before + 2
+        app.openDrawer("Report")
+        app.song.addNote(0, 91, 100, 0, 480)
+        app._markDirty()
+        app.update()
+        assert len(app.evTree.get_children()) == before + 2
+        app.openDrawer("Events")
+        assert len(app.evTree.get_children()) == before + 4
 
     def testRowsAreCapped(self, app: MidiEditorApp) -> None:
         """A huge file shows the first MAX_EVENT_ROWS rows plus one overflow line."""
