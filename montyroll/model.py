@@ -542,6 +542,71 @@ class Song:
 
         self.dirty = True
 
+    def addChannel(self, channel: int, program: int = 0) -> None:
+        """Start a channel with a program change at tick 0.
+
+        A format 0 file has its one track, so the program change goes there;
+        any other file gains a track named after the instrument for it, at
+        the end, so the tracks already there keep their places and the notes
+        held elsewhere stay valid.
+
+        Args:
+            channel: 0-based MIDI channel, not yet in use.
+            program: GM program number, 0-127.
+
+        Raises:
+            ValueError: the channel is already in use.
+        """
+        if channel in self.channels:
+            raise ValueError(f"Ch {channel + 1} is already in use")
+
+        info = ChannelInfo(channel, program=program)
+        change = smf.Event(0, 0xC0 | channel, bytearray([program]))
+
+        if self.mf.format == 0:
+            self.mf.tracks[0].insert(0, change)
+            ti = 0
+        else:
+            name = info.instrument.encode("latin-1")
+            self.mf.tracks.append([smf.Event(0, smf.META, bytearray(name), smf.META_TRACK_NAME),
+                                   change])
+            self.trackNames.append(info.instrument)
+            ti = len(self.mf.tracks) - 1
+
+        info.tracks.add(ti)
+        self.channels[channel] = info
+        self.dirty = True
+
+    def removeChannel(self, channel: int) -> int:
+        """Remove every event on a channel, and the tracks it leaves with nothing to carry.
+
+        Notes, program changes, controllers and pitch bend all go. A track
+        that had events on the channel and is left with only its name and
+        end of track is dropped, unless it is the file's last track. The
+        derived views are rebuilt, so notes held elsewhere are stale after.
+
+        Args:
+            channel: 0-based MIDI channel.
+
+        Returns:
+            int: the number of notes removed.
+        """
+        removed = sum(1 for n in self.notes if n.channel == channel)
+        bare = (smf.META_TRACK_NAME, smf.META_END_OF_TRACK)
+        kept: list[list[smf.Event]] = []
+        emptied: list[list[smf.Event]] = []
+
+        for track in self.mf.tracks:
+            rest = [e for e in track if e.channel != channel]
+            empty = len(rest) < len(track) and all(e.status == smf.META and e.metaType in bare
+                                                   for e in rest)
+            (emptied if empty else kept).append(rest)
+
+        self.mf.tracks = kept or emptied[:1]
+        self.rebuild()
+        self.dirty = True
+        return removed
+
     def setProgram(self, channel: int, program: int) -> None:
         """Set the instrument on a channel by rewriting every program change it has.
 

@@ -38,6 +38,8 @@ Existing notes are changed by dragging. Drag the body of a note to move it in ti
 
 Several notes can be changed together. Hold `Shift` and click each note to build up a selection, or press `Ctrl+A` to select every note in the file. The selected notes are outlined in white, and a drag on any one of them moves them all. `Del` removes the selection, and **Edit > Set Velocity...** gives every selected note one velocity. A click on an empty part of the roll, or `Esc`, clears the selection again.
 
+A new part starts with **+** at the head of the channel strip. It takes the lowest free channel, other than Ch 10, playing Acoustic Grand Piano on a track of its own, and its row becomes the active one, so a double click on the roll writes its first note. The inspector then sets its instrument. **Edit > Add Drum Channel** starts Ch 10 for a drum part while the file has none. **-** deletes the active channel after asking, with every note and event on it.
+
 `Ctrl+S` saves the edits back to the file. **File > Save As...** writes them to a new file, and the original stays as it was.
 
 ## Change an instrument or a volume

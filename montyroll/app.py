@@ -659,6 +659,9 @@ class MidiEditorApp(tk.Tk):
         em.add_command(label="Delete Selection", accelerator="Del", command=self.deleteSelection)
         em.add_command(label="Set Velocity...", command=self.setVelocityDialog)
         em.add_separator()
+        em.add_command(label="Add Channel", command=self.addChannel)
+        em.add_command(label="Add Drum Channel", command=lambda: self.addChannel(drums=True))
+        em.add_command(label="Delete Channel...", command=self.deleteChannel)
         em.add_command(label="Split Channel into Parts...", command=self.splitChannelDialog)
         em.add_command(label="Double Channel...", command=self.doubleChannelDialog)
         em.add_command(label="Echo Channel...", command=self.echoChannelDialog)
@@ -666,6 +669,7 @@ class MidiEditorApp(tk.Tk):
         em.add_command(label="Set Tempo at Bar...", command=self.setTempoDialog)
         em.add_command(label="Scale All Tempos...", command=self.scaleTemposDialog)
         m.add_cascade(label="Edit", menu=em)
+        self.editMenu = em
 
         # Closing the window goes through the same unsaved-changes check as
         # File > Quit.
@@ -815,9 +819,18 @@ class MidiEditorApp(tk.Tk):
         Tooltip(b, "Set every channel's instrument to one GM program\n"
                    "(Ch 10, the percussion channel, is left alone)")
         b = ttk.Button(head, text="Clear", style="Title.TButton", command=self.clearMuteSolo)
-        b.pack(side="right")
+        b.pack(side="right", padx=(2, 0))
         Tooltip(b, "Clear all mutes and solos and restore the\n"
                    "instruments the file was opened with")
+        self.removeChannelBtn = ttk.Button(head, text="-", style="Title.TButton",
+                                           command=self.deleteChannel)
+        self.removeChannelBtn.pack(side="right", padx=(2, 0))
+        Tooltip(self.removeChannelBtn, "Delete the active channel and every event on it")
+        self.addChannelBtn = ttk.Button(head, text="+", style="Title.TButton",
+                                        command=self.addChannel)
+        self.addChannelBtn.pack(side="right")
+        Tooltip(self.addChannelBtn, "Add a channel on the lowest free one, playing\n"
+                                    "Acoustic Grand Piano, and make it active")
         ttk.Label(head, text="Channels", style="Title.TLabel",
                   font=(self.uiFamily, 10, "bold")).pack(side="left")
 
@@ -1320,6 +1333,7 @@ class MidiEditorApp(tk.Tk):
         self.activeChannel = chans[0] if chans else 0
         self.originalPrograms = {ch: info.program for ch, info in self.song.channels.items()}
         self._buildChannelRows()
+        self._refreshChannelCommands()
         self._loadPoolControls()
         self.redraw()
         self.after_idle(self._centreOnNotes)
@@ -1374,7 +1388,8 @@ class MidiEditorApp(tk.Tk):
         figures exist whichever row is active. Clicking a row makes it the
         active channel, and wheel events on a row scroll the strip.
         """
-        # Throw away the previous song's rows.
+        # Throw away the previous rows and the widgets listed from them; the
+        # mute, solo and reduction variables keep their state.
         for w in self.chanHolder.winfo_children():
             w.destroy()
 
@@ -1383,6 +1398,10 @@ class MidiEditorApp(tk.Tk):
         self.nameLabels.clear()
         self.rowNames.clear()
         self.rowBars.clear()
+        self.poolCombos.clear()
+        self.usageLabels.clear()
+        self.usageText.clear()
+        self.descLabels.clear()
         figures = analysis.channelDemand(self._ensureSongDemand())
         self.channelFigures = figures
         p = self.palette
@@ -1426,8 +1445,8 @@ class MidiEditorApp(tk.Tk):
             # bar's grey in every state: ttk reads a state map anywhere up
             # the style's family before a plain setting, so without one the
             # checkbutton's hover colour would show.
-            self.muteVars[ch] = tk.BooleanVar(value=False)
-            self.soloVars[ch] = tk.BooleanVar(value=False)
+            self.muteVars.setdefault(ch, tk.BooleanVar(value=False))
+            self.soloVars.setdefault(ch, tk.BooleanVar(value=False))
 
             for key, var, tip in (
                     ("Solo", self.soloVars[ch], f"Solo channel {ch + 1}: when any channel is "
@@ -1483,41 +1502,42 @@ class MidiEditorApp(tk.Tk):
                             "and how much of its playing time the pool being\n"
                             "edited already sounds (low: it could share that pool)")
 
-                # Reduction: the pool the channel belongs to, its own release
-                # (blank for the tier's) and its priority.
-                prow = tk.Frame(detail)
-                prow.pack(fill="x", pady=(3, 1))
-                tk.Label(prow, text="Pool", fg=p["muted"],
-                         font=(self.uiFamily, 9)).pack(side="left")
-                pv = self.poolVars.setdefault(ch, tk.StringVar(value=self._poolNameOf(ch)))
-                pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=7,
-                                  values=self._poolNames())
-                pc.pack(side="left", padx=(3, 8))
-                pc.bind("<<ComboboxSelected>>", lambda e, c=ch: self._channelPoolChanged(c))
-                self.poolCombos.append(pc)
-                Tooltip(pc, "The pool this channel's notes are reduced in;\n"
-                            "(none) leaves the channel out of the reduction")
-                tk.Label(prow, text="Rel", fg=p["muted"],
-                         font=(self.uiFamily, 9)).pack(side="left")
-                release = f"{self.plan.release[ch]:g}" if ch in self.plan.release else ""
-                rv = self.releaseVars.setdefault(ch, tk.StringVar(value=release))
-                rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=4,
-                                 textvariable=rv,
-                                 command=lambda c=ch: self._channelReleaseChanged(c))
-                rs.pack(side="left", padx=(3, 8))
-                rs.bind("<KeyRelease>", lambda e, c=ch: self._channelReleaseChanged(c))
-                Tooltip(rs, "Release in milliseconds: how long a voice stays busy\n"
-                            "after this channel's notes end; blank uses the tier's")
-                tk.Label(prow, text="Pri", fg=p["muted"],
-                         font=(self.uiFamily, 9)).pack(side="left")
-                var = self.priorityVars.setdefault(
-                    ch, tk.DoubleVar(value=self.plan.priorityOf(ch)))
-                pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=3,
-                                 textvariable=var, command=self._reductionChanged)
-                pr.pack(side="left", padx=(3, 0))
-                pr.bind("<KeyRelease>", lambda e: self._reductionChanged())
-                Tooltip(pr, "Reduction priority: 1 is neutral, higher keeps\n"
-                            "this channel's notes at the expense of others")
+            # Reduction: the pool the channel belongs to, its own release
+            # (blank for the tier's) and its priority, for every channel, so
+            # one with no notes yet can be given its pool.
+            prow = tk.Frame(detail)
+            prow.pack(fill="x", pady=(3, 1))
+            tk.Label(prow, text="Pool", fg=p["muted"],
+                     font=(self.uiFamily, 9)).pack(side="left")
+            pv = self.poolVars.setdefault(ch, tk.StringVar(value=self._poolNameOf(ch)))
+            pc = ttk.Combobox(prow, textvariable=pv, state="readonly", width=7,
+                              values=self._poolNames())
+            pc.pack(side="left", padx=(3, 8))
+            pc.bind("<<ComboboxSelected>>", lambda e, c=ch: self._channelPoolChanged(c))
+            self.poolCombos.append(pc)
+            Tooltip(pc, "The pool this channel's notes are reduced in;\n"
+                        "(none) leaves the channel out of the reduction")
+            tk.Label(prow, text="Rel", fg=p["muted"],
+                     font=(self.uiFamily, 9)).pack(side="left")
+            release = f"{self.plan.release[ch]:g}" if ch in self.plan.release else ""
+            rv = self.releaseVars.setdefault(ch, tk.StringVar(value=release))
+            rs = ttk.Spinbox(prow, from_=0, to=5000, increment=10, width=4,
+                             textvariable=rv,
+                             command=lambda c=ch: self._channelReleaseChanged(c))
+            rs.pack(side="left", padx=(3, 8))
+            rs.bind("<KeyRelease>", lambda e, c=ch: self._channelReleaseChanged(c))
+            Tooltip(rs, "Release in milliseconds: how long a voice stays busy\n"
+                        "after this channel's notes end; blank uses the tier's")
+            tk.Label(prow, text="Pri", fg=p["muted"],
+                     font=(self.uiFamily, 9)).pack(side="left")
+            var = self.priorityVars.setdefault(
+                ch, tk.DoubleVar(value=self.plan.priorityOf(ch)))
+            pr = ttk.Spinbox(prow, from_=0.5, to=5.0, increment=0.5, width=3,
+                             textvariable=var, command=self._reductionChanged)
+            pr.pack(side="left", padx=(3, 0))
+            pr.bind("<KeyRelease>", lambda e: self._reductionChanged())
+            Tooltip(pr, "Reduction priority: 1 is neutral, higher keeps\n"
+                        "this channel's notes at the expense of others")
 
             # A click on any plain part of the row makes it the active
             # channel, and the wheel scrolls the strip from the row too: X11
@@ -5558,6 +5578,119 @@ class MidiEditorApp(tk.Tk):
         self.song.dirty = True
         self._refreshAll()
         self._setStatus(message)
+
+    def _freeChannel(self, drums: bool) -> int | None:
+        """Find the channel a new part would take.
+
+        Args:
+            drums: the drum channel, for a drum part.
+
+        Returns:
+            int | None: the drum channel or the lowest other unused channel,
+            or None when it is taken.
+        """
+        if drums:
+            free = [model.DRUM_CHANNEL]
+        else:
+            free = [ch for ch in range(16) if ch != model.DRUM_CHANNEL]
+
+        channel = next((ch for ch in free if ch not in self.song.channels), None)
+        return channel
+
+    def addChannel(self, drums: bool = False):
+        """Start a channel on the lowest free one, or on the drum channel, and make it active.
+
+        It plays Acoustic Grand Piano, or the standard kit on the drum
+        channel, from a program change at tick 0, and joins the pool the
+        Reduce panel has selected.
+
+        Args:
+            drums: start the drum channel.
+        """
+        ch = self._freeChannel(drums)
+
+        if ch is None:
+            self._setStatus("Ch 10 is in use" if drums else "Every channel is in use")
+            return
+
+        self.song.addChannel(ch)
+
+        if self.editPool is not None:
+            self.editPool.channels = sorted(self.editPool.channels + [ch])
+
+        self.activeChannel = ch
+        self._channelsAltered(f"Added Ch {ch + 1} {self.song.channels[ch].instrument}")
+
+    def deleteChannel(self):
+        """Delete the active channel and every event on it, once confirmed.
+
+        The channel leaves its pool and loses its priority and release; the
+        next channel up becomes active, or the last one left.
+        """
+        ch = self.activeChannel
+        info = self.song.channels.get(ch)
+
+        if info is None:
+            return
+
+        notes = f"its {info.noteCount} note{'s' if info.noteCount != 1 else ''}"
+
+        if not messagebox.askyesno("Delete channel",
+                                   f"Delete Ch {ch + 1} {info.instrument} and {notes}?\n"
+                                   "The file on disk is not changed until it is saved.",
+                                   parent=self):
+            return
+
+        removed = self.song.removeChannel(ch)
+        self.selection.clear()
+
+        # The plan and the row variables forget the channel.
+        for pool in self.plan.pools:
+            if ch in pool.channels:
+                pool.channels.remove(ch)
+
+        self.plan.priority.pop(ch, None)
+        self.plan.release.pop(ch, None)
+
+        for table in (self.muteVars, self.soloVars, self.poolVars, self.priorityVars,
+                      self.releaseVars):
+            table.pop(ch, None)
+
+        remaining = sorted(self.song.channels)
+        self.activeChannel = next((c for c in remaining if c > ch),
+                                  remaining[-1] if remaining else 0)
+        self._channelsAltered(f"Deleted Ch {ch + 1} {info.instrument} and "
+                              f"{removed} note{'s' if removed != 1 else ''}")
+
+    def _channelsAltered(self, message: str):
+        """Bring every view up to date after a channel was added or deleted.
+
+        Args:
+            message: shown in the status bar.
+        """
+        self._markDirty()
+        self._invalidateDemand()
+        self._buildChannelRows()
+        self._syncCardsToPlan()
+        self._loadPoolControls()
+        self.redraw()
+        self._fillEvents()
+        self._updateSummary()
+        self._refreshInspector()
+        self._refreshChannelCommands()
+        self._liveUpdate()
+        self._setStatus(message)
+
+    def _refreshChannelCommands(self):
+        """Enable adding a channel while one is free and deleting one while any exists."""
+        free = "normal" if self._freeChannel(False) is not None else "disabled"
+        drums = "normal" if self._freeChannel(True) is not None else "disabled"
+        used = "normal" if self.song.channels else "disabled"
+        self.addChannelBtn.configure(state=free)
+        self.removeChannelBtn.configure(state=used)
+        self.editMenu.entryconfigure("Add Channel", state=free)
+        self.editMenu.entryconfigure("Add Drum Channel", state=drums)
+        self.editMenu.entryconfigure("Delete Channel...", state=used)
 
     def splitChannelDialog(self):
         """Ask for a part count and split the active channel into parts.

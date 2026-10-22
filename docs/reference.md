@@ -144,6 +144,9 @@ The **Edit** menu acts on the selected notes, on the active channel, or on the t
 | **Select All** | Selects every note. |
 | **Delete Selection** | Deletes the selected notes. |
 | **Set Velocity...** | Sets the velocity of the selected notes, 1 to 127. |
+| **Add Channel** | Starts the lowest free channel other than Ch 10, playing Acoustic Grand Piano, on a track of its own, and makes it active. Greyed out while every channel is in use. |
+| **Add Drum Channel** | Starts Ch 10 with the standard kit. Greyed out while Ch 10 is in use. |
+| **Delete Channel...** | Deletes the active channel after a confirmation: every event on it, and any track left with nothing else. |
 | **Split Channel into Parts...** | Splits the active channel into 2 to 8 parts, each on its own channel. |
 | **Double Channel...** | Copies the active channel onto the lowest free channel at 70% velocity. The copy sits -24 to +24 semitones away. |
 | **Echo Channel...** | Copies the active channel onto the lowest free channel at 50% velocity. The copy is delayed by a number of ticks. |
@@ -152,10 +155,12 @@ The **Edit** menu acts on the selected notes, on the active channel, or on the t
 
 ## Channel strip
 
-Three buttons head the strip.
+Five buttons head the strip.
 
 | Button | Effect |
 | --- | --- |
+| **+** | Adds a channel, as **Edit > Add Channel**. |
+| **-** | Deletes the active channel, as **Edit > Delete Channel...**. |
 | **Clear** | Clears every mute and solo and restores the instruments the file opened with. |
 | **Change All** | Sets every channel except Ch 10 to one instrument. |
 | **Mute All** | Mutes every channel. |

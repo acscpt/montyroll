@@ -78,7 +78,7 @@ Pools divide the channels into groups that share voices. Tiers describe the chip
 
 **Arranging**
 
-Three commands on the **Edit** menu add parts to an arrangement that has voices to spare. **Split Channel into Parts...** gives each part of a channel a channel of its own. **Double Channel...** copies a channel onto a free channel at an interval, and **Echo Channel...** copies it after a delay.
+Three commands on the **Edit** menu add parts to an arrangement that has voices to spare. **Split Channel into Parts...** gives each part of a channel a channel of its own. **Double Channel...** copies a channel onto a free channel at an interval, and **Echo Channel...** copies it after a delay. **+** at the head of the channel strip starts an empty part on a free channel, and **-** deletes the active channel.
 
 **Exporting**
 

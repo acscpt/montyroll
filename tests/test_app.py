@@ -1753,7 +1753,8 @@ class TestPlanControls:
         assert [p.name for p in app.plan.pools] == ["all"]
         assert app.plan.pools[0].channels == [0, 1, 9]
         assert app.plan.pools[0].voices == app.budgetVar.get()
-        assert all(v.get() == "all" for v in app.poolVars.values())
+        assert all(app.poolVars[ch].get() == "all" for ch in (0, 1, 9))
+        assert app.poolVars[2].get() == NO_POOL       # events but no notes
         assert app.poolVar.get() == "all"
         assert app.editPool is app.plan.pools[0]
         assert app.budgetEditable
@@ -1809,7 +1810,7 @@ class TestPlanControls:
         app.poolVar.set("strings")
         app._renamePool()
         assert app.plan.pools[0].name == "strings"
-        assert all(v.get() == "strings" for v in app.poolVars.values())
+        assert all(app.poolVars[ch].get() == "strings" for ch in app.plan.pools[0].channels)
         assert "strings" in app.poolCombos[0].cget("values")
         app.addPool()
         app.poolVar.set("strings")
@@ -2111,6 +2112,80 @@ class TestArrangeMenu:
         app.splitChannelDialog()
         assert errors and "no notes" in errors[0]
         assert app.song is song
+
+
+class TestChannelCommands:
+    """Adding a channel and deleting one, from the title bar and the Edit menu."""
+
+    def testAddChannelMakesAnActiveRow(self, app: MidiEditorApp) -> None:
+        """A new channel takes the lowest free one, gets a row, is active and joins the pool."""
+        assert 3 not in app.song.channels           # 0, 1, 2 and 10 are in use
+        app.addChannel()
+        assert app.song.channels[3].instrument == "Acoustic Grand Piano"
+        assert 3 in app.rowBars and app.activeChannel == 3
+        assert 3 in app.editPool.channels and app.poolVars[3].get() == app.editPool.name
+        assert app.song.dirty
+        assert app.status.cget("text") == "Added Ch 4 Acoustic Grand Piano"
+
+    def testAddedChannelTakesNotes(self, app: MidiEditorApp) -> None:
+        """A double click on the roll after adding a channel writes a note on it."""
+        app.addChannel()
+        x = 20 * app.ppt * app.song.mf.division   # bar 5 and a bit
+        y = (127 - 100) * app.rowH + 2           # pitch 100, nothing there
+        app.onDouble(FakeEvent(*_toWidget(app, x, y)))
+        assert any(n.channel == 3 and n.pitch == 100 for n in app.song.notes)
+
+    def testDrumChannelOnlyWhileFree(self, app: MidiEditorApp) -> None:
+        """The drum channel can be started only while no part uses it."""
+        assert app.editMenu.entrycget("Add Drum Channel", "state") == "disabled"
+        app.addChannel(drums=True)
+        assert app.status.cget("text") == "Ch 10 is in use"
+
+    def testAddingStopsWhenEveryChannelIsUsed(self, app: MidiEditorApp) -> None:
+        """With all fifteen non-drum channels in use, + is greyed out."""
+        while app._freeChannel(False) is not None:
+            app.addChannel()
+
+        assert app.addChannelBtn.instate(["disabled"])
+        assert app.editMenu.entrycget("Add Channel", "state") == "disabled"
+        app.addChannel()
+        assert app.status.cget("text") == "Every channel is in use"
+
+    def testDeleteChannelAsksFirst(self, app: MidiEditorApp,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        """Declined, nothing changes; confirmed, the channel and its plan entries go."""
+        asked: list[str] = []
+        answer = [False]
+        monkeypatch.setattr("montyroll.app.messagebox.askyesno",
+                            lambda title, text, **k: (asked.append(text), answer[0])[1])
+        app._setActiveChannel(1)
+        app.plan.priority[1] = 2.0
+        notes = app.song.channels[1].noteCount
+        app.deleteChannel()
+        assert f"Delete Ch 2 Flute and its {notes} notes?" in asked[0]
+        assert 1 in app.song.channels and not app.song.dirty
+        answer[0] = True
+        app.deleteChannel()
+        assert 1 not in app.song.channels and 1 not in app.rowBars
+        assert all(1 not in pool.channels for pool in app.plan.pools)
+        assert 1 not in app.plan.priority and 1 not in app.muteVars
+        assert app.activeChannel == 2 and app.song.dirty
+        assert app.status.cget("text") == f"Deleted Ch 2 Flute and {notes} notes"
+
+    def testMuteSurvivesAddingAChannel(self, app: MidiEditorApp) -> None:
+        """Rebuilding the rows for a new channel keeps the other rows' mutes."""
+        app.muteVars[0].set(True)
+        app.addChannel()
+        assert app.muteVars[0].get()
+
+    def testClearAfterAnInstrumentChangeLeavesNoDeadWidgets(self, app: MidiEditorApp) -> None:
+        """Clear rebuilds the rows when it restores an instrument; the lists follow."""
+        app.song.setProgram(0, 40)
+        app.clearMuteSolo()
+        assert all(combo.winfo_exists() for combo in app.poolCombos)
+        assert all(label.winfo_exists() for label in app.usageLabels.values())
+        app.addPool()
+        assert len(app.plan.pools) == 2
 
 
 class TestTempoEditing:

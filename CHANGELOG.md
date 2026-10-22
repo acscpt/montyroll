@@ -14,6 +14,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Lanes under the roll.** A switch above the strip chooses Demand, as before, Velocity, with a bar for each note, or Weight, with each note's reduction weight and the notes the reduction drops drawn as outlines.
 
+- **Adding and deleting channels.** **+** and **-** at the head of the channel strip, and **Edit > Add Channel**, **Add Drum Channel** and **Delete Channel...**, start a channel playing Acoustic Grand Piano on a track of its own, or Ch 10 with the standard kit, and delete the active channel with every event on it after asking. A new channel joins the selected pool and becomes active, ready for notes. New `Song.addChannel` and `Song.removeChannel`.
+
 - **A transport readout.** The toolbar shows the time, the bar and beat, and the tempo in a large readout, which shows the opening position while stopped.
 
 ### Changed
@@ -35,6 +37,10 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 - **Budget lines.** The lines on the strip are solid and two pixels wide over a dark edge, with their labels on tags, so they read across the stack. Each one moves a pool when dragged, a tier's line the selected pool on that tier, and it turns blue with the pool's name on its tag while it is under the pointer or dragged.
 
 ### Fixed
+
+- **Clear after an instrument change.** **Clear** rebuilt the channel rows when it restored an instrument and left the old rows' pool boxes on the list the pools refresh, so the next pool added or renamed failed with a Tcl error. The rows' lists are now rebuilt with them.
+
+- **Pool controls on a channel with no notes.** A channel with events but no notes had no **Pool**, **Rel** or **Pri** under its row. Every row has them now, so a new channel can be given its pool before it has notes.
 
 - **Raising the budget with the reduction on.** While **Reduce to the voice budget** was on, the budget beside the strip could be lowered but not raised, as its limit followed the reduced demand, which the budget itself caps. The limit is now the peak of the file as written.
 
