@@ -56,6 +56,7 @@ BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
 BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
 REDUCE_POLL_MS = 15  # how often a reduction worked out off the main thread is looked for
+CHORD_SLICE_S = 0.008    # time given to naming beats at each idle moment after a file opens
 REDUCE_SWITCH_S = 0.0001  # the interpreter's switch interval while it is worked out
 MASTER_MAX = 150     # the master volume's top, in percent
 GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
@@ -374,6 +375,8 @@ class MidiEditorApp(tk.Tk):
         self.chords: list[tuple[int, int, str]] | None = None
         self.chordNames: list[str] | None = None     # per beat, before smoothing
         self._chordStale: list[tuple[int, int]] = []    # tick spans whose beats need naming
+        self._chordsPending = False    # a new file's beats are being named in idle slices
+        self._chordAfter: str | None = None
         self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
 
         # Reduction: the plan's switches live in these variables, the result
@@ -1393,11 +1396,11 @@ class MidiEditorApp(tk.Tk):
         The job's thread is a daemon and is left to end; the interpreter's
         switch interval is given back.
         """
-        for pending in (self._reducePoll, self._reduceStart):
+        for pending in (self._reducePoll, self._reduceStart, self._chordAfter):
             if pending is not None:
                 self.after_cancel(pending)
 
-        self._reducePoll = self._reduceStart = None
+        self._reducePoll = self._reduceStart = self._chordAfter = None
         self._endReduceJob()
         super().destroy()
 
@@ -1426,6 +1429,7 @@ class MidiEditorApp(tk.Tk):
         self.chords = None
         self.chordNames = None
         self._chordStale = []
+        self._chordsPending = True
         self._noteIndex = None
         self._sweepBase = None
         self._dropReduction()
@@ -1467,6 +1471,7 @@ class MidiEditorApp(tk.Tk):
         self._loadPoolControls()
         self.redraw()
         self.after_idle(self._centreOnNotes)
+        self._nameChordsLater()
         self._eventsChanged()
         self._updateTitle()
         self._updateSummary()
@@ -2656,8 +2661,10 @@ class MidiEditorApp(tk.Tk):
 
         # -- chords (bottom row): one label per run in the span, skipped
         # when the run is narrower than its text so a busy passage does not
-        # become a smear.
-        for start, end, name in self._ensureChords():
+        # become a smear. A new file's row is drawn once its beats are named.
+        runs = [] if self._chordsPending else self._ensureChords()
+
+        for start, end, name in runs:
             if name == analysis.NO_CHORD or end * self.ppt < x0 or start * self.ppt > x1:
                 continue
 
@@ -2937,9 +2944,22 @@ class MidiEditorApp(tk.Tk):
     def _ensureChords(self) -> list[tuple[int, int, str]]:
         """Return the chord runs, one per beat merged, rebuilding if needed.
 
+        Beats still to be named after a file opened are named here, and the
+        ruler draws its chord row at the next idle moment.
+
         Returns:
             list[tuple[int, int, str]]: (start tick, end tick, name) runs.
         """
+        if self._chordsPending:
+            self._chordsPending = False
+            self.chords = None
+
+            if self._chordAfter is not None:
+                self.after_cancel(self._chordAfter)
+                self._chordAfter = None
+
+            self.after_idle(self._drawRuler)
+
         if self.chords is None:
             beat = self.song.mf.division * 4 // self.song.timeSigs[0][2]
             steps = len(range(0, self.song.maxTick, beat))
@@ -2964,6 +2984,50 @@ class MidiEditorApp(tk.Tk):
             self.chords = analysis.chordRuns(names, beat)
 
         return self.chords
+
+    def _nameChordsLater(self):
+        """Name a new file's beats in short slices at idle moments, after the window draws."""
+        if self._chordAfter is None:
+            self._chordAfter = self.after_idle(self._nameChordSlice)
+
+    def _nameChordSlice(self):
+        """Name beats for up to `CHORD_SLICE_S`, then queue the next slice or draw the chord row.
+
+        The names go into `chordNames`, where `_ensureChords` finds them, so
+        a beat named here is not named again; an edit meanwhile marks its
+        beats stale as it would after the row was drawn.
+        """
+        self._chordAfter = None
+
+        if not self._chordsPending:
+            return
+
+        beat = self.song.mf.division * 4 // self.song.timeSigs[0][2]
+        steps = len(range(0, self.song.maxTick, beat))
+        names = self.chordNames
+
+        if names is None:
+            names = self.chordNames = [None] * steps
+        elif len(names) < steps:
+            names.extend([None] * (steps - len(names)))
+
+        index = self._ensureNoteIndex()
+        deadline = time.perf_counter() + CHORD_SLICE_S
+        i = 0
+
+        while i < len(names) and time.perf_counter() < deadline:
+            if names[i] is None:
+                names[i] = analysis.chordAt(self.song, index, i * beat, (i + 1) * beat)
+
+            i += 1
+
+        if None in names:
+            self._chordAfter = self.after_idle(self._nameChordSlice)
+            return
+
+        self._chordsPending = False
+        self.chords = None
+        self._drawRuler()
 
     def _chordAt(self, tick: float) -> str:
         """Name the chord sounding at a tick.

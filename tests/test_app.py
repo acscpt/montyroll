@@ -685,6 +685,39 @@ class TestChordCache:
         assert 0 < len(named) <= 4
         assert rows == self._fresh(app)
 
+    def _chordLabels(self, app: MidiEditorApp) -> list[str]:
+        """The chord names drawn on the ruler's bottom row."""
+        r3 = app.rulerRows[3]
+        labels = [app.ruler.itemcget(i, "text") for i in app.ruler.find_withtag("scale")
+                  if app.ruler.type(i) == "text" and app.ruler.coords(i)[1] == r3 + 1]
+        return labels
+
+    def testANewFileNamesItsBeatsAfterDrawing(self, app: MidiEditorApp, songPath: Path) -> None:
+        """A file opens with its chord row empty; idle slices name the beats and draw it."""
+        app.openFile(str(songPath))
+        assert app._chordsPending and not self._chordLabels(app)
+        app.update()
+        assert not app._chordsPending
+        assert app._ensureChords() == self._fresh(app)
+        assert self._chordLabels(app)
+
+    def testAnEarlyReaderNamesTheRest(self, app: MidiEditorApp, songPath: Path) -> None:
+        """The chord under the pointer before the slices finish names every beat at once."""
+        app.openFile(str(songPath))
+        assert app._chordAt(0) == "Am"
+        assert not app._chordsPending and app._chordAfter is None
+        app.update()
+        assert self._chordLabels(app)
+
+    def testAnEditWhileNamingKeepsTheRowExact(self, app: MidiEditorApp, songPath: Path) -> None:
+        """A note added while the beats are being named is named in its beat too."""
+        app.openFile(str(songPath))
+        app._nameChordSlice()
+        note = app.song.addNote(0, 50, 100, 0, 960)
+        app._invalidateDemand((note.start, note.end))
+        app.update()
+        assert app._ensureChords() == self._fresh(app)
+
     def testTempoEditNamesNoBeat(self, app: MidiEditorApp) -> None:
         """A tempo change moves no note, so every beat keeps its name."""
         app._ensureChords()
