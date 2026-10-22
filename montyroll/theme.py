@@ -340,16 +340,17 @@ def paintedImages() -> dict[str, str]:
     when off, filled with the accent with a dark knob on the right when on,
     and the knob a pixel larger under the pointer. The toolbar knob is a
     grey disc with an accent centre on a thin inset trough. The channel
-    rows' knob is dark on a trough of translucent black, so both sit on any
-    header colour. The mute and solo icons are 18 pixels square, a speaker
-    and headphones: a dark ring and glyph when off, a dark disc with the
-    glyph cut out when on, so the header colour shows through it, and a
-    faint shadow behind the ring under the pointer. The budget's arrows
-    are slim triangles, 40 by 11, in the accent: brighter under the
-    pointer, dark on an accent bar when pressed, and dim when the budget
-    cannot be edited. The pools table's arrows are smaller, 14 by 8, plain
-    or dark on an accent bar when pressed, and muted when disabled. The images are painted once and
-    shared by every window.
+    rows' knob is a light disc on a trough of translucent black, so both
+    sit on the row's grey whether it is lit or not, and white under the
+    pointer. The mute and solo icons are 18 pixels square, a speaker and
+    headphones: a light ring and glyph when off, a light disc with the
+    glyph cut out when on, so the row shows through it, and white with a
+    faint glow behind the ring under the pointer. The budget's arrows are
+    slim triangles, 40 by 11, in the accent: brighter under the pointer,
+    dark on an accent bar when pressed, and dim when the budget cannot be
+    edited. The pools table's arrows are smaller, 14 by 8, plain or dark
+    on an accent bar when pressed, and muted when disabled. The images are
+    painted once and shared by every window.
 
     Returns:
         dict[str, str]: base64 PNG data by name: switchOff, switchOffHover,
@@ -383,8 +384,8 @@ def paintedImages() -> dict[str, str]:
                                   (circle(8, 8, 6.5), mix(p["raised"], "#ffffff", 0.2)),
                                   (circle(8, 8, 4.5), lit)]),
         "trough": png(20, 16, [(capsule(3, 17, 8, 2.5), p["field"])]),
-        "rowKnob": png(10, 12, [(circle(5, 6, 4.5), p["ink"])]),
-        "rowKnobHover": png(10, 12, [(circle(5, 6, 4.5), "#000000")]),
+        "rowKnob": png(10, 12, [(circle(5, 6, 4.5), p["text"])]),
+        "rowKnobHover": png(10, 12, [(circle(5, 6, 4.5), "#ffffff")]),
         "rowTrough": png(16, 12, [(capsule(2, 14, 6, 2), "#000000", 0.35)]),
     }
 
@@ -400,11 +401,11 @@ def paintedImages() -> dict[str, str]:
     disc = circle(9.0, 9.0, 8.55)
 
     for name, glyph in glyphs.items():
-        images[f"{name}Off"] = png(18, 18, [(ring, p["ink"]), (glyph, p["ink"])])
-        images[f"{name}OffHover"] = png(18, 18, [(disc, "#000000", 0.18), (ring, p["ink"]),
-                                                 (glyph, p["ink"])])
-        images[f"{name}On"] = png(18, 18, [(disc, p["ink"]), (glyph, None)])
-        images[f"{name}OnHover"] = png(18, 18, [(disc, "#000000"), (glyph, None)])
+        images[f"{name}Off"] = png(18, 18, [(ring, p["text"]), (glyph, p["text"])])
+        images[f"{name}OffHover"] = png(18, 18, [(disc, "#ffffff", 0.12), (ring, "#ffffff"),
+                                                 (glyph, "#ffffff")])
+        images[f"{name}On"] = png(18, 18, [(disc, p["text"]), (glyph, None)])
+        images[f"{name}OnHover"] = png(18, 18, [(disc, "#ffffff"), (glyph, None)])
 
     # The budget's arrows: a slim triangle, alone or on a bar.
     arrows = {"budgetUp": polygon([(14.0, 7.5), (20.0, 3.5), (26.0, 7.5)]),

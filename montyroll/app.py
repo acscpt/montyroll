@@ -53,6 +53,7 @@ BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
 GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
 NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
+ROW_PAD = "1.5p"     # space above and below a channel row's name, which sets the bar's height
 HOVER_LEVELS = ("bar", "beat", "cell")   # the lit areas under the pointer, outermost first
 BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
 DRAWER_PAGES = ("Events", "Report")        # the drawer's pages, in tab order
@@ -257,6 +258,7 @@ class MidiEditorApp(tk.Tk):
         self.channelRows: dict[int, tk.Frame] = {}
         self.channelDetails: dict[int, tk.Frame] = {}    # per channel: the part shown when active
         self.nameLabels: dict[int, tk.Label] = {}        # per channel: the instrument on its row
+        self.rowBars: dict[int, tk.Frame] = {}           # per channel: its row's one-line bar
         self.rowNames: dict[int, str] = {}               # per channel: that name in full
         self.activeChannel = 0
         self.originalPrograms: dict[int, int] = {}   # per channel, as the file was opened
@@ -384,6 +386,8 @@ class MidiEditorApp(tk.Tk):
         family = theme.pickFont(tkfont.families(self))
         self.uiFamily = family or tkfont.nametofont("TkDefaultFont").actual("family")
         self.rowNameFont = tkfont.Font(self, family=self.uiFamily, size=theme.UI_FONT_PT)
+        self.rowNameBoldFont = tkfont.Font(self, family=self.uiFamily, size=theme.UI_FONT_PT,
+                                           weight="bold")
 
         if family is not None:
             for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
@@ -1361,8 +1365,9 @@ class MidiEditorApp(tk.Tk):
     def _buildChannelRows(self):
         """Rebuild the channel strip, one compact row per channel the song uses.
 
-        A row is one line: the channel colour and number, the instrument,
-        mute and solo toggles and a CC7 volume slider. Under it sits the
+        A row is one line: the channel's number on a swatch of its colour,
+        the instrument, mute and solo toggles and a CC7 volume slider. Under
+        it sits the
         row's detail, shown for the active channel only: the summary, the
         demand figures, and the pool, release and priority controls. The
         detail is built for every row, so each channel's controls and
@@ -1377,10 +1382,11 @@ class MidiEditorApp(tk.Tk):
         self.channelDetails.clear()
         self.nameLabels.clear()
         self.rowNames.clear()
+        self.rowBars.clear()
         figures = analysis.channelDemand(self._ensureSongDemand())
         self.channelFigures = figures
         p = self.palette
-        s = ttk.Style(self)
+        digits = max((len(str(ch + 1)) for ch in self.song.channels), default=1)
 
         for ch in sorted(self.song.channels):
             info = self.song.channels[ch]
@@ -1388,46 +1394,24 @@ class MidiEditorApp(tk.Tk):
             row = tk.Frame(self.chanHolder)
             row.pack(fill="x", pady=(0, 1))
 
-            # The one-line row is a header bar in the channel's colour: the
-            # mute and solo icons on the left, the volume slider on the
-            # right, and between them the number and the instrument in dark
-            # text. Tk shrinks what is packed last when the strip is narrow,
-            # so the name goes last and gives way, with an ellipsis.
-            top = tk.Frame(row, bg=colour)
+            # The one-line row is a grey bar: the channel's number on a swatch
+            # of its colour, as wide as the song's largest number needs so
+            # the names line up, then the instrument, and on the right mute,
+            # solo and the volume. Tk shrinks what is packed last when the
+            # strip is narrow, so the name goes last and gives way, with an
+            # ellipsis. _highlightActiveRow colours the bar and its styles.
+            top = tk.Frame(row, bg=p["raised"])
             top.pack(fill="x")
-
-            # Mute and solo are painted icons that share _channelsChanged,
-            # which dims the roll and restarts the synth when playing. A
-            # style per channel puts each icon on the header colour in every
-            # state: ttk reads a state map anywhere up the style's family
-            # before a plain setting, so without one the checkbutton's
-            # hover colour would show. A one-pixel line in a darker shade
-            # of the colour follows each icon.
-            self.muteVars[ch] = tk.BooleanVar(value=False)
-            self.soloVars[ch] = tk.BooleanVar(value=False)
-            edge = theme.mix(colour, "#000000", 0.4)
-
-            for key, var, tip in (
-                    ("Mute", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
-                     "playback\nand dim its notes in the piano roll"),
-                    ("Solo", self.soloVars[ch], f"Solo channel {ch + 1}: when any channel is "
-                     "soloed,\nonly soloed channels play (solo overrides mute)")):
-                style = f"Ch{ch}.{key}.Row.TCheckbutton"
-                s.configure(style, background=colour)
-                s.map(style, background=[("", colour)])
-                b = ttk.Checkbutton(top, variable=var, style=style,
-                                    command=self._channelsChanged)
-                b.pack(side="left")
-                tk.Frame(top, width=1, bg=edge).pack(side="left", fill="y")
-                Tooltip(b, tip)
+            self.rowBars[ch] = top
+            tk.Label(top, text=str(ch + 1), bg=colour, fg=p["ink"], width=digits, padx=5,
+                     font=(self.uiFamily, 10, "bold")).pack(side="left", fill="y")
 
             # Volume slider starts at the file's CC7 value, or 100 when the
-            # channel has none. Its style puts the trough on the header
-            # colour. set() fires the command once during construction;
+            # channel has none. Its style puts the trough on the bar's grey.
+            # set() fires the command once during construction;
             # _volumeChanged treats that no-op as a no-op.
-            style = f"Ch{ch}.Row.Horizontal.TScale"
-            s.configure(style, background=colour)
-            vol = ttk.Scale(top, from_=0, to=127, orient="horizontal", length=56, style=style,
+            vol = ttk.Scale(top, from_=0, to=127, orient="horizontal", length=56,
+                            style=f"Ch{ch}.Row.Horizontal.TScale",
                             command=lambda v, c=ch: self._volumeChanged(c, v))
             vol.set(info.volume if info.volume >= 0 else 100)
             vol.pack(side="right", padx=(6, 4))
@@ -1435,13 +1419,33 @@ class MidiEditorApp(tk.Tk):
                     "Writes a volume event into the file (saved on\n"
                     "Ctrl+S). Applies live while playing.")
 
-            # The number, then the name, which asks for no width of its own
-            # and is fitted to what it is given whenever that changes.
-            tk.Label(top, text=f"Ch {ch + 1}", anchor="w", bg=colour, fg=p["ink"],
-                     font=(self.uiFamily, 10, "bold")).pack(side="left", padx=(6, 4))
-            name = tk.Label(top, text=info.instrument, anchor="w", width=1, bg=colour,
-                            fg=p["ink"], font=self.rowNameFont)
-            name.pack(side="left", fill="x", expand=True)
+            # Mute and solo are painted icons that share _channelsChanged,
+            # which dims the roll and restarts the synth when playing. They
+            # are packed from the right, solo first, each with a one-pixel
+            # line before it. A style per channel puts each icon on its
+            # bar's grey in every state: ttk reads a state map anywhere up
+            # the style's family before a plain setting, so without one the
+            # checkbutton's hover colour would show.
+            self.muteVars[ch] = tk.BooleanVar(value=False)
+            self.soloVars[ch] = tk.BooleanVar(value=False)
+
+            for key, var, tip in (
+                    ("Solo", self.soloVars[ch], f"Solo channel {ch + 1}: when any channel is "
+                     "soloed,\nonly soloed channels play (solo overrides mute)"),
+                    ("Mute", self.muteVars[ch], f"Mute channel {ch + 1}: silence it during "
+                     "playback\nand dim its notes in the piano roll")):
+                b = ttk.Checkbutton(top, variable=var, style=f"Ch{ch}.{key}.Row.TCheckbutton",
+                                    command=self._channelsChanged)
+                b.pack(side="right")
+                tk.Frame(top, width=1, bg=p["border"]).pack(side="right", fill="y")
+                Tooltip(b, tip)
+
+            # The name asks for no width of its own and is fitted to what it
+            # is given whenever that changes; its padding sets the bar's
+            # height.
+            name = tk.Label(top, text=info.instrument, anchor="w", width=1, bg=p["raised"],
+                            fg=p["text"], font=self.rowNameFont, pady=ROW_PAD)
+            name.pack(side="left", fill="x", expand=True, padx=(8, 0))
             name.bind("<Configure>", lambda e, c=ch: self._fitRowName(c))
             self.nameLabels[ch] = name
             self.rowNames[ch] = info.instrument
@@ -1562,10 +1566,10 @@ class MidiEditorApp(tk.Tk):
         """
         label = self.nameLabels[ch]
         width = label.winfo_width()
+        font = self.rowNameBoldFont if ch == self.activeChannel else self.rowNameFont
 
         # Until the row is laid out the label has no width to fit to.
-        shown = self.rowNames[ch] if width <= 1 else _elide(self.rowNames[ch],
-                                                             self.rowNameFont, width - 4)
+        shown = self.rowNames[ch] if width <= 1 else _elide(self.rowNames[ch], font, width - 4)
 
         if label.cget("text") != shown:
             label.configure(text=shown)
@@ -1739,15 +1743,18 @@ class MidiEditorApp(tk.Tk):
         self._setStatus(f"Active channel: {ch + 1} - double-click the roll to add notes")
 
     def _highlightActiveRow(self):
-        """Tint the active channel's row and show its detail; reset every other row.
+        """Light the active channel's row and show its detail; reset every other row.
 
-        The header bar keeps its channel colour; the row around it and the
-        detail take the tint.
+        The active row's bar, the row around it and its detail take the
+        tint, so they read as one card, and its name is bold. Every other
+        bar is the raised grey.
         """
         for ch, row in self.channelRows.items():
             active = ch == self.activeChannel
             colour = self.palette["active"] if active else self.palette["panel"]
             row.configure(bg=colour)
+            self._paintRowBar(ch, self.palette["active"] if active else self.palette["raised"],
+                              active)
             detail = self.channelDetails.get(ch)
 
             if detail is None:
@@ -1760,6 +1767,29 @@ class MidiEditorApp(tk.Tk):
                 detail.pack(fill="x")
             else:
                 detail.pack_forget()
+
+    def _paintRowBar(self, ch: int, colour: str, bold: bool):
+        """Colour a channel row's bar, its icons' and slider's styles, and its name.
+
+        Args:
+            ch: 0-based channel index.
+            colour: the bar's colour.
+            bold: the name in bold, for the active channel.
+        """
+        s = ttk.Style(self)
+        self.rowBars[ch].configure(bg=colour)
+        self.nameLabels[ch].configure(bg=colour,
+                                      font=self.rowNameBoldFont if bold else self.rowNameFont)
+
+        # Each map matches every state, as the checkbutton's own hover map
+        # would otherwise win.
+        for key in ("Mute", "Solo"):
+            style = f"Ch{ch}.{key}.Row.TCheckbutton"
+            s.configure(style, background=colour)
+            s.map(style, background=[("", colour)])
+
+        s.configure(f"Ch{ch}.Row.Horizontal.TScale", background=colour)
+        self._fitRowName(ch)
 
     def _programChanged(self, ch: int, var: tk.StringVar):
         """Instrument picked in a card: write the program change into the song.

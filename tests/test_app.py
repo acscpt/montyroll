@@ -241,38 +241,38 @@ class TestTheme:
         assert (style.lookup("Lane.Toggle.TButton", "foreground", ["selected"])
                 == theme.PALETTE["ink"])
 
-    def testMuteAndSoloIconsLeadTheRow(self, app: MidiEditorApp) -> None:
-        """Each row opens with its mute and solo icons, on the header colour."""
+    def testMuteAndSoloIconsFollowTheName(self, app: MidiEditorApp) -> None:
+        """Mute then solo sit right of the name, on the bar's grey in every state."""
         style = ttk.Style(app)
         assert {"Mute.indicator", "Solo.indicator"} <= set(style.element_names())
+        app.update_idletasks()
 
         for ch in sorted(app.song.channels):
-            header = app.nameLabels[ch].master
-            icons = [w for w in header.winfo_children() if isinstance(w, ttk.Checkbutton)]
+            bar = app.rowBars[ch]
+            icons = sorted((w for w in bar.winfo_children() if isinstance(w, ttk.Checkbutton)),
+                           key=lambda w: w.winfo_x())
             assert [str(w.cget("style")) for w in icons] == [
                 f"Ch{ch}.Mute.Row.TCheckbutton", f"Ch{ch}.Solo.Row.TCheckbutton"]
             assert str(icons[0].cget("variable")) == str(app.muteVars[ch])
-            assert icons[1].winfo_x() < app.nameLabels[ch].winfo_x()
+            assert icons[0].winfo_x() > app.nameLabels[ch].winfo_x()
 
-            # The icon stays on the header colour under the pointer and when
-            # on, not the checkbutton's hover grey.
+            # The icon stays on its bar's grey under the pointer and when on,
+            # not the checkbutton's hover grey.
             for state in ([], ["active"], ["active", "selected"], ["pressed"]):
                 for icon in icons:
                     assert (style.lookup(icon.cget("style"), "background", state)
-                            == CHANNEL_COLORS[ch])
+                            == str(bar.cget("background")))
 
     def testIconsHaveSeparators(self, app: MidiEditorApp) -> None:
-        """A one-pixel line in a darker shade of the colour follows each icon."""
-        ch = sorted(app.song.channels)[0]
-        header = app.nameLabels[ch].master
-        parts = header.pack_slaves()
-        edge = theme.mix(CHANNEL_COLORS[ch], "#000000", 0.4)
+        """A one-pixel etched line sits just left of each icon."""
+        app.update_idletasks()
+        bar = app.rowBars[sorted(app.song.channels)[0]]
 
-        for i in (1, 3):
-            assert isinstance(parts[i - 1], ttk.Checkbutton)
-            assert isinstance(parts[i], tk.Frame)
-            assert int(parts[i].cget("width")) == 1
-            assert str(parts[i].cget("background")) == edge
+        for icon in (w for w in bar.winfo_children() if isinstance(w, ttk.Checkbutton)):
+            line = next(w for w in bar.winfo_children() if isinstance(w, tk.Frame)
+                        and w.winfo_x() + w.winfo_width() == icon.winfo_x())
+            assert int(line.cget("width")) == 1
+            assert str(line.cget("background")) == theme.PALETTE["border"]
 
     def testNameGivesWayOnANarrowStrip(self, app: MidiEditorApp) -> None:
         """Narrowed, a long name ends in an ellipsis and the slider stays clear of it."""
@@ -288,9 +288,10 @@ class TestTheme:
         app.paned.sashpos(0, wide - squeeze)
         app.update()
         assert label.cget("text").endswith(ELLIPSIS)
-        assert app.rowNameFont.measure(label.cget("text")) <= label.winfo_width()
-        scale = next(w for w in label.master.winfo_children() if isinstance(w, ttk.Scale))
-        assert label.winfo_x() + label.winfo_width() <= scale.winfo_x()
+        font = app.rowNameBoldFont if ch == app.activeChannel else app.rowNameFont
+        assert font.measure(label.cget("text")) <= label.winfo_width()
+        controls = [w for w in label.master.winfo_children() if w.winfo_x() > label.winfo_x()]
+        assert label.winfo_x() + label.winfo_width() <= min(w.winfo_x() for w in controls)
         app.paned.sashpos(0, wide)
         app.update()
         assert label.cget("text") == app.rowNames[ch]
@@ -329,26 +330,51 @@ class TestTheme:
         assert rule.winfo_y() + 1 == app.demandCanvas.winfo_y()
         assert rule.winfo_width() >= app.demandCanvas.winfo_width()
 
-    def testRowHeaderTakesTheChannelColour(self, app: MidiEditorApp) -> None:
-        """A row's header bar is its channel colour with dark text, active or not."""
+    def testRowSwatchAndBar(self, app: MidiEditorApp) -> None:
+        """A row opens with its number on a swatch of its colour, on a grey bar."""
+        app.update_idletasks()
+        digits = max(len(str(ch + 1)) for ch in app.song.channels)
+        widths = set()
+
+        for ch in sorted(app.song.channels):
+            swatch = min((w for w in app.rowBars[ch].winfo_children()), key=lambda w: w.winfo_x())
+            assert isinstance(swatch, tk.Label)
+            assert swatch.cget("text") == str(ch + 1)
+            assert swatch.cget("background") == CHANNEL_COLORS[ch]
+            assert swatch.cget("foreground") == theme.PALETTE["ink"]
+            assert int(swatch.cget("width")) == digits
+            assert swatch.winfo_height() == app.rowBars[ch].winfo_height()
+            assert app.nameLabels[ch].cget("foreground") == theme.PALETTE["text"]
+            widths.add(swatch.winfo_width())
+
+        # Every swatch is as wide, so the names line up.
+        assert len(widths) == 1
+
+    def testActiveRowBarIsLitAndBold(self, app: MidiEditorApp) -> None:
+        """The active row's bar takes the tint of its detail and a bold name; the rest are grey."""
         first, second = sorted(app.song.channels)[:2]
         app._setActiveChannel(second)
+        style = ttk.Style(app)
 
-        for ch in (first, second):
-            label = app.nameLabels[ch]
-            assert label.cget("background") == CHANNEL_COLORS[ch]
-            assert label.cget("foreground") == theme.PALETTE["ink"]
-            assert label.master.cget("background") == CHANNEL_COLORS[ch]
+        for ch, colour, font in ((second, app.palette["active"], app.rowNameBoldFont),
+                                 (first, app.palette["raised"], app.rowNameFont)):
+            assert app.rowBars[ch].cget("background") == colour
+            assert app.nameLabels[ch].cget("background") == colour
+            assert str(app.nameLabels[ch].cget("font")) == str(font)
+            assert style.lookup(f"Ch{ch}.Mute.Row.TCheckbutton", "background") == colour
+            assert style.lookup(f"Ch{ch}.Row.Horizontal.TScale", "background") == colour
 
-    def testRowVolumeSitsOnTheHeader(self, app: MidiEditorApp) -> None:
-        """The row volume slider sits on the channel colour, and moving it writes CC7."""
-        ch = sorted(app.song.channels)[0]
-        scale = next(w for w in app.nameLabels[ch].master.winfo_children()
-                     if isinstance(w, ttk.Scale))
+        assert app.channelDetails[second].cget("background") == app.palette["active"]
+
+    def testRowVolumeSitsOnTheBar(self, app: MidiEditorApp) -> None:
+        """The row volume slider sits on the bar's grey, and moving it writes CC7."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        scale = next(w for w in app.rowBars[first].winfo_children() if isinstance(w, ttk.Scale))
         style = scale.cget("style")
-        assert ttk.Style(app).lookup(style, "background") == CHANNEL_COLORS[ch]
+        assert ttk.Style(app).lookup(style, "background") == app.palette["raised"]
         scale.set(33)
-        assert app.song.channels[ch].volume == 33
+        assert app.song.channels[first].volume == 33
 
     def testFileDialogPaneIsDark(self, app: MidiEditorApp) -> None:
         """The file dialog's folder pane takes the field colour in place of its white."""
