@@ -11,6 +11,7 @@ nothing blocks and nothing makes a sound.
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
@@ -44,6 +45,7 @@ from montyroll.app import (
     NO_TIER,
     NOTE_HOVER_MIX,
     PLAY_GLYPH,
+    REDUCE_SWITCH_S,
     STOP_GLYPH,
     TEMPO_GLYPH,
     X16_TIERS,
@@ -119,6 +121,24 @@ def _noteCentre(app: MidiEditorApp, note: model.Note) -> tuple[float, float]:
     x1, y1, x2, y2 = app.canvas.coords(app.noteToItem[id(note)])
     centre = _toWidget(app, (x1 + x2) / 2, (y1 + y2) / 2)
     return centre
+
+
+def _settle(app: MidiEditorApp) -> None:
+    """Let a reduction or weights being worked out off the main thread land, and draw them.
+
+    Args:
+        app: the application.
+    """
+    while app._reduceJob is not None:
+        for pending in (app._reducePoll, app._reduceStart):
+            if pending is not None:
+                app.after_cancel(pending)
+
+        app._reducePoll = app._reduceStart = None
+        app._reduceJob.join()
+        app._pollReduceJob()
+
+    app.update()
 
 
 def _typeIntoEditor(app: MidiEditorApp, text: str) -> None:
@@ -1096,6 +1116,7 @@ class TestLanes:
         app.budgetVar.set(1)
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         app.laneVar.set("Weight")
         app._laneChanged()
         app._drawDemand()
@@ -1652,7 +1673,7 @@ class TestReduction:
         app.budgetVar.set(1)
         app.reduceVar.set(True)
         app._reductionChanged()
-        app.update()
+        _settle(app)
         ghosts = self._stippled(app)
         assert ghosts
         assert len(ghosts) == len(app.reduction.dropped) + len(app.reduction.cut)
@@ -1660,11 +1681,93 @@ class TestReduction:
         assert "no voice" in app.lossLbl.cget("text")
         assert all(app.itemToNote[i] in app.song.notes for i in ghosts)
 
+    def testAChangeIsWorkedOutOffTheMainThread(self, app: MidiEditorApp) -> None:
+        """A budget change starts a job, the roll keeps its drawing until it lands, then follows."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        _settle(app)
+        ghosts = len(self._stippled(app))
+        app.budgetVar.set(4)
+        app._reductionChanged()
+        assert app._reduceJob is not None and app.reduction is None and app._reducePending()
+        app.update_idletasks()
+        assert len(self._stippled(app)) == ghosts
+        _settle(app)
+        assert app._reduceJob is None and app.reduction is not None
+        assert len(self._stippled(app)) == len(app.reduction.dropped) + len(app.reduction.cut)
+        assert len(self._stippled(app)) < ghosts
+
+    def testAnEditDuringAJobIsReducedHere(self, app: MidiEditorApp) -> None:
+        """An edit while a job runs reduces on the main thread, and the stale job is dropped."""
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app._setActiveChannel(0)
+        app.onDouble(FakeEvent(*_toWidget(app, 20 * app.ppt * app.song.mf.division,
+                                          (127 - 100) * app.rowH + 2)))
+        added = next(iter(app.selection))
+        here = app.reduction
+        assert here is not None and any(p.note is added for p in here.placed)
+        _settle(app)
+        assert app.reduction is here
+
+    def testExactReadersWaitForTheJob(self, app: MidiEditorApp) -> None:
+        """Playback, export and the report wait for a job and take its result."""
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        job = app._reduceJob
+        reduction = app._ensureReduction()
+        assert app._reduceJob is None and reduction is job.reduction
+        alone = reduce.reduce(app.song, app._currentPlan())
+        assert reduction.dropped == alone.dropped and reduction.cut == alone.cut
+        app.update()
+
+    def testChangesDuringAJobRunOneMore(self, app: MidiEditorApp) -> None:
+        """Changes while a job runs start one more job when it ends, from the latest plan."""
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        first = app._reduceJob
+        app.budgetVar.set(1)
+        app._reductionChanged()
+        app.budgetVar.set(2)
+        app._reductionChanged()
+        assert app._reduceJob is first and app._reduceAgain and app._reducePending()
+        _settle(app)
+        assert app._ensureDemand().peak <= 2
+        assert app.reduction.voicesUsed == 2
+
+    def testTheSwitchIntervalIsCutOnlyWhileAJobRuns(self, app: MidiEditorApp) -> None:
+        """The interpreter switches threads more often while a job runs, and as before after."""
+        before = sys.getswitchinterval()
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        app.update_idletasks()
+        app.update_idletasks()
+        assert app._reduceJob.thread is not None
+        assert sys.getswitchinterval() == pytest.approx(REDUCE_SWITCH_S)
+        _settle(app)
+        assert sys.getswitchinterval() == pytest.approx(before)
+
+    def testAJobErrorIsRaisedHere(self, app: MidiEditorApp,
+                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        """An exception on the job's thread is raised on the main thread when it lands."""
+        def broken(*args, **kwargs):
+            raise RuntimeError("reducer broke")
+
+        monkeypatch.setattr(reduce, "reduce", broken)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+
+        with pytest.raises(RuntimeError, match="reducer broke"):
+            _settle(app)
+
     def testStripFollowsTheReduction(self, app: MidiEditorApp) -> None:
         """The demand strip sweeps the reduced notes, so it never exceeds the budget."""
         app.budgetVar.set(2)
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         assert app._ensureDemand().peak <= 2
         app.reduceVar.set(False)
         app._reductionChanged()
@@ -1740,9 +1843,11 @@ class TestReduction:
         app.budgetVar.set(2)
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         before = sum(1 for n in app.song.notes if n.channel == 1 and app.reduction.isDropped(n))
         app.priorityVars[1].set(5.0)
         app._reductionChanged()
+        _settle(app)
         after = sum(1 for n in app.song.notes if n.channel == 1 and app.reduction.isDropped(n))
         assert after < before
 
@@ -1869,6 +1974,7 @@ class TestWeightShading:
         first = app._ensureWeights()
         app.priorityVars[1].set(5.0)
         app._reductionChanged()
+        _settle(app)
         assert app._ensureWeights() is not first
         after = self._brightness(app.canvas.itemcget(app.noteToItem[id(note)], "fill"))
         assert after > before
@@ -2004,6 +2110,7 @@ class TestPlanControls:
         app.poolVoicesVar.set(3)
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         assert app.lossLbl.cget("text").startswith("plan refused")
         assert app.reduction.placed == []
 
@@ -2011,9 +2118,11 @@ class TestPlanControls:
         """A release typed on a card reaches the plan and stretches the strip's occupancy."""
         app.reduceVar.set(True)
         app._reductionChanged()
+        _settle(app)
         before = analysis.channelDemand(app._ensureDemand())[0].fraction
         app.releaseVars[0].set("500")
         app._channelReleaseChanged(0)
+        _settle(app)
         assert app.plan.release == {0: 500.0}
         assert analysis.channelDemand(app._ensureDemand())[0].fraction > before
         assert "tails clipped" in app.lossLbl.cget("text")

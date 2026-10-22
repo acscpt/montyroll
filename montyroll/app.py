@@ -19,7 +19,10 @@ position.
 
 from __future__ import annotations
 
+import copy
 import os
+import sys
+import threading
 import time
 import tkinter as tk
 from bisect import bisect_left, bisect_right
@@ -52,6 +55,8 @@ CORNER_FONT_PT = 8   # the Voices heading, the size of the lane switch's text
 BUDGET_DRAG_PX = 6   # drag distance on the budget for one voice
 BUDGET_GRAB = 4      # how near the budget line a press picks it up, in pixels
 BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction is recomputed
+REDUCE_POLL_MS = 15  # how often a reduction worked out off the main thread is looked for
+REDUCE_SWITCH_S = 0.0001  # the interpreter's switch interval while it is worked out
 MASTER_MAX = 150     # the master volume's top, in percent
 GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
 NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
@@ -123,6 +128,74 @@ def _elide(text: str, font: tkfont.Font, width: int) -> str:
 
     elided = cut.rstrip() + ELLIPSIS
     return elided
+
+
+def _occupancy(reduction: reduce.Reduction) -> list[reduce.Placed]:
+    """List the placed notes as the voices they keep busy, until each release dies away.
+
+    Args:
+        reduction: the reduction.
+
+    Returns:
+        list[reduce.Placed]: one per placed note, ending where its voice is free.
+    """
+    spans = [replace(p, end=p.free) if p.release else p for p in reduction.placed]
+    return spans
+
+
+@dataclass(eq=False)
+class ReduceJob:
+    """A reduction, its sweep and any stale weights, worked out on a thread of their own.
+
+    The plan is a copy taken when the job starts, and `generation` is the
+    window's count of changes to the reduction's inputs at that moment, so
+    a result whose inputs have changed since is recognised and dropped. The
+    thread touches no widget; an exception is kept for the main thread to
+    raise, as one raised on the thread would be printed and lost.
+    """
+
+    generation: int
+    priorities: tuple            # the channel priorities the weights are scored under
+    song: model.Song
+    plan: reduce.Plan
+    weights: dict[int, float] | None    # the current weights, or None to score them here
+    wantReduction: bool                 # False when only the weights are wanted
+    reduction: reduce.Reduction | None = None
+    demand: analysis.Demand | None = None
+    refused: str | None = None          # the reducer's reason for refusing the plan
+    error: Exception | None = None
+    thread: threading.Thread | None = None
+    done: bool = False
+
+    def start(self):
+        """Start the work on a daemon thread, which ends with the program."""
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def join(self):
+        """Wait for the work to end, doing it here if its thread has not started."""
+        if self.thread is None:
+            self.run()
+        else:
+            self.thread.join()
+
+    def run(self):
+        """Score the weights if they are stale, then reduce and sweep the reduced notes."""
+        try:
+            if self.weights is None:
+                self.weights = reduce.weights(self.song, self.plan)
+
+            if self.wantReduction:
+                self.reduction = reduce.reduce(self.song, self.plan, self.weights)
+                self.demand = analysis.sweep(self.song, _occupancy(self.reduction))
+        except ValueError as exc:
+            self.refused = str(exc)
+            self.reduction = reduce.Reduction()
+            self.demand = analysis.Demand()
+        except Exception as exc:
+            self.error = exc
+
+        self.done = True
 
 
 @dataclass(eq=False)
@@ -333,6 +406,14 @@ class MidiEditorApp(tk.Tk):
         self._overlapAfter: str | None = None
         self.reduction: reduce.Reduction | None = None
         self.reducedSong: model.Song | None = None
+        self._reduceJob: ReduceJob | None = None   # a reduction worked out off the main thread
+        self._reduceAgain = False   # its inputs changed as it ran: start another when it ends
+        self._reduceGen = 0         # changes to the reduction's inputs, so a stale job is known
+        self._reducePoll: str | None = None
+        self._reduceStart: str | None = None
+        self._switchInterval = sys.getswitchinterval()   # restored when a job ends
+        self._lastReduction: reduce.Reduction | None = None   # drawn while a job runs
+        self._lastDemand: analysis.Demand | None = None       # the strip's, likewise
         self.shadeVar = tk.BooleanVar(value=False)       # notes coloured by weight, not velocity
         self.noteWeights: dict[int, float] | None = None  # id(note) -> weight, cached with the plan
         self._weightsFor: tuple = ()    # the channel priorities noteWeights were scored under
@@ -1306,6 +1387,20 @@ class MidiEditorApp(tk.Tk):
                                       "Discard unsaved changes?")
         return discard
 
+    def destroy(self):
+        """Drop a reduction worked out off the main thread, then destroy the window.
+
+        The job's thread is a daemon and is left to end; the interpreter's
+        switch interval is given back.
+        """
+        for pending in (self._reducePoll, self._reduceStart):
+            if pending is not None:
+                self.after_cancel(pending)
+
+        self._reducePoll = self._reduceStart = None
+        self._endReduceJob()
+        super().destroy()
+
     def onClose(self):
         """Quit: stop both synths and destroy the window, unless the user
         decides to keep unsaved changes."""
@@ -1333,7 +1428,10 @@ class MidiEditorApp(tk.Tk):
         self._chordStale = []
         self._noteIndex = None
         self._sweepBase = None
-        self.reduction = None
+        self._dropReduction()
+        self._reduceAgain = False
+        self._lastReduction = None
+        self._lastDemand = None
         self.noteWeights = None
         self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
@@ -2184,12 +2282,15 @@ class MidiEditorApp(tk.Tk):
         self.inspPitch.config(text=name, font=(self.uiFamily, 16, "bold"))
         bar, beat = self.song.barBeat(note.start)
 
-        if self.reduceVar.get():
-            reduction = self._ensureReduction()
+        reduction = self._shownReduction() if self.reduceVar.get() else None
+
+        if not self.reduceVar.get():
+            verdict = "reduction off"
+        elif reduction is None:
+            verdict = "working it out"
+        else:
             verdict = reduction.dropped.get(id(note)) or (
                 "cut short" if id(note) in reduction.cut else "kept")
-        else:
-            verdict = "reduction off"
 
         # The bar is out of the most a note can weigh under the plan: the
         # top line of the highest priority channel at full velocity, with no
@@ -2366,7 +2467,7 @@ class MidiEditorApp(tk.Tk):
         # Notes are brighter with velocity on audible channels and flat grey
         # on muted ones, so the mute and solo state shows in the roll.
         audible = self._audibleChannels()
-        reduction = self._ensureReduction() if self.reduceVar.get() else None
+        reduction = self._shownReduction() if self.reduceVar.get() else None
         segments: dict[int, list[reduce.Placed]] = {}
 
         if reduction is not None:
@@ -2375,7 +2476,7 @@ class MidiEditorApp(tk.Tk):
 
         # Shading by weight scales to the heaviest note in the song, so a
         # priority raised on one channel brightens it and dims the rest.
-        weights = self._ensureWeights() if self.shadeVar.get() else None
+        weights = self._shownWeights() if self.shadeVar.get() else None
         heaviest = max(weights.values(), default=1.0) if weights else 1.0
 
         for note in notes:
@@ -2672,18 +2773,28 @@ class MidiEditorApp(tk.Tk):
 
     # ------------------------------------------------------------- demand
     def _ensureDemand(self) -> analysis.Demand:
-        """Return the voice-demand sweep, rebuilding it if the notes changed.
+        """Return the voice-demand sweep to draw, rebuilding it if the notes changed.
 
         Returns:
             analysis.Demand: the sweep of the current song.
         """
+        # While a job works the reduction out, the strip shows the last
+        # reduced sweep, or the song's before the first.
+        if self.demand is None and self.reduceVar.get() and self.reduction is None and \
+                self._reducePending():
+            shown = self._lastDemand if self._lastDemand is not None else self._ensureSongDemand()
+            return shown
+
         if self.demand is None:
             if self.reduceVar.get():
                 # Occupancy rather than sound: a voice is busy until its
                 # release has died away.
-                placed = self._ensureReduction().placed
-                spans = [replace(p, end=p.free) if p.release else p for p in placed]
-                self.demand = analysis.sweep(self.song, spans)
+                reduction = self._ensureReduction()
+
+                if self.demand is None:
+                    self.demand = analysis.sweep(self.song, _occupancy(reduction))
+
+                self._lastDemand = self.demand
             else:
                 self.demand = self._ensureSongDemand()
 
@@ -2750,9 +2861,12 @@ class MidiEditorApp(tk.Tk):
         elif notesIn[1] > notesIn[0]:
             self._chordStale.append(notesIn)
 
-        self.reduction = None
+        # The reduction after an edit is worked out on the main thread, so
+        # an edited note is never drawn from a reduction of the notes before
+        # it; a job asked for meanwhile is not started.
+        self._dropReduction()
+        self._reduceAgain = False
         self.noteWeights = None
-        self.reducedSong = None
         self.reports = {"original": None, "reduced": None}
         self._scheduleDemand()
         self._showReportIfSelected()
@@ -3127,11 +3241,11 @@ class MidiEditorApp(tk.Tk):
         x0 = self.canvas.canvasx(0)
         t0, t1 = x0 / self.ppt, (x0 + width) / self.ppt
         audible = self._audibleChannels()
-        reduction = self._ensureReduction() if self.reduceVar.get() else None
+        reduction = self._shownReduction() if self.reduceVar.get() else None
 
         # The value of each note in view, and the top of the scale.
         if lane == "Weight":
-            weights = self._ensureWeights()
+            weights = self._shownWeights()
             top = max(weights.values(), default=1.0) or 1.0
 
             def value(n: model.Note) -> float:
@@ -4201,15 +4315,28 @@ class MidiEditorApp(tk.Tk):
         return self.plan
 
     def _ensureReduction(self) -> reduce.Reduction:
-        """Return the reduction for the current plan, computing it if needed.
+        """Return the reduction for the current plan, waiting for or computing it if needed.
 
-        A plan whose pools no longer fit their tiers is refused by the
-        reducer; that is shown on the panel label and nothing is placed.
+        A job working it out for the current inputs is waited for and its
+        result taken, and the views it changes are refreshed at the next
+        idle moment; otherwise it is computed here. A plan whose pools no
+        longer fit their tiers is refused by the reducer; that is shown on
+        the panel label and nothing is placed.
 
         Returns:
             reduce.Reduction: the result.
         """
+        job = self._reduceJob
+
+        if self.reduction is None and job is not None and job.generation == self._reduceGen:
+            job.join()
+            self._endReduceJob()
+            self._landReduceJob(job)
+            self.after_idle(self._reductionLanded)
+
         if self.reduction is None:
+            self._reduceAgain = False
+
             try:
                 self.reduction = reduce.reduce(self.song, self._currentPlan(),
                                                self._ensureWeights())
@@ -4220,8 +4347,166 @@ class MidiEditorApp(tk.Tk):
                 self._showLoss(self.reduction)
 
             self.reducedSong = None
+            self._lastReduction = self.reduction
 
         return self.reduction
+
+    def _dropReduction(self):
+        """Forget the reduction and what is built from it, as its inputs have changed.
+
+        The count of changes moves on, so a job started before is known to
+        be stale when it ends.
+        """
+        self._reduceGen += 1
+        self.reduction = None
+        self.reducedSong = None
+        self.reports["reduced"] = None
+
+    def _reducePending(self) -> bool:
+        """Report whether a reduction for the current inputs is on its way from a job.
+
+        Returns:
+            bool: True while a job for them runs, or one is to start when the
+            running one ends.
+        """
+        job = self._reduceJob
+        pending = job is not None and (job.generation == self._reduceGen or self._reduceAgain)
+        return pending
+
+    def _startReduceJob(self):
+        """Set the reduction and any stale weights to be worked out on a thread of their own.
+
+        One job runs at a time: a change while one runs asks for another
+        when it ends, from the inputs as they are then. The plan is copied
+        here, on the main thread, as the panel keeps writing to it. The job
+        counts as on its way at once, and its thread starts once the idle
+        work already queued, such as the strip's redraw, is done: a widget
+        call made while the thread runs waits a switch interval for the
+        interpreter, and a redraw makes hundreds of them.
+        """
+        if self._reduceJob is not None:
+            self._reduceAgain = True
+            return
+
+        self._reduceAgain = False
+        self._reduceJob = ReduceJob(self._reduceGen, self._priorities(), self.song,
+                                    copy.deepcopy(self._currentPlan()), self._currentWeights(),
+                                    self.reduceVar.get())
+        self._reduceStart = self.after_idle(self._queueReduceJob)
+
+    def _queueReduceJob(self):
+        """Start the job's thread at the idle moment after this one, behind the work queued now."""
+        self._reduceStart = self.after_idle(self._runReduceJob)
+
+    def _runReduceJob(self):
+        """Start the job's thread and look for its end.
+
+        The main thread gives the interpreter up for each Tk call and waits a
+        switch interval to have it back while the thread runs, so the
+        interval is cut until the job ends.
+        """
+        self._reduceStart = None
+        job = self._reduceJob
+
+        if job is None or job.thread is not None or job.done:
+            return
+
+        self._switchInterval = sys.getswitchinterval()
+        sys.setswitchinterval(REDUCE_SWITCH_S)
+        job.start()
+        self._reducePoll = self.after(REDUCE_POLL_MS, self._pollReduceJob)
+
+    def _pollReduceJob(self):
+        """Take the job's result once it ends, if its inputs still stand, and start the next."""
+        self._reducePoll = None
+        job = self._reduceJob
+
+        if job is None:
+            return
+
+        if not job.done:
+            self._reducePoll = self.after(REDUCE_POLL_MS, self._pollReduceJob)
+            return
+
+        self._endReduceJob()
+
+        if job.generation == self._reduceGen:
+            self._landReduceJob(job)
+            self._reductionLanded()
+
+        if self._reduceAgain:
+            self._startReduceJob()
+
+    def _endReduceJob(self):
+        """Forget the ended job and give the interpreter its switch interval back."""
+        if self._reduceJob is not None and self._reduceJob.thread is not None:
+            sys.setswitchinterval(self._switchInterval)
+
+        self._reduceJob = None
+
+    def _landReduceJob(self, job: ReduceJob):
+        """Take a finished job's weights, reduction and sweep as the current ones.
+
+        Args:
+            job: the job, for the current inputs.
+
+        Raises:
+            Exception: whatever the job raised, as its inputs did not change
+                under it.
+        """
+        if job.error is not None:
+            raise job.error
+
+        self.noteWeights = job.weights
+        self._weightsFor = job.priorities
+
+        if not job.wantReduction:
+            return
+
+        self.reduction = job.reduction
+        self.demand = job.demand
+        self.reducedSong = None
+        self._lastReduction = self.reduction
+        self._lastDemand = self.demand
+
+        if job.refused is not None:
+            self.lossLbl.config(text=f"plan refused: {job.refused}")
+        else:
+            self._showLoss(job.reduction)
+
+    def _reductionLanded(self):
+        """Draw what a newly taken reduction changes: notes, strip, inspector and report."""
+        self._redrawNotes()
+        self._refreshInspector()
+        self._showReportIfSelected()
+
+    def _shownReduction(self) -> reduce.Reduction | None:
+        """Return the reduction to draw: the current one, or the last while a job works one out.
+
+        Returns:
+            reduce.Reduction | None: the reduction, or None when a job works
+            out the first.
+        """
+        if self.reduction is None and self._reducePending():
+            shown = self._lastReduction
+        else:
+            shown = self._ensureReduction()
+
+        return shown
+
+    def _shownWeights(self) -> dict[int, float]:
+        """Return the weights to draw: the current ones, or the last while a job scores them.
+
+        Returns:
+            dict[int, float]: keyed by `id(note)`.
+        """
+        current = self._currentWeights()
+
+        if current is None and self._reducePending() and self.noteWeights is not None:
+            current = self.noteWeights
+
+        shown = current if current is not None else self._ensureWeights()
+        return shown
 
     def _priorities(self) -> tuple[tuple[int, float], ...]:
         """List the plan's priority for every channel, which the weights depend on.
@@ -4327,26 +4612,40 @@ class MidiEditorApp(tk.Tk):
         self.lossLbl.config(text=f"{self._lossText(reduction)}\n{detail}")
 
     def _reductionChanged(self):
-        """A reduction control changed: store it, recompute and redraw what depends on it."""
+        """A reduction control changed: store it, and start working out what depends on it."""
         self._storePoolControls()
         self._refreshPoolTable()
 
         if len(self.plan.pools) != 1:
             self.budgetVar.set(self._totalVoices())
 
-        self.reduction = None
-        self.reducedSong = None
+        self._dropReduction()
         self.demand = None
-        self.reports["reduced"] = None
 
-        if self.reduceVar.get() or self.shadeVar.get():
-            self._redrawNotes()
+        # The reduction, and the weights when the priorities changed and
+        # the roll or the strip shows them, are worked out off the main
+        # thread; the notes stay as drawn until they land.
+        # The job counts as on its way from here, so the drawing below shows
+        # the last reduction, and its thread starts once that drawing is done.
+        staleWeights = self._currentWeights() is None and (
+            self.shadeVar.get() or self.laneVar.get() == "Weight")
+        wanted = self.reduceVar.get() or staleWeights
+
+        if wanted:
+            self._startReduceJob()
         else:
+            self._reduceAgain = False
+
+        if not self.reduceVar.get():
             self.lossLbl.config(text="")
+
+        if wanted:
             self._scheduleDemand()
+        else:
+            self._redrawNotes()
+            self._showReportIfSelected()
 
         self._refreshInspector()
-        self._showReportIfSelected()
 
         if self.playStart is not None:
             self._liveUpdate()
