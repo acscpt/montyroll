@@ -244,6 +244,8 @@ class Song:
         self.trackNames = ["" for _ in self.mf.tracks]
         self.timeSigs = []
         self.markers = []
+        notes = self.notes
+        channels = self.channels
         maxTick = 0
 
         for ti, track in enumerate(self.mf.tracks):
@@ -253,12 +255,15 @@ class Song:
             pending: dict[tuple[int, int], list[Note]] = {}
 
             for e in track:
-                maxTick = max(maxTick, e.tick)
+                if e.tick > maxTick:
+                    maxTick = e.tick
+
+                status = e.status
 
                 # Meta events feed the song-level tables.  Only the first
                 # track name on a track is kept, and tempo and time signature
                 # payloads are checked for length before they are decoded.
-                if e.status == smf.META:
+                if status == smf.META:
                     if e.metaType == smf.META_TRACK_NAME and not self.trackNames[ti]:
                         self.trackNames[ti] = e.data.decode("latin-1").strip()
                     elif e.metaType == smf.META_TIME_SIG and len(e.data) >= 2:
@@ -269,42 +274,58 @@ class Song:
                     continue
 
                 # Sysex events carry no channel and contribute nothing further.
-                ch = e.channel
-
-                if ch < 0:
+                if status >= 0xF0:
                     continue
 
-                info = self.channels.setdefault(ch, ChannelInfo(ch))
+                ch = status & 0x0F
+                info = channels.get(ch)
+
+                if info is None:
+                    info = channels[ch] = ChannelInfo(ch)
+
                 info.tracks.add(ti)
-                kind = e.status & 0xF0
+                kind = status & 0xF0
+                data = e.data
 
                 # Program changes are recorded only until the channel's first
                 # note, so info.program is the instrument actually in force
                 # when the channel starts sounding.  The first CC7 seen is
-                # taken as the channel volume.
+                # taken as the channel volume.  The note tests are those of
+                # Event.isNoteOn and isNoteOff, read from the status byte.
                 if kind == 0xC0:
                     if info.noteCount == 0:
-                        info.program = e.data[0]
+                        info.program = data[0]
                 elif kind == 0xB0:
-                    info.controllers.add(e.data[0])
-                    if e.data[0] == 7 and info.volume < 0:
-                        info.volume = e.data[1]
+                    info.controllers.add(data[0])
+                    if data[0] == 7 and info.volume < 0:
+                        info.volume = data[1]
                 elif kind == 0xE0:
                     info.hasPitchBend = True
-                elif e.isNoteOn:
+                elif kind == 0x90 and len(data) > 1 and data[1] > 0:
                     # A note-on opens a Note whose end is provisionally its
                     # start; the matching note-off supplies the real end.
-                    note = Note(ti, ch, e.data[0], e.data[1], e.tick, e.tick, e)
-                    pending.setdefault((ch, e.data[0]), []).append(note)
-                    self.notes.append(note)
+                    pitch = data[0]
+                    note = Note(ti, ch, pitch, data[1], e.tick, e.tick, e)
+                    stack = pending.get((ch, pitch))
+
+                    if stack is None:
+                        pending[(ch, pitch)] = [note]
+                    else:
+                        stack.append(note)
+
+                    notes.append(note)
                     info.noteCount += 1
-                    info.lo = min(info.lo, e.data[0])
-                    info.hi = max(info.hi, e.data[0])
-                elif e.isNoteOff:
+
+                    if pitch < info.lo:
+                        info.lo = pitch
+
+                    if pitch > info.hi:
+                        info.hi = pitch
+                elif kind == 0x80 or (kind == 0x90 and len(data) > 1 and data[1] == 0):
                     # Close the oldest open note of this pitch.  A zero-length
                     # note is stretched to one tick so it stays visible and
                     # editable on the roll.
-                    stack = pending.get((ch, e.data[0]))
+                    stack = pending.get((ch, data[0]))
 
                     if stack:
                         note = stack.pop(0)

@@ -254,12 +254,19 @@ def _parseTrack(buf: bytes) -> list[Event]:
     pos = 0
     tick = 0
     running = 0
+    end = len(buf)
 
-    while pos < len(buf):
+    while pos < end:
         # Every event opens with a delta time; the deltas are accumulated so
-        # events carry absolute positions in memory.
-        delta, pos = _readVlq(buf, pos)
-        tick += delta
+        # events carry absolute positions in memory. Most deltas are one
+        # byte, read here without a call.
+        if buf[pos] < 0x80:
+            tick += buf[pos]
+            pos += 1
+        else:
+            delta, pos = _readVlq(buf, pos)
+            tick += delta
+
         b = buf[pos]
 
         if b == META:
@@ -276,7 +283,7 @@ def _parseTrack(buf: bytes) -> list[Event]:
                 break
 
             events.append(Event(tick, META, data, metaType))
-        elif b in (SYSEX, SYSEX_CONT):
+        elif b == SYSEX or b == SYSEX_CONT:
             # Sysex keeps the status byte that introduced it and the
             # length-prefixed payload, and also cancels running status.
             length, dpos = _readVlq(buf, pos + 1)
