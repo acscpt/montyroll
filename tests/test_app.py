@@ -621,6 +621,59 @@ class TestEditing:
         assert not app.song.dirty
 
 
+class TestChordCache:
+    """The chord row names again only the beats an edit touched, and stays exact."""
+
+    def _fresh(self, app: MidiEditorApp) -> list[tuple[int, int, str]]:
+        """The chord row as a full pass names it."""
+        beat = app.song.mf.division * 4 // app.song.timeSigs[0][2]
+        runs = analysis.chordTrack(app.song, beat)
+        return runs
+
+    def testEditsKeepTheRowExact(self, app: MidiEditorApp,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """After an add, a drag and a delete, the row matches a full pass, naming few beats."""
+        app._ensureChords()
+        named: list[int] = []
+        original = analysis.chordAt
+        monkeypatch.setattr(analysis, "chordAt",
+                            lambda song, index, t0, t1: (named.append(t0),
+                                                         original(song, index, t0, t1))[1])
+
+        # A note added past the end grows the song, and the new beats are
+        # named too.
+        app._setActiveChannel(0)
+        x = (app.song.maxTick + 960) * app.ppt
+        app.onDouble(FakeEvent(*_toWidget(app, x, (127 - 50) * app.rowH + 2)))
+        rows = app._ensureChords()
+        assert 0 < len(named) <= 4
+        assert rows == self._fresh(app)
+        added = next(iter(app.selection))
+
+        named.clear()
+        x, y = _noteCentre(app, added)
+        app.onPress(FakeEvent(x, y))
+        app.onDrag(FakeEvent(x, y - 3 * app.rowH))
+        app.onRelease(FakeEvent(x, y - 3 * app.rowH))
+        rows = app._ensureChords()
+        assert 0 < len(named) <= 4
+        assert rows == self._fresh(app)
+
+        named.clear()
+        app.deleteSelection()
+        rows = app._ensureChords()
+        assert 0 < len(named) <= 4
+        assert rows == self._fresh(app)
+
+    def testTempoEditNamesNoBeat(self, app: MidiEditorApp) -> None:
+        """A tempo change moves no note, so every beat keeps its name."""
+        app._ensureChords()
+        names = app.chordNames
+        app._applyTempo(960, 90)
+        app._ensureChords()
+        assert app.chordNames == names
+
+
 class TestChannelStrip:
     """Mute, solo, instrument and volume controls."""
 

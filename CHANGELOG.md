@@ -30,6 +30,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **The roll.** A file opens scrolled to the middle of its pitches, notes have an edge a little darker than their fill, and the playback cursor is drawn in the accent colour. The bar under the pointer is lit faintly through the ruler and the roll, the beat within it a step more, and the slot a double click would fill a step more again, as is the note under the pointer.
 
+- **Quicker edits on a large file.** A click restyles only the notes whose selection changed, the inspector scores the selected note alone, and the chord row names again only the beats an edit touched. On a file of 22,000 notes, selecting a note takes 18 ms in place of 135 ms, and adding or deleting one about 240 ms in place of 550 ms. The inspector's weight bar is now out of the most a note can weigh under the plan. New `reduce.noteWeight`, and `analysis.stepIndex`, `chordAt` and `chordRuns`, which `chordTrack` is built from.
+
 - **Volume and playback tempo.** The master volume moved beside the readout, with its figure, as the tempo has. **Speed** is renamed **Tempo**. A double click on either resets it to 100%. Both change only what is heard and exported.
 
 - **The voice budget.** The budget beside the strip is a number between two slim arrows, in place of a spinbox. The arrows and the mouse wheel step it, a drag up or down changes it, and a double click opens it for typing. Every budget line on the strip can be dragged as well. The reduction is worked out again once the budget stops changing, so stepping through budgets stays quick on a large file.
@@ -39,6 +41,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 - **Budget lines.** The lines on the strip are solid and two pixels wide over a dark edge, with their labels on tags, so they read across the stack. Each one moves a pool when dragged, a tier's line the selected pool on that tier, and it turns blue with the pool's name on its tag while it is under the pointer or dragged.
 
 ### Fixed
+
+- **Chord names took a bass note that had stopped.** The bass of a beat could be a short low note that ended before the beat, when a longer note had started before it, so a held chord kept the bass of a bar earlier. The bass is now the lowest note sounding in the beat. About 2% of the beats in the orchestral test files are named differently.
 
 - **Clear after an instrument change.** **Clear** rebuilt the channel rows when it restored an instrument and left the old rows' pool boxes on the list the pools refresh, so the next pool added or renamed failed with a Tcl error. The rows' lists are now rebuilt with them.
 

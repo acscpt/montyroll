@@ -262,6 +262,50 @@ class Reduction:
 
 
 # ---------------------------------------------------------------- weights
+def _score(n: model.Note, context: list[model.Note], plan: Plan) -> float:
+    """Score one note against the notes sounding at its onset.
+
+    Args:
+        n: the note.
+        context: every note sounding at its onset, itself and the notes
+            starting with it included.
+        plan: for the priorities.
+
+    Returns:
+        float: the weight.
+    """
+    tick = n.start
+    sameChannel = [a for a in context if a.channel == n.channel]
+    others = [a for a in context if a.channel != n.channel and a is not n]
+    pitches = sorted(a.pitch for a in sameChannel)
+
+    if len(pitches) == 1 or n.pitch == pitches[-1]:
+        texture = 1.5          # the line, or alone on its channel
+    elif n.pitch == pitches[0]:
+        texture = 1.3
+    else:
+        texture = 1.0
+
+    # A note doubles another when that other started earlier or, starting
+    # together, sits on a lower channel: the first part in the file is the
+    # original and the later one the doubling.
+    originals = [a for a in others if a.channel != model.DRUM_CHANNEL
+                 and (a.start < tick or a.channel < n.channel)]
+
+    if n.channel == model.DRUM_CHANNEL:
+        doubling = 1.0
+    elif any(a.pitch == n.pitch for a in originals):
+        doubling = 0.1
+    elif any(a.pitch % 12 == n.pitch % 12 for a in originals):
+        doubling = 0.5
+    else:
+        doubling = 1.0
+
+    velocity = 0.5 + 0.5 * n.velocity / 127
+    score = plan.priorityOf(n.channel) * velocity * texture * doubling
+    return score
+
+
 def weights(song: model.Song, plan: Plan) -> dict[int, float]:
     """Score every note by what is lost if it is not played.
 
@@ -301,39 +345,33 @@ def weights(song: model.Song, plan: Plan) -> dict[int, float]:
         context = active + group
 
         for n in group:
-            sameChannel = [a for a in context if a.channel == n.channel]
-            others = [a for a in context if a.channel != n.channel and a is not n]
-            pitches = sorted(a.pitch for a in sameChannel)
-
-            if len(pitches) == 1 or n.pitch == pitches[-1]:
-                texture = 1.5          # the line, or alone on its channel
-            elif n.pitch == pitches[0]:
-                texture = 1.3
-            else:
-                texture = 1.0
-
-            # A note doubles another when that other started earlier or,
-            # starting together, sits on a lower channel: the first part in
-            # the file is the original and the later one the doubling.
-            originals = [a for a in others if a.channel != model.DRUM_CHANNEL
-                         and (a.start < tick or a.channel < n.channel)]
-
-            if n.channel == model.DRUM_CHANNEL:
-                doubling = 1.0
-            elif any(a.pitch == n.pitch for a in originals):
-                doubling = 0.1
-            elif any(a.pitch % 12 == n.pitch % 12 for a in originals):
-                doubling = 0.5
-            else:
-                doubling = 1.0
-
-            velocity = 0.5 + 0.5 * n.velocity / 127
-            result[id(n)] = plan.priorityOf(n.channel) * velocity * texture * doubling
+            result[id(n)] = _score(n, context, plan)
 
         active.extend(group)
         i = j
 
     return result
+
+
+def noteWeight(song: model.Song, plan: Plan, note: model.Note) -> float:
+    """Score one note as `weights` scores it, without scoring the rest.
+
+    Its context is every note that starts with it and every earlier note
+    still sounding at its onset, so the figure matches `weights` exactly.
+
+    Args:
+        song: the song.
+        plan: for the priorities.
+        note: the note.
+
+    Returns:
+        float: the weight.
+    """
+    tick = note.start
+    context = [a for a in song.notes
+               if a.start == tick or (a.start < tick and a.end > tick)]
+    score = _score(note, context, plan)
+    return score
 
 
 # ------------------------------------------------------------- transforms

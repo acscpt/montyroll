@@ -252,6 +252,8 @@ class MidiEditorApp(tk.Tk):
         self.itemToNote: dict[int, model.Note] = {}
         self.noteToItem: dict[int, int] = {}
         self.itemOutline: dict[int, str] = {}        # canvas item -> its unselected edge
+        self.noteItems: dict[int, list[int]] = {}    # id(note) -> every item drawing it
+        self._styledSelection: set[model.Note] = set()   # the notes drawn as selected
 
         # Channel strip state.
         self.muteVars: dict[int, tk.BooleanVar] = {}
@@ -286,6 +288,8 @@ class MidiEditorApp(tk.Tk):
         self.demand: analysis.Demand | None = None
         self.songDemand: analysis.Demand | None = None   # the song as written, reduced or not
         self.chords: list[tuple[int, int, str]] | None = None
+        self.chordNames: list[str] | None = None     # per beat, before smoothing
+        self._chordStale: list[tuple[int, int]] = []    # tick spans whose beats need naming
         self.budgetVar = tk.IntVar(value=DEMAND_BUDGET)
 
         # Reduction: the plan's switches live in these variables, the result
@@ -1311,6 +1315,8 @@ class MidiEditorApp(tk.Tk):
         self.demand = None
         self.songDemand = None
         self.chords = None
+        self.chordNames = None
+        self._chordStale = []
         self.reduction = None
         self.noteWeights = None
         self.reducedSong = None
@@ -2143,9 +2149,13 @@ class MidiEditorApp(tk.Tk):
         else:
             verdict = "reduction off"
 
-        weights = self._ensureWeights()
-        weight = weights.get(id(note), 0.0)
-        heaviest = max(weights.values(), default=1.0) or 1.0
+        # The bar is out of the most a note can weigh under the plan: the
+        # top line of the highest priority channel at full velocity, with no
+        # doubling. One note is scored alone, so a click on a large file
+        # does not score every note.
+        plan = self._currentPlan()
+        weight = self._noteWeight(note)
+        heaviest = 1.5 * max((plan.priorityOf(ch) for ch in self.song.channels), default=1.0)
         values = {
             "Velocity": str(note.velocity),
             "Starts": f"bar {bar}:{beat}",
@@ -2199,6 +2209,8 @@ class MidiEditorApp(tk.Tk):
         self.itemToNote.clear()
         self.noteToItem.clear()
         self.itemOutline.clear()
+        self.noteItems.clear()
+        self._styledSelection = set()
         self.cursorItem = None
 
         # Scrollregion leaves 200 px of slack past the last note; zoom() uses
@@ -2300,6 +2312,7 @@ class MidiEditorApp(tk.Tk):
                 self.itemToNote[item] = note
                 self.noteToItem[id(note)] = item
                 self.itemOutline[item] = _shade(base, 0.3)
+                self.noteItems.setdefault(id(note), []).append(item)
 
             for start, end in spans:
                 x1 = start * self.ppt
@@ -2308,6 +2321,7 @@ class MidiEditorApp(tk.Tk):
                                           outline=outline, tags="note")
                 self.itemToNote[item] = note
                 self.itemOutline[item] = outline
+                self.noteItems.setdefault(id(note), []).append(item)
 
                 if not ghost:
                     self.noteToItem[id(note)] = item
@@ -2456,13 +2470,22 @@ class MidiEditorApp(tk.Tk):
                               fill=theme.ROLL["keyText"], font=(self.uiFamily, 7))
 
     def _applySelectionStyle(self):
-        """Outline the selected notes in white, the rest in their colour; refresh the inspector."""
-        for item, note in self.itemToNote.items():
-            if note in self.selection:
-                self.canvas.itemconfigure(item, outline="#ffffff", width=2)
-            else:
-                self.canvas.itemconfigure(item, outline=self.itemOutline[item], width=1)
+        """Outline the selected notes in white, the rest in their colour; refresh the inspector.
 
+        Only the notes whose state differs from how they are drawn are
+        restyled, so a click on a large file touches a few items, not every
+        one; `redraw` draws every note plain and forgets what was styled.
+        """
+        for note in self._styledSelection ^ self.selection:
+            selected = note in self.selection
+
+            for item in self.noteItems.get(id(note), ()):
+                if selected:
+                    self.canvas.itemconfigure(item, outline="#ffffff", width=2)
+                else:
+                    self.canvas.itemconfigure(item, outline=self.itemOutline[item], width=1)
+
+        self._styledSelection = set(self.selection)
         self._refreshInspector()
 
     def zoom(self, factor: float, anchor_x: float | None = None):
@@ -2556,12 +2579,27 @@ class MidiEditorApp(tk.Tk):
 
         return self.songDemand
 
-    def _invalidateDemand(self):
-        """Forget the sweep, the chords, the reduction and the report after an edit."""
+    def _invalidateDemand(self, notesIn: tuple[int, int] | None = None):
+        """Forget the sweep, the chords, the reduction and the report after an edit.
+
+        The chord of each beat is kept and named again only where notes
+        changed, so an edit to one note names a beat or two, not the song.
+
+        Args:
+            notesIn: the ticks within which every changed note started and
+                ended, before and after the edit; an empty span when no note
+                changed; None when any note may have.
+        """
         self.demand = None
         self.songDemand = None
         self._scheduleOverlap()
         self.chords = None
+
+        if notesIn is None:
+            self.chordNames = None
+        elif notesIn[1] > notesIn[0]:
+            self._chordStale.append(notesIn)
+
         self.reduction = None
         self.noteWeights = None
         self.reducedSong = None
@@ -2640,7 +2678,26 @@ class MidiEditorApp(tk.Tk):
         """
         if self.chords is None:
             beat = self.song.mf.division * 4 // self.song.timeSigs[0][2]
-            self.chords = analysis.chordTrack(self.song, beat)
+            steps = len(range(0, self.song.maxTick, beat))
+            index = analysis.stepIndex(self.song)
+
+            # Name every beat the first time; after that only the beats an
+            # edit touched, and any the song has grown by.
+            if self.chordNames is None:
+                stale = range(steps)
+                names: list[str | None] = [None] * steps
+            else:
+                names = (self.chordNames + [None] * steps)[:steps]
+                touched = {i for t0, t1 in self._chordStale
+                           for i in range(t0 // beat, min(steps, (t1 - 1) // beat + 1))}
+                stale = sorted(touched | {i for i, name in enumerate(names) if name is None})
+
+            for i in stale:
+                names[i] = analysis.chordAt(self.song, index, i * beat, (i + 1) * beat)
+
+            self.chordNames = names
+            self._chordStale = []
+            self.chords = analysis.chordRuns(names, beat)
 
         return self.chords
 
@@ -4026,6 +4083,22 @@ class MidiEditorApp(tk.Tk):
 
         return self.noteWeights
 
+    def _noteWeight(self, note: model.Note) -> float:
+        """Return one note's reduction weight, from the cache or by scoring it alone.
+
+        Args:
+            note: the note.
+
+        Returns:
+            float: the weight under the current plan.
+        """
+        if self.noteWeights is not None:
+            weight = self.noteWeights[id(note)]
+        else:
+            weight = reduce.noteWeight(self.song, self._currentPlan(), note)
+
+        return weight
+
     def _invalidateReducedSong(self):
         """Discard the playable copy of the reduction after a channel event edit.
 
@@ -4976,7 +5049,7 @@ class MidiEditorApp(tk.Tk):
             message: status bar text.
         """
         self._markDirty()
-        self._invalidateDemand()
+        self._invalidateDemand((0, 0))
         self.redraw()
         self._fillEvents()
         self._updateSummary()
@@ -5226,8 +5299,9 @@ class MidiEditorApp(tk.Tk):
         # grows when notes were dragged past the end, so the scrollregion and
         # ruler follow on the next redraw.
         if self.drag and self.drag["moved"]:
+            spans = list(self.drag["orig"].values()) + [(n.start, n.end) for n in self.selection]
             self._markDirty()
-            self._invalidateDemand()
+            self._invalidateDemand((min(sp[0] for sp in spans), max(sp[1] for sp in spans)))
             self.song.maxTick = max(self.song.maxTick,
                                      max((n.end for n in self.selection), default=0))
             self._refreshInspector()
@@ -5254,7 +5328,7 @@ class MidiEditorApp(tk.Tk):
         note = self.song.addNote(self.activeChannel, pitch, 100, start, end)
         self.selection = {note}
         self._markDirty()
-        self._invalidateDemand()
+        self._invalidateDemand((start, end))
         self.redraw()
         self._describeNote(note)
 
@@ -5519,8 +5593,7 @@ class MidiEditorApp(tk.Tk):
                  else gm.noteName(note.pitch))
         info = self.song.channels.get(note.channel)
         inst = info.instrument if info else "?"
-        weight = (f" | weight {self._ensureWeights()[id(note)]:.2f}"
-                  if self.shadeVar.get() else "")
+        weight = f" | weight {self._noteWeight(note):.2f}" if self.shadeVar.get() else ""
         self._setStatus(
             f"{prefix}{pname} vel {note.velocity} | ch {note.channel + 1} ({inst}) | "
             f"tick {note.start}-{note.end} ({note.length}) | track {note.track}{weight}")
@@ -5569,10 +5642,12 @@ class MidiEditorApp(tk.Tk):
             return
 
         n = len(self.selection)
+        span = (min(note.start for note in self.selection),
+                max(note.end for note in self.selection))
         self.song.deleteNotes(list(self.selection))
         self.selection.clear()
         self._markDirty()
-        self._invalidateDemand()
+        self._invalidateDemand(span)
         self.redraw()
         self._setStatus(f"Deleted {n} note{'s' if n != 1 else ''}")
 

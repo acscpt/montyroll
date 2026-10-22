@@ -403,6 +403,23 @@ class TestChordTrack:
         assert [n for _, _, n in analysis.chordTrack(song, 480)] == ["C"]
         assert [n for _, _, n in analysis.chordTrack(song, 480, smooth=0)] == ["C", "Dm", "C"]
 
+    def testEachStepAloneMatchesTheTrack(self, song: model.Song) -> None:
+        """chordAt names every step as the track does with smoothing off."""
+        index = analysis.stepIndex(song)
+        names = [analysis.chordAt(song, index, t, t + 480) for t in range(0, song.maxTick, 480)]
+        assert analysis.chordRuns(names, 480, smooth=0) == analysis.chordTrack(song, 480, smooth=0)
+
+    def testBassIsANoteStillSounding(self, song: model.Song) -> None:
+        """A low note that stopped before the step is not its bass, though a held note
+        that started before it still is."""
+        held = [model.Note(0, 0, p, 100, 0, 1920) for p in (45, 60, 64)]
+        stopped = model.Note(0, 1, 36, 100, 240, 360)
+        song.notes = held + [stopped]
+        song.maxTick = 1920
+        index = analysis.stepIndex(song)
+        profile = analysis.pitchClassProfile(song, 480, 960, held)
+        assert analysis.chordAt(song, index, 480, 960) == analysis.nameChord(profile, 45 % 12)
+
     def testDemoChords(self) -> None:
         """The Chopsticks demo alternates G7 and C in two-bar groups with the band."""
         demo = model.Song.load(str(ROOT / "resources" / "chopsticks.mid"))

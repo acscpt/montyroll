@@ -18,10 +18,10 @@ on MIDI note 36 is not a unison with a bass C2.
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import dataclass, field
-from itertools import combinations
+from itertools import accumulate, combinations
 
 from . import model
 
@@ -692,48 +692,72 @@ def nameChord(profile: list[float], bass: int | None = None, threshold: float = 
     return name
 
 
-def chordTrack(song: model.Song, stepTicks: int, smooth: int = 1) -> list[tuple[int, int, str]]:
-    """Name the chord in each step of the piece and merge repeats.
+@dataclass
+class StepIndex:
+    """A song's notes in start order, arranged so a step finds its notes by bisection."""
+
+    notes: list[model.Note]
+    starts: list[int]       # each note's start, in the same order
+    reach: list[int]        # the latest end among the notes up to and including each
+
+
+def stepIndex(song: model.Song) -> StepIndex:
+    """Index a song's notes for naming chords one step at a time.
 
     Args:
         song: the song.
-        stepTicks: the analysis step, typically a beat or a bar.
+
+    Returns:
+        StepIndex: the notes sorted by start, their starts, and the running
+        maximum of their ends.
+    """
+    notes = sorted(song.notes, key=lambda n: n.start)
+    reach = list(accumulate((n.end for n in notes), max))
+    index = StepIndex(notes, [n.start for n in notes], reach)
+    return index
+
+
+def chordAt(song: model.Song, index: StepIndex, t0: int, t1: int) -> str:
+    """Name the chord in one step, from the notes sounding in it.
+
+    The notes are found by bisection: the first that can still sound is the
+    first whose running end reaches past the step's start, and the last is
+    the last to start before its end. The bass is the lowest pitched note
+    still sounding at the step's start or starting within it.
+
+    Args:
+        song: the song.
+        index: the song's `stepIndex`.
+        t0: the step's start tick.
+        t1: its end tick.
+
+    Returns:
+        str: the chord name.
+    """
+    window = index.notes[bisect_right(index.reach, t0):bisect_left(index.starts, t1)]
+    lowest = min((n for n in window if n.channel != model.DRUM_CHANNEL and n.end > t0),
+                 key=lambda n: n.pitch, default=None)
+    bass = lowest.pitch % 12 if lowest is not None else None
+    name = nameChord(pitchClassProfile(song, t0, t1, window), bass)
+    return name
+
+
+def chordRuns(names: list[str], stepTicks: int, smooth: int = 1) -> list[tuple[int, int, str]]:
+    """Merge a chord name per step into runs, absorbing short islands.
+
+    Args:
+        names: the chord in each step, from tick 0.
+        stepTicks: the step's length.
         smooth: a run of at most this many steps sitting between two runs of
             the same name is absorbed into them, so a bass note on the
             downbeat does not split a bar of one chord into three labels.
             Zero keeps every step as named.
 
     Returns:
-        list[tuple[int, int, str]]: (start tick, end tick, chord name) runs
-        covering the piece, consecutive equal names merged.
+        list[tuple[int, int, str]]: (start tick, end tick, chord name) runs,
+        consecutive equal names merged.
     """
-    names: list[str] = []
-    tick = 0
-
-    # Notes sorted by start let each step scan only the notes that can
-    # overlap it.
-    notes = sorted(song.notes, key=lambda n: n.start)
-    first = 0
-
-    while tick < song.maxTick:
-        end = tick + stepTicks
-
-        while first < len(notes) and notes[first].end <= tick:
-            first += 1
-
-        window = []
-
-        for n in notes[first:]:
-            if n.start >= end:
-                break
-
-            window.append(n)
-
-        lowest = min((n for n in window if n.channel != model.DRUM_CHANNEL),
-                     key=lambda n: n.pitch, default=None)
-        bass = lowest.pitch % 12 if lowest is not None else None
-        names.append(nameChord(pitchClassProfile(song, tick, end, window), bass))
-        tick = end
+    names = list(names)
 
     # Smoothing: a short island between two stretches of the same name
     # takes that name.
@@ -763,6 +787,24 @@ def chordTrack(song: model.Song, stepTicks: int, smooth: int = 1) -> list[tuple[
         else:
             runs.append((start, end, name))
 
+    return runs
+
+
+def chordTrack(song: model.Song, stepTicks: int, smooth: int = 1) -> list[tuple[int, int, str]]:
+    """Name the chord in each step of the piece and merge repeats.
+
+    Args:
+        song: the song.
+        stepTicks: the analysis step, typically a beat or a bar.
+        smooth: as `chordRuns` takes it.
+
+    Returns:
+        list[tuple[int, int, str]]: (start tick, end tick, chord name) runs
+        covering the piece, consecutive equal names merged.
+    """
+    index = stepIndex(song)
+    names = [chordAt(song, index, t, t + stepTicks) for t in range(0, song.maxTick, stepTicks)]
+    runs = chordRuns(names, stepTicks, smooth)
     return runs
 
 

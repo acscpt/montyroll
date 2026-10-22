@@ -210,7 +210,7 @@ The note card describes one selected note. With no note selected the card says s
 | Ticks | start-end (length) | The note's extent in ticks. |
 | Track | | The track the note belongs to. |
 | Reduction | `kept`, a drop reason, `cut short`, `reduction off` | What the reduction does with the note. |
-| Weight | | The note's weight under the current plan, with a bar against the heaviest note in the song. |
+| Weight | | The note's weight under the current plan, with a bar out of the most a note can weigh under it: 1.5 times the highest channel priority. |
 
 ## Piano roll
 

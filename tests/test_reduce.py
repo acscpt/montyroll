@@ -289,6 +289,14 @@ class TestWeights:
         assert w[id(_note(s, 1, 62, 0))] == pytest.approx(3.0)
         assert w[id(_note(s, 0, 60, 0))] == pytest.approx(1.5)
 
+    def testOneNoteScoresAsTheWholeSongDoes(self, song: model.Song) -> None:
+        """noteWeight gives every note exactly the figure weights gives it."""
+        for plan in (reduce.Plan(), reduce.Plan(priority={1: 2.0, 9: 0.5})):
+            every = reduce.weights(song, plan)
+
+            for note in song.notes:
+                assert reduce.noteWeight(song, plan, note) == every[id(note)]
+
 
 class TestTransforms:
     """Each transform on a hand-built case."""
