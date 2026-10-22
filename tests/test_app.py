@@ -144,7 +144,7 @@ class TestStartup:
     """The window after opening a file."""
 
     def testNotesAreDrawn(self, app: MidiEditorApp) -> None:
-        """Every note has a canvas item and every item maps back to its note."""
+        """Every note of a song shorter than the drawn span has an item, mapping back to it."""
         assert len(app.noteToItem) == len(app.song.notes)
         assert set(app.itemToNote.values()) == set(app.song.notes)
 
@@ -761,6 +761,56 @@ class TestChannelStrip:
         assert played
         channels = {e.channel for t in played[0].tracks for e in t if e.isNoteOn}
         assert channels == {9}
+
+
+class TestDrawnSpan:
+    """Only the notes in and around the view are drawn, and a scroll draws the rest."""
+
+    def _farNote(self, app: MidiEditorApp) -> model.Note:
+        """Add a note well past every view width of the song, and redraw.
+
+        Returns:
+            model.Note: the note.
+        """
+        start = app.song.maxTick + int(20 * app.canvas.winfo_width() / app.ppt)
+        note = app.song.addNote(0, 60, 100, start, start + 480)
+        app._invalidateDemand((start, start + 480))
+        app.redraw()
+        app.update()
+        return note
+
+    def testAFarNoteIsDrawnOnlyWhenScrolledTo(self, app: MidiEditorApp) -> None:
+        """A note far past the view has no item until the view reaches it."""
+        far = self._farNote(app)
+        first = app.song.notes[0]
+        assert id(far) not in app.noteToItem and id(first) in app.noteToItem
+        app._xview("moveto", 1.0)
+        app.update()
+        assert id(far) in app.noteToItem and id(first) not in app.noteToItem
+        t0, t1 = app._drawnSpan
+        assert t0 <= far.start and far.end <= t1
+
+    def testSelectionSurvivesAScroll(self, app: MidiEditorApp) -> None:
+        """A selected note scrolled out of the span and back is outlined again."""
+        far = self._farNote(app)
+        first = app.song.notes[0]
+        app.selection = {first}
+        app._applySelectionStyle()
+        app._xview("moveto", 1.0)
+        app.update()
+        app._xview("moveto", 0.0)
+        app.update()
+        item = app.noteToItem[id(first)]
+        assert app.canvas.itemcget(item, "outline") == "#ffffff"
+        assert id(far) not in app.noteToItem
+
+    def testCursorStaysOnTop(self, app: MidiEditorApp) -> None:
+        """Notes drawn after a scroll go under the playback cursor."""
+        self._farNote(app)
+        app.cursorItem = app.canvas.create_line(10, 0, 10, 100, tags="cursor")
+        app._xview("moveto", 1.0)
+        app.update()
+        assert app.canvas.find_all()[-1] == app.cursorItem
 
 
 class TestViewport:

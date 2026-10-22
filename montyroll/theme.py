@@ -62,6 +62,7 @@ UI_CAPTION_PT = 9        # captions and small labels
 Distance = Callable[[float, float], float]   # a shape: negative inside, in pixels
 
 
+@cache
 def mix(colour: str, target: str, amount: float) -> str:
     """Mix one colour towards another.
 

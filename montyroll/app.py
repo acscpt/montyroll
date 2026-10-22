@@ -22,9 +22,10 @@ from __future__ import annotations
 import os
 import time
 import tkinter as tk
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import cache
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from typing import Any
@@ -54,6 +55,7 @@ BUDGET_SETTLE_MS = 300   # quiet time after a budget step before the reduction i
 MASTER_MAX = 150     # the master volume's top, in percent
 GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
 NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
+NOTE_MARGIN = 1.0    # view widths of notes drawn either side of the roll's view
 ROW_PAD = "1.5p"     # space above and below a channel row's name, which sets the bar's height
 HOVER_LEVELS = ("bar", "beat", "cell")   # the lit areas under the pointer, outermost first
 BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
@@ -82,6 +84,7 @@ DRAWER_CLOSE_GLYPH = "\u25be"   # small down-pointing triangle: one that closes
 ELLIPSIS = "\u2026"        # the end of a name cut short to fit its row
 
 
+@cache
 def _shade(color: str, factor: float) -> str:
     """Scale each component of a "#rrggbb" colour by a factor.
 
@@ -253,6 +256,9 @@ class MidiEditorApp(tk.Tk):
         self.noteToItem: dict[int, int] = {}
         self.itemOutline: dict[int, str] = {}        # canvas item -> its unselected edge
         self.noteItems: dict[int, list[int]] = {}    # id(note) -> every item drawing it
+        self._drawnSpan: tuple[float, float] = (0.0, 0.0)   # ticks whose notes are drawn
+        self._noteIndex: analysis.StepIndex | None = None   # the notes by start, for the span
+        self._notesAfter: str | None = None
         self._styledSelection: set[model.Note] = set()   # the notes drawn as selected
 
         # Channel strip state.
@@ -949,7 +955,7 @@ class MidiEditorApp(tk.Tk):
         hbar.grid(row=5, column=1, sticky="ew")
         self.canvas.configure(
             xscrollcommand=lambda a, b: (hbar.set(a, b), self.ruler.xview_moveto(a),
-                                         self._scheduleDemand()),
+                                         self._scheduleDemand(), self._scheduleNotes()),
             yscrollcommand=lambda a, b: (vbar.set(a, b), self.keys.yview_moveto(a)))
 
         # A sash between the roll and the demand strip: dragging it changes
@@ -1317,6 +1323,7 @@ class MidiEditorApp(tk.Tk):
         self.chords = None
         self.chordNames = None
         self._chordStale = []
+        self._noteIndex = None
         self.reduction = None
         self.noteWeights = None
         self.reducedSong = None
@@ -2206,11 +2213,6 @@ class MidiEditorApp(tk.Tk):
         """
         c = self.canvas
         c.delete("all")
-        self.itemToNote.clear()
-        self.noteToItem.clear()
-        self.itemOutline.clear()
-        self.noteItems.clear()
-        self._styledSelection = set()
         self.cursorItem = None
 
         # Scrollregion leaves 200 px of slack past the last note; zoom() uses
@@ -2263,9 +2265,55 @@ class MidiEditorApp(tk.Tk):
                 x = tick * self.ppt
                 c.create_line(x, 0, x, height, fill="#a04848", dash=(6, 4), tags="tempo")
 
-        # Notes: brighter with velocity on audible channels, flat grey on
-        # muted ones so the mute/solo state shows in the roll. Both maps are
-        # filled here so hit-testing and dragging can find the items.
+        self._drawNotes()
+
+        # The ruler and keys at the same width and height as the roll so they
+        # scroll in step with it, and the band over the bar under the
+        # pointer, which outlives the redraw.
+        self._drawRuler(width)
+        self._drawKeys(height)
+        self._hoverItem = None
+
+        for level in HOVER_LEVELS:
+            self._paintHover(level)
+
+        self._scheduleDemand()
+
+    def _drawNotes(self):
+        """Draw the notes in and around the roll's view, replacing those drawn before.
+
+        Only the notes within `NOTE_MARGIN` view widths either side of the
+        view are drawn, and `_checkNotes` draws them again when a scroll
+        leaves that span. The maps are filled here so hit-testing, dragging
+        and selection find the items, and the selection is outlined again.
+        """
+        c = self.canvas
+        s = self.song
+        c.delete("note")
+        self.itemToNote.clear()
+        self.noteToItem.clear()
+        self.itemOutline.clear()
+        self.noteItems.clear()
+        self._styledSelection = set()
+        self._hoverItem = None
+
+        # The span to draw, in ticks, and the notes in it, found by
+        # bisection on the notes in start order.
+        view = max(c.winfo_width(), 1)
+        left = c.canvasx(0) - NOTE_MARGIN * view
+        right = c.canvasx(0) + (1 + NOTE_MARGIN) * view
+        t0, t1 = max(0.0, left / self.ppt), right / self.ppt
+        self._drawnSpan = (t0, t1)
+
+        if self._noteIndex is None:
+            self._noteIndex = analysis.stepIndex(s)
+
+        index = self._noteIndex
+        notes = [n for n in index.notes[bisect_right(index.reach, t0):
+                                        bisect_left(index.starts, t1)] if n.end >= t0]
+
+        # Notes are brighter with velocity on audible channels and flat grey
+        # on muted ones, so the mute and solo state shows in the roll.
         audible = self._audibleChannels()
         reduction = self._ensureReduction() if self.reduceVar.get() else None
         segments: dict[int, list[reduce.Placed]] = {}
@@ -2279,7 +2327,7 @@ class MidiEditorApp(tk.Tk):
         weights = self._ensureWeights() if self.shadeVar.get() else None
         heaviest = max(weights.values(), default=1.0) if weights else 1.0
 
-        for note in s.notes:
+        for note in notes:
             y1 = (127 - note.pitch) * self.rowH + 1
             y2 = y1 + self.rowH - 2
             base = CHANNEL_COLORS[note.channel]
@@ -2326,18 +2374,26 @@ class MidiEditorApp(tk.Tk):
                 if not ghost:
                     self.noteToItem[id(note)] = item
 
-        # Selection outlines, then the ruler and keys at the same width and
-        # height as the roll so they scroll in step with it, and the band
-        # over the bar under the pointer, which outlives the redraw.
         self._applySelectionStyle()
-        self._drawRuler(width)
-        self._drawKeys(height)
-        self._hoverItem = None
 
-        for level in HOVER_LEVELS:
-            self._paintHover(level)
+        if self.cursorItem is not None:
+            c.tag_raise(self.cursorItem)
 
-        self._scheduleDemand()
+    def _scheduleNotes(self):
+        """Check at the next idle moment whether the view has left the drawn notes."""
+        if self._notesAfter is None:
+            self._notesAfter = self.after_idle(self._checkNotes)
+
+    def _checkNotes(self):
+        """Draw the notes again when the view reaches past the span drawn."""
+        self._notesAfter = None
+        c = self.canvas
+        t0 = c.canvasx(0) / self.ppt
+        t1 = (c.canvasx(0) + c.winfo_width()) / self.ppt
+        drawn0, drawn1 = self._drawnSpan
+
+        if t0 < drawn0 or t1 > drawn1:
+            self._drawNotes()
 
     def _drawRuler(self, width: int):
         """Redraw the four-row ruler above the roll.
@@ -2592,6 +2648,7 @@ class MidiEditorApp(tk.Tk):
         """
         self.demand = None
         self.songDemand = None
+        self._noteIndex = None
         self._scheduleOverlap()
         self.chords = None
 
