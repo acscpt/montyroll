@@ -61,6 +61,7 @@ INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
 NO_POOL = "(none)"   # a channel in no pool is left out of the reduction
 NO_TIER = "(none)"   # a pool with no tier: plain voices, no chip
 BY_INSTRUMENT = "(by instrument)"   # a pool's sound left to each part's GM program
+NO_CHIP = "(no chip)"   # the Sound box of a pool whose tier names no chip, so has no sounds
 X16_TIERS = export.presetTiers(export.TARGETS["zsm"])   # the Commander X16's two chips
 SNAP_CHOICES = ["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "off"]
 MAX_EVENT_ROWS = 8000
@@ -611,8 +612,9 @@ class MidiEditorApp(tk.Tk):
                 "sticky": "nswe", "children": [(f"{key}.indicator", {"sticky": ""})]})])
 
         # The display's drop-downs: the text, then the pools table's down
-        # arrow, filled while pressed.
+        # arrow, filled while pressed and muted while disabled.
         s.element_create("Lcd.Combobox.downarrow", "image", img["poolDown"],
+                         ("disabled", img["poolDownDisabled"]),
                          ("pressed", img["poolDownPressed"]), sticky="", padding=(4, 0, 0, 0))
         s.layout("Lcd.TCombobox", [
             ("Lcd.Combobox.downarrow", {"side": "right", "sticky": "ns"}),
@@ -3368,9 +3370,7 @@ class MidiEditorApp(tk.Tk):
                                        style="Lcd.TCombobox", font=(self.uiFamily, 9))
         self.soundCombo.pack(anchor="w")
         self.soundCombo.bind("<<ComboboxSelected>>", lambda e: self._poolSoundChanged())
-        Tooltip(self.soundCombo, "The sound this pool's voices play on export: one from\n"
-                                 "its chip's library, or one chosen for each part from\n"
-                                 "its GM instrument")
+        self.soundTip = Tooltip(self.soundCombo, "")
         self.overlapLbl = ttk.Label(self._lcdColumn(row, "Overlap"), text="",
                                     style="Readout.Lcd.TLabel")
         self.overlapLbl.pack(anchor="w")
@@ -4438,7 +4438,9 @@ class MidiEditorApp(tk.Tk):
         """Fill the Sound box with the sounds of a pool's chip and show its choice.
 
         A choice the chip has no sound for shows as `BY_INSTRUMENT`, which
-        is what the export plays for it.
+        is what the export plays for it. A pool whose tier names no chip has
+        no sounds, so the box is disabled and reads `NO_CHIP`, and its
+        tooltip says how to give the pool one.
 
         Args:
             pool: the edited pool.
@@ -4446,9 +4448,15 @@ class MidiEditorApp(tk.Tk):
         key = self._targetFor(pool)
 
         if key is None:
-            self.soundCombo.configure(values=[BY_INSTRUMENT], state="disabled")
-            self.poolSoundVar.set(BY_INSTRUMENT)
+            self.soundCombo.configure(values=[NO_CHIP], state="disabled")
+            self.poolSoundVar.set(NO_CHIP)
+            self.soundTip.text = ("Sounds belong to a chip: choose a Tier for this\n"
+                                  "pool, after setting the tiers up with Tiers...")
             return
+
+        self.soundTip.text = ("The sound this pool's voices play on export: one from\n"
+                              "its chip's library, or one chosen for each part from\n"
+                              "its GM instrument")
 
         chip = self.plan.tierOf(pool.tier).chip
         sounds = next(c.sounds for c in export.TARGETS[key].CHIPS if c.name == chip)

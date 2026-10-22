@@ -348,7 +348,7 @@ def paintedImages() -> dict[str, str]:
     are slim triangles, 40 by 11, in the accent: brighter under the
     pointer, dark on an accent bar when pressed, and dim when the budget
     cannot be edited. The pools table's arrows are smaller, 14 by 8, plain
-    or dark on an accent bar when pressed. The images are painted once and
+    or dark on an accent bar when pressed, and muted when disabled. The images are painted once and
     shared by every window.
 
     Returns:
@@ -357,8 +357,8 @@ def paintedImages() -> dict[str, str]:
         knobHover, trough, rowKnob, rowKnobHover, rowTrough, muteOff,
         muteOffHover, muteOn, muteOnHover and the same four for solo, and
         budgetUp, budgetUpHover, budgetUpPressed, budgetUpDisabled and the
-        same four for budgetDown, and poolUp, poolUpPressed, poolDown and
-        poolDownPressed.
+        same four for budgetDown, and poolUp, poolUpPressed, poolUpDisabled
+        and the same three for poolDown.
     """
     p = PALETTE
     lit = mix(p["accent"], "#ffffff", 0.2)
@@ -425,5 +425,6 @@ def paintedImages() -> dict[str, str]:
     for name, arrow in arrows.items():
         images[name] = png(14, 8, [(arrow, p["accent"])])
         images[f"{name}Pressed"] = png(14, 8, [(bar, p["accent"]), (arrow, p["ink"])])
+        images[f"{name}Disabled"] = png(14, 8, [(arrow, p["muted"])])
 
     return images

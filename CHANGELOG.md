@@ -38,7 +38,7 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Raising the budget with the reduction on.** While **Reduce to the voice budget** was on, the budget beside the strip could be lowered but not raised, as its limit followed the reduced demand, which the budget itself caps. The limit is now the peak of the file as written.
 
-- **The Sound box offers the pool's own chip.** The box listed the sounds of every chip of the target, so a YM2151 pool was offered PSG waveforms, which its export ignored. It now lists only the sounds of the chip that the pool's tier names, and `Chip` carries those names as `sounds`.
+- **The Sound box offers the pool's own chip.** The box listed the sounds of every chip of the target, so a YM2151 pool was offered PSG waveforms, which its export ignored. It now lists only the sounds of the chip that the pool's tier names, and `Chip` carries those names as `sounds`. For a pool with no chip the box reads `(no chip)`, greyed, and its tooltip says to choose a tier.
 
 ## [0.3.0] - 2026-10-20
 

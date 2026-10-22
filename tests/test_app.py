@@ -38,7 +38,9 @@ from montyroll.app import (
     LANE_GAP,
     LANE_PAD,
     MAX_EVENT_ROWS,
+    NO_CHIP,
     NO_POOL,
+    NO_TIER,
     NOTE_HOVER_MIX,
     PLAY_GLYPH,
     STOP_GLYPH,
@@ -1422,6 +1424,17 @@ class TestPoolTable:
         app._storePoolControls()
         assert "saw" not in app.soundCombo.cget("values")
         assert app.poolSoundVar.get() == BY_INSTRUMENT
+
+        # With no tier the box is disabled, says so, and its tip says why.
+        app.poolTierVar.set(NO_TIER)
+        app._storePoolControls()
+        assert app.soundCombo.instate(["disabled"])
+        assert app.poolSoundVar.get() == NO_CHIP
+        assert "Tier" in app.soundTip.text
+        app.poolTierVar.set("psg")
+        app._storePoolControls()
+        assert app.soundCombo.instate(["!disabled"])
+        assert app.poolSoundVar.get() == "saw"
 
     def testChipLinesMoveTheirPools(self, app: MidiEditorApp) -> None:
         """Each chip's line moves the selected pool on that chip, or the chip's last pool."""

@@ -273,7 +273,7 @@ The Reduce panel sits under the channel rows. Its first rows switch the reductio
 | Peak, in the table | | The most notes that the pool's channels sound at once in the file, in amber while it is above the pool's voices, when the pool must drop notes. |
 | Name tag | | Names the selected pool at the top of the display. |
 | **Tier** | Tier names, `(none)` | The tier that the selected pool's voices come from. |
-| **Sound** | The sounds of the pool's chip, `(by instrument)` | The sound of the pool in an export. A pool with no chip has no sounds to choose. |
+| **Sound** | The sounds of the pool's chip, `(by instrument)` | The sound of the pool in an export. For a pool with no chip the box reads `(no chip)` and is greyed, as sounds belong to a chip. |
 | **Overlap** | | The highest overlap among the channels of the pool, in amber. `-` for a pool of fewer than two channels. |
 | **Unisons** | on, off | Merges unisons: drops a note that starts with the same pitch on another channel. On by default. |
 | **Octaves** | on, off | Folds octaves: drops a note that starts with its octave on another channel. |
