@@ -19,7 +19,6 @@ on MIDI note 36 is not a unison with a bass C2.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from collections import Counter
 from dataclasses import dataclass, field
 from itertools import accumulate, combinations
 
@@ -189,27 +188,117 @@ def _classKey(note: model.Note) -> tuple[str, int]:
     return key
 
 
-def _bump(counter: Counter, key: object, delta: int) -> int:
-    """Adjust a multiset count and report the change in distinct keys.
+def _sweepRange(song: model.Song, notes: list[model.Note], start: int | None,
+                end: int | None, channels: list[int]) -> Demand:
+    """Cut notes into constant-state segments between two ticks and count each.
+
+    Every note's start and end are boundaries, and at a shared tick
+    note-offs come before note-ons, so a note re-struck where its
+    predecessor ends counts as one voice. Each count is a running tally:
+    the multisets of keys hold how many notes share a key, and the distinct
+    count changes only when a key appears or vanishes.
 
     Args:
-        counter: the multiset.
-        key: the key to adjust.
-        delta: +1 or -1.
+        song: for the tempo map.
+        notes: the notes to sweep.
+        start: a tick from which to begin, the notes sounding there struck
+            at it; None to begin at the first note.
+        end: a tick at which to stop, with the last segment recorded up to
+            it and no note released at or after it; None to run to the last
+            note's end.
+        channels: the channels to count, every note's among them.
 
     Returns:
-        int: +1 when the key appeared, -1 when it vanished, else 0.
+        Demand: the segments, with `endTick` the last tick reached.
     """
-    before = counter[key]
-    after = before + delta
+    # Boundary events, offs before ons at a tick; the sequence number keeps
+    # the sort from comparing notes.
+    events: list[tuple[int, int, int, model.Note]] = []
 
-    if after:
-        counter[key] = after
-    else:
-        del counter[key]
+    for seq, n in enumerate(notes):
+        events.append((n.start if start is None else max(n.start, start), 1, seq, n))
 
-    change = (1 if after else 0) - (1 if before else 0)
-    return change
+        if end is None or n.end < end:
+            events.append((n.end, 0, seq, n))
+
+    events.sort()
+    keys = [((n.channel, n.pitch), _pitchKey(n), _classKey(n)) for n in notes]
+    column = {ch: i for i, ch in enumerate(channels)}
+    perChannel = [0] * len(channels)
+    voiceKeys: dict = {}
+    pitchKeys: dict = {}
+    classKeys: dict = {}
+    raw = voices = pitches = classes = 0
+    demand = Demand()
+    rows: list[tuple[int, ...]] = []
+    prevTick = start
+    prevSec = song.tickToSeconds(start) if start is not None else 0.0
+
+    def record(tick: int):
+        """Append the segment from prevTick to tick with the counts in force."""
+        nonlocal prevSec
+        sec = song.tickToSeconds(tick)
+        demand.ticks.append(prevTick)
+        demand.seconds.append(sec - prevSec)
+        demand.raw.append(raw)
+        demand.voices.append(voices)
+        demand.pitches.append(pitches)
+        demand.classes.append(classes)
+        rows.append(tuple(perChannel))
+        prevSec = sec
+
+    for tick, kind, seq, n in events:
+        # A new tick closes the segment that ran up to it.
+        if tick != prevTick:
+            if prevTick is not None:
+                record(tick)
+            else:
+                prevSec = song.tickToSeconds(tick)
+
+            prevTick = tick
+
+        delta = 1 if kind else -1
+        raw += delta
+        perChannel[column[n.channel]] += delta
+        voiceKey, pitchKey, classKey = keys[seq]
+
+        before = voiceKeys.get(voiceKey, 0)
+        after = before + delta
+        voices += (after != 0) - (before != 0)
+
+        if after:
+            voiceKeys[voiceKey] = after
+        else:
+            del voiceKeys[voiceKey]
+
+        before = pitchKeys.get(pitchKey, 0)
+        after = before + delta
+        pitches += (after != 0) - (before != 0)
+
+        if after:
+            pitchKeys[pitchKey] = after
+        else:
+            del pitchKeys[pitchKey]
+
+        before = classKeys.get(classKey, 0)
+        after = before + delta
+        classes += (after != 0) - (before != 0)
+
+        if after:
+            classKeys[classKey] = after
+        else:
+            del classKeys[classKey]
+
+    if end is not None and prevTick is not None and end > prevTick:
+        record(end)
+        prevTick = end
+
+    # The per-channel counts are kept a row per segment and turned into a
+    # column per channel once.
+    columns = list(zip(*rows)) if rows else [()] * len(channels)
+    demand.channels = {ch: list(columns[i]) for i, ch in enumerate(channels)}
+    demand.endTick = prevTick if prevTick is not None else 0
+    return demand
 
 
 def sweep(song: model.Song, notes: list[model.Note] | None = None) -> Demand:
@@ -232,63 +321,11 @@ def sweep(song: model.Song, notes: list[model.Note] | None = None) -> Demand:
     if notes is None:
         notes = song.notes
 
-    demand = Demand()
-
     if not notes:
-        return demand
+        empty = Demand()
+        return empty
 
-    # Boundary events, offs before ons at the same tick. The sequence number
-    # keeps the sort from ever comparing Note objects.
-    events: list[tuple[int, int, int, model.Note]] = []
-
-    for seq, n in enumerate(notes):
-        events.append((n.start, 1, seq, n))
-        events.append((n.end, 0, seq, n))
-
-    events.sort(key=lambda e: (e[0], e[1], e[2]))
-
-    # Running multisets, one per way of counting, and the distinct-key count
-    # of each kept alongside so a segment costs nothing to record.
-    channelsInUse = sorted({n.channel for n in notes})
-    perChannel: dict[int, int] = {ch: 0 for ch in channelsInUse}
-    voiceKeys: Counter = Counter()
-    pitchKeys: Counter = Counter()
-    classKeys: Counter = Counter()
-    raw = voices = pitches = classes = 0
-    demand.channels = {ch: [] for ch in channelsInUse}
-    prevTick: int | None = None
-    i = 0
-
-    while i < len(events):
-        tick = events[i][0]
-
-        # Record the segment that just ended, with the state in force
-        # during it.
-        if prevTick is not None and tick > prevTick:
-            demand.ticks.append(prevTick)
-            demand.seconds.append(song.tickToSeconds(tick) - song.tickToSeconds(prevTick))
-            demand.raw.append(raw)
-            demand.voices.append(voices)
-            demand.pitches.append(pitches)
-            demand.classes.append(classes)
-
-            for ch in channelsInUse:
-                demand.channels[ch].append(perChannel[ch])
-
-        # Apply every event at this tick before looking at the next.
-        while i < len(events) and events[i][0] == tick:
-            _, kind, _, n = events[i]
-            delta = 1 if kind else -1
-            raw += delta
-            perChannel[n.channel] += delta
-            voices += _bump(voiceKeys, (n.channel, n.pitch), delta)
-            pitches += _bump(pitchKeys, _pitchKey(n), delta)
-            classes += _bump(classKeys, _classKey(n), delta)
-            i += 1
-
-        prevTick = tick
-
-    demand.endTick = prevTick if prevTick is not None else 0
+    demand = _sweepRange(song, notes, None, None, sorted({n.channel for n in notes}))
     return demand
 
 
@@ -333,62 +370,10 @@ def resweep(song: model.Song, demand: Demand, t0: int, t1: int,
     else:
         notes = [n for n in index.notes[bisect_right(index.reach, a):last] if n.end > a]
 
-    # Boundary events within the stretch: a note already sounding at its
-    # start is struck there, and a note ending at or past its end is not
-    # released, as the stretch is recorded up to that end.
-    events: list[tuple[int, int, int, model.Note]] = []
-
-    for seq, n in enumerate(notes):
-        events.append((n.start if a is None else max(n.start, a), 1, seq, n))
-
-        if b is None or n.end < b:
-            events.append((n.end, 0, seq, n))
-
-    events.sort(key=lambda e: (e[0], e[1], e[2]))
-
-    # The channels as a full sweep would list them.
+    # The stretch is swept from the notes sounding at its start, counting
+    # the channels as a full sweep would list them.
     channelsInUse = sorted({n.channel for n in song.notes})
-    middle = Demand(channels={ch: [] for ch in channelsInUse})
-    perChannel: dict[int, int] = {ch: 0 for ch in channelsInUse}
-    voiceKeys: Counter = Counter()
-    pitchKeys: Counter = Counter()
-    classKeys: Counter = Counter()
-    raw = voices = pitches = classes = 0
-    prevTick: int | None = a
-    k = 0
-
-    def record(end: int):
-        """Append the segment from prevTick to end with the counts in force."""
-        middle.ticks.append(prevTick)
-        middle.seconds.append(song.tickToSeconds(end) - song.tickToSeconds(prevTick))
-        middle.raw.append(raw)
-        middle.voices.append(voices)
-        middle.pitches.append(pitches)
-        middle.classes.append(classes)
-
-        for ch in channelsInUse:
-            middle.channels[ch].append(perChannel[ch])
-
-    while k < len(events):
-        tick = events[k][0]
-
-        if prevTick is not None and tick > prevTick:
-            record(tick)
-
-        while k < len(events) and events[k][0] == tick:
-            _, kind, _, n = events[k]
-            delta = 1 if kind else -1
-            raw += delta
-            perChannel[n.channel] += delta
-            voices += _bump(voiceKeys, (n.channel, n.pitch), delta)
-            pitches += _bump(pitchKeys, _pitchKey(n), delta)
-            classes += _bump(classKeys, _classKey(n), delta)
-            k += 1
-
-        prevTick = tick
-
-    if b is not None and prevTick is not None and b > prevTick:
-        record(b)
+    middle = _sweepRange(song, notes, a, b, channelsInUse)
 
     # The kept segments either side, with a channel the edit introduced
     # silent in them and one it emptied dropped.
@@ -396,7 +381,7 @@ def resweep(song: model.Song, demand: Demand, t0: int, t1: int,
     tail = slice(j, len(demand.ticks)) if b is not None else slice(0, 0)
     result = Demand(
         ticks=demand.ticks[head] + middle.ticks + demand.ticks[tail],
-        endTick=demand.endTick if b is not None else prevTick,
+        endTick=demand.endTick if b is not None else middle.endTick,
         seconds=demand.seconds[head] + middle.seconds + demand.seconds[tail],
         raw=demand.raw[head] + middle.raw + demand.raw[tail],
         voices=demand.voices[head] + middle.voices + demand.voices[tail],

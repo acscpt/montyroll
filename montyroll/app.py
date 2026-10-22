@@ -332,6 +332,7 @@ class MidiEditorApp(tk.Tk):
         self.reducedSong: model.Song | None = None
         self.shadeVar = tk.BooleanVar(value=False)       # notes coloured by weight, not velocity
         self.noteWeights: dict[int, float] | None = None  # id(note) -> weight, cached with the plan
+        self._weightsFor: tuple = ()    # the channel priorities noteWeights were scored under
         self.reports: dict[str, str | None] = {"original": None, "reduced": None}
         self._demandAfter: str | None = None
         self.laneVar = tk.StringVar(value=LANES[0])     # what the strip under the roll shows
@@ -1622,7 +1623,7 @@ class MidiEditorApp(tk.Tk):
 
     def _channelsChanged(self):
         """Mute or solo toggled: dim the roll and restart the synth if playing."""
-        self.redraw()
+        self._redrawNotes()
         self._liveUpdate()
 
     def muteAll(self):
@@ -1630,7 +1631,7 @@ class MidiEditorApp(tk.Tk):
         for var in self.muteVars.values():
             var.set(True)
 
-        self.redraw()
+        self._redrawNotes()
         self._liveUpdate()
         self._setStatus("All channels muted")
 
@@ -1657,7 +1658,7 @@ class MidiEditorApp(tk.Tk):
             self._invalidateReducedSong()
             self._buildChannelRows()
 
-        self.redraw()
+        self._redrawNotes()
         self._liveUpdate()
         message = "Mutes and solos cleared"
 
@@ -2377,6 +2378,16 @@ class MidiEditorApp(tk.Tk):
 
         if self.cursorItem is not None:
             c.tag_raise(self.cursorItem)
+
+    def _redrawNotes(self):
+        """Draw the notes again, and the strip, after a change to how they look.
+
+        A mute, a solo, the shading or the reduction changes the notes'
+        colours and segments and the strip's counts, and nothing else on the
+        roll.
+        """
+        self._drawNotes()
+        self._scheduleDemand()
 
     def _scheduleNotes(self):
         """Check at the next idle moment whether the view has left the drawn notes."""
@@ -3510,7 +3521,7 @@ class MidiEditorApp(tk.Tk):
         Tooltip(cb, "Draw and play the song reduced to the Voices budget.\n"
                     "Dropped notes are stippled; the file is not changed.")
         shade = ttk.Checkbutton(top, text="Shade", variable=self.shadeVar, style="Toggle.TButton",
-                                command=self.redraw)
+                                command=self._redrawNotes)
         shade.pack(side="right")
         Tooltip(shade, "Shade by weight: colour notes by their reduction weight\n"
                        "instead of velocity; the brighter a note, the harder\n"
@@ -4144,7 +4155,8 @@ class MidiEditorApp(tk.Tk):
         """
         if self.reduction is None:
             try:
-                self.reduction = reduce.reduce(self.song, self._currentPlan())
+                self.reduction = reduce.reduce(self.song, self._currentPlan(),
+                                               self._ensureWeights())
             except ValueError as exc:
                 self.reduction = reduce.Reduction()
                 self.lossLbl.config(text=f"plan refused: {exc}")
@@ -4155,13 +4167,36 @@ class MidiEditorApp(tk.Tk):
 
         return self.reduction
 
+    def _priorities(self) -> tuple[tuple[int, float], ...]:
+        """List the plan's priority for every channel, which the weights depend on.
+
+        Returns:
+            tuple[tuple[int, float], ...]: (channel, priority) in channel order.
+        """
+        plan = self._currentPlan()
+        priorities = tuple((ch, plan.priorityOf(ch)) for ch in sorted(self.song.channels))
+        return priorities
+
+    def _currentWeights(self) -> dict[int, float] | None:
+        """Return the cached weights while the priorities they were scored under stand.
+
+        Returns:
+            dict[int, float] | None: keyed by `id(note)`, or None when stale.
+        """
+        current = self.noteWeights if self._weightsFor == self._priorities() else None
+        return current
+
     def _ensureWeights(self) -> dict[int, float]:
         """Return every note's reduction weight under the current plan, computing it if needed.
+
+        The weights depend on the notes and the channel priorities alone, so
+        a change of budget, pool or transform keeps them.
 
         Returns:
             dict[int, float]: keyed by `id(note)`.
         """
-        if self.noteWeights is None:
+        if self._currentWeights() is None:
+            self._weightsFor = self._priorities()
             self.noteWeights = reduce.weights(self.song, self._currentPlan())
 
         return self.noteWeights
@@ -4175,8 +4210,10 @@ class MidiEditorApp(tk.Tk):
         Returns:
             float: the weight under the current plan.
         """
-        if self.noteWeights is not None:
-            weight = self.noteWeights[id(note)]
+        cached = self._currentWeights()
+
+        if cached is not None:
+            weight = cached[id(note)]
         else:
             weight = reduce.noteWeight(self.song, self._currentPlan(), note)
 
@@ -4242,13 +4279,12 @@ class MidiEditorApp(tk.Tk):
             self.budgetVar.set(self._totalVoices())
 
         self.reduction = None
-        self.noteWeights = None
         self.reducedSong = None
         self.demand = None
         self.reports["reduced"] = None
 
         if self.reduceVar.get() or self.shadeVar.get():
-            self.redraw()
+            self._redrawNotes()
         else:
             self.lossLbl.config(text="")
             self._scheduleDemand()

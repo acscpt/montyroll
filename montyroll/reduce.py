@@ -1044,12 +1044,14 @@ def loadPlan(path: str) -> Plan:
 
 
 # ------------------------------------------------------------------ drive
-def reduce(song: model.Song, plan: Plan) -> Reduction:
+def reduce(song: model.Song, plan: Plan, weight: dict[int, float] | None = None) -> Reduction:
     """Apply a plan to a song.
 
     Args:
         song: the song; never modified.
         plan: the tiers, pools and priorities.
+        weight: the notes' `weights` under the plan's priorities, when the
+            caller holds them; scored here when omitted.
 
     Returns:
         Reduction: the result, with voices numbered as one contiguous range
@@ -1060,7 +1062,7 @@ def reduce(song: model.Song, plan: Plan) -> Reduction:
         ValueError: the plan's pools do not fit its tiers.
     """
     plan.validate()
-    weight = weights(song, plan)
+    weight = weight if weight is not None else weights(song, plan)
     reduction = Reduction()
     base = 0
 

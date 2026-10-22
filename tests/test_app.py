@@ -1701,6 +1701,20 @@ class TestReduction:
         assert app.maxChordVar.get() == chord.limit
         assert chord.label.cget("text") == str(chord.limit)
 
+    def testWeightsLastUntilAPriorityChanges(self, app: MidiEditorApp) -> None:
+        """A budget step reuses the notes' weights; a new priority scores them again."""
+        weights = app._ensureWeights()
+        app.budgetVar.set(2)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        assert app._ensureWeights() is weights
+        app.priorityVars[0].set(3.0)
+        app._reductionChanged()
+        again = app._ensureWeights()
+        assert again is not weights
+        first = next(n for n in app.song.notes if n.channel == 0)
+        assert again[id(first)] == pytest.approx(3.0 * weights[id(first)])
+
     def testPriorityMovesTheLoss(self, app: MidiEditorApp) -> None:
         """Raising a channel's priority keeps more of its notes."""
         app.budgetVar.set(2)
