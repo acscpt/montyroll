@@ -790,6 +790,26 @@ class TestDrawnSpan:
         t0, t1 = app._drawnSpan
         assert t0 <= far.start and far.end <= t1
 
+    def testGridAndRulerFollowTheSpan(self, app: MidiEditorApp) -> None:
+        """Bar lines and bar numbers are drawn across the span, and a scroll moves them."""
+        far = self._farNote(app)
+
+        def drawn() -> tuple[float, float]:
+            xs = [app.canvas.coords(i)[0] for i in app.canvas.find_withtag("grid")]
+            return min(xs), max(xs)
+
+        def barNumbers() -> set[int]:
+            return {int(app.ruler.itemcget(i, "text")) for i in app.ruler.find_withtag("scale")
+                    if app.ruler.type(i) == "text" and app.ruler.itemcget(i, "text").isdigit()}
+
+        assert drawn()[1] < far.start * app.ppt
+        app._xview("moveto", 1.0)
+        app.update()
+        low, high = drawn()
+        assert low <= far.start * app.ppt <= high
+        assert 1 not in barNumbers()
+        assert int(far.start // (app.song.mf.division * 4)) + 1 in barNumbers()
+
     def testSelectionSurvivesAScroll(self, app: MidiEditorApp) -> None:
         """A selected note scrolled out of the span and back is outlined again."""
         far = self._farNote(app)

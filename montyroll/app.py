@@ -260,7 +260,8 @@ class MidiEditorApp(tk.Tk):
         self._eventsAfter: str | None = None
         self._drawnSpan: tuple[float, float] = (0.0, 0.0)   # ticks whose notes are drawn
         self._noteIndex: analysis.StepIndex | None = None   # the notes by start, for the span
-        self._notesAfter: str | None = None
+        self._spanAfter: str | None = None
+        self._rollWidth = 0      # the roll's scrollregion width, which the ruler shares
         self._styledSelection: set[model.Note] = set()   # the notes drawn as selected
 
         # Channel strip state.
@@ -960,7 +961,7 @@ class MidiEditorApp(tk.Tk):
         hbar.grid(row=5, column=1, sticky="ew")
         self.canvas.configure(
             xscrollcommand=lambda a, b: (hbar.set(a, b), self.ruler.xview_moveto(a),
-                                         self._scheduleDemand(), self._scheduleNotes()),
+                                         self._scheduleDemand(), self._scheduleSpan()),
             yscrollcommand=lambda a, b: (vbar.set(a, b), self.keys.yview_moveto(a)))
 
         # A sash between the roll and the demand strip: dragging it changes
@@ -2239,11 +2240,12 @@ class MidiEditorApp(tk.Tk):
     def redraw(self):
         """Redraw the whole piano roll, ruler and keyboard from the song.
 
-        Every structural change (load, add, delete, zoom, mute) comes through
-        here: the canvas is cleared and rebuilt and the item <-> note maps are
+        Every structural change (load, add, delete, zoom) comes through here:
+        the canvas is cleared and rebuilt and the item <-> note maps are
         refilled, which is also why the playback cursor item is forgotten and
-        recreated by the next `_tickCursor`. Dragging bypasses this and moves
-        items directly through `_placeNoteItem`.
+        recreated by the next `_tickCursor`. The grid, the ruler and the notes
+        are drawn for the span around the view (`_drawSpan`). Dragging
+        bypasses this and moves items directly through `_placeNoteItem`.
         """
         c = self.canvas
         c.delete("all")
@@ -2269,17 +2271,56 @@ class MidiEditorApp(tk.Tk):
             y = (128 - pitch) * self.rowH
             c.create_line(0, y, width, y, fill=theme.ROLL["octave"])
 
-        # bar / beat grid from the first time signature
+        # The grid, the ruler and the notes in and around the view, then the
+        # keys at the roll's height so they scroll in step with it, and the
+        # band over the bar under the pointer, which outlives the redraw.
+        self._rollWidth = width
+        self.ruler.delete("all")
+        self._drawSpan()
+        self._drawKeys(height)
+        self._hoverItem = None
+
+        for level in HOVER_LEVELS:
+            self._paintHover(level)
+
+        self._scheduleDemand()
+
+    def _drawSpan(self):
+        """Draw the grid, the ruler and the notes in and around the roll's view.
+
+        The span is the view and `NOTE_MARGIN` view widths either side, and
+        `_checkSpan` draws it again when a scroll leaves it. The grid's
+        lines go down before the notes, so they sit over the row shading
+        and the lit bands under the pointer and under the notes.
+        """
+        c = self.canvas
+        view = max(c.winfo_width(), 1)
+        left = c.canvasx(0) - NOTE_MARGIN * view
+        right = c.canvasx(0) + (1 + NOTE_MARGIN) * view
+        self._drawnSpan = (max(0.0, left / self.ppt), right / self.ppt)
+        self._drawGrid()
+        self._drawRuler()
+        self._drawNotes()
+
+    def _drawGrid(self):
+        """Draw the bar and beat lines and the tempo changes down the drawn span of the roll."""
+        c = self.canvas
+        s = self.song
+        c.delete("grid")
+        t0, t1 = self._drawnSpan
+        height = 128 * self.rowH
+
+        # Bar and beat lines from the first time signature, from the beat at
+        # or before the span to the end of the song's last bar.
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
         beat = s.mf.division * 4 // den
         bar = beat * num
-        t = 0
+        t = int(t0 // beat) * beat
 
-        while t <= s.maxTick + bar:
+        while t <= min(t1, s.maxTick + bar):
             x = t * self.ppt
-            is_bar = t % bar == 0
-            c.create_line(x, 0, x, height,
-                          fill=theme.ROLL["bar"] if is_bar else theme.ROLL["beat"])
+            c.create_line(x, 0, x, height, tags="grid",
+                          fill=theme.ROLL["bar"] if t % bar == 0 else theme.ROLL["beat"])
             t += beat
 
         # Tempo changes as lines down the roll in the ruler's tempo colour,
@@ -2295,31 +2336,16 @@ class MidiEditorApp(tk.Tk):
 
             lastBpm = bpm
 
-            if tick > 0:
+            if 0 < tick and t0 <= tick <= t1:
                 x = tick * self.ppt
-                c.create_line(x, 0, x, height, fill="#a04848", dash=(6, 4), tags="tempo")
-
-        self._drawNotes()
-
-        # The ruler and keys at the same width and height as the roll so they
-        # scroll in step with it, and the band over the bar under the
-        # pointer, which outlives the redraw.
-        self._drawRuler(width)
-        self._drawKeys(height)
-        self._hoverItem = None
-
-        for level in HOVER_LEVELS:
-            self._paintHover(level)
-
-        self._scheduleDemand()
+                c.create_line(x, 0, x, height, fill="#a04848", dash=(6, 4),
+                              tags=("tempo", "grid"))
 
     def _drawNotes(self):
-        """Draw the notes in and around the roll's view, replacing those drawn before.
+        """Draw the notes in the drawn span, replacing those drawn before.
 
-        Only the notes within `NOTE_MARGIN` view widths either side of the
-        view are drawn, and `_checkNotes` draws them again when a scroll
-        leaves that span. The maps are filled here so hit-testing, dragging
-        and selection find the items, and the selection is outlined again.
+        The maps are filled here so hit-testing, dragging and selection find
+        the items, and the selection is outlined again.
         """
         c = self.canvas
         c.delete("note")
@@ -2330,14 +2356,9 @@ class MidiEditorApp(tk.Tk):
         self._styledSelection = set()
         self._hoverItem = None
 
-        # The span to draw, in ticks, and the notes in it, found by
-        # bisection on the notes in start order.
-        view = max(c.winfo_width(), 1)
-        left = c.canvasx(0) - NOTE_MARGIN * view
-        right = c.canvasx(0) + (1 + NOTE_MARGIN) * view
-        t0, t1 = max(0.0, left / self.ppt), right / self.ppt
-        self._drawnSpan = (t0, t1)
-
+        # The notes in the span, found by bisection on the notes in start
+        # order.
+        t0, t1 = self._drawnSpan
         index = self._ensureNoteIndex()
         notes = [n for n in index.notes[bisect_right(index.reach, t0):
                                         bisect_left(index.starts, t1)] if n.end >= t0]
@@ -2419,57 +2440,62 @@ class MidiEditorApp(tk.Tk):
         self._drawNotes()
         self._scheduleDemand()
 
-    def _scheduleNotes(self):
-        """Check at the next idle moment whether the view has left the drawn notes."""
-        if self._notesAfter is None:
-            self._notesAfter = self.after_idle(self._checkNotes)
+    def _scheduleSpan(self):
+        """Check at the next idle moment whether the view has left the drawn span."""
+        if self._spanAfter is None:
+            self._spanAfter = self.after_idle(self._checkSpan)
 
-    def _checkNotes(self):
-        """Draw the notes again when the view reaches past the span drawn."""
-        self._notesAfter = None
+    def _checkSpan(self):
+        """Draw the span again when the view reaches past the one drawn."""
+        self._spanAfter = None
         c = self.canvas
         t0 = c.canvasx(0) / self.ppt
         t1 = (c.canvasx(0) + c.winfo_width()) / self.ppt
         drawn0, drawn1 = self._drawnSpan
 
         if t0 < drawn0 or t1 > drawn1:
-            self._drawNotes()
+            self._drawSpan()
 
-    def _drawRuler(self, width: int):
-        """Redraw the four-row ruler above the roll.
+    def _drawRuler(self):
+        """Draw the four-row ruler above the roll across the drawn span.
 
         Top row: a seconds scale. Second row: bar numbers. Third row: tempo
         changes and markers. Bottom row: the chord named in each beat,
         merged into runs, labelled where the run is wide enough to read.
-
-        Args:
-            width: scrollregion width in pixels, matching the note canvas.
+        The items are tagged "scale" and replace those drawn before, so the
+        band over the bar under the pointer stays.
         """
         r = self.ruler
-        r.delete("all")
+        r.delete("scale")
         r0, r1, r2, r3, r4 = self.rulerRows
         secondsFont, barFont, tempoFont, chordFont = self.rulerFonts
+        width = self._rollWidth
         r.configure(scrollregion=(0, 0, width, r4))
         s = self.song
+        t0, t1 = self._drawnSpan
+        x0, x1 = t0 * self.ppt, t1 * self.ppt
 
         for y in (r1, r2, r3):
-            r.create_line(0, y, width, y, fill=theme.ROLL["octave"])
+            r.create_line(0, y, width, y, fill=theme.ROLL["octave"], tags="scale")
 
         # -- seconds scale (top row); tempo-aware: x from seconds_to_tick
         # The step is the smallest one whose ticks sit at least 45 px apart
         # at the song's average pixels per second; each tick's x then goes
         # through secondsToTick so the scale stays true across tempo changes.
+        # The marks run from the one at or before the span to the one past it.
         px_per_sec = s.maxTick * self.ppt / max(s.duration, 0.001)
 
         for step in (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300):
             if step * px_per_sec >= 45:
                 break
 
-        t = 0.0
+        k = int(s.tickToSeconds(t0) // step)
+        last = min(s.duration, s.tickToSeconds(t1)) + step
 
-        while t <= s.duration + step:
+        while k * step <= last:
+            t = k * step
             x = s.secondsToTick(t) * self.ppt
-            r.create_line(x, r1 - 5, x, r1, fill="#7a9")
+            r.create_line(x, r1 - 5, x, r1, fill="#7a9", tags="scale")
 
             # Labels switch to m:ss past a minute, keeping tenths only while
             # the step is shorter than a second.
@@ -2480,21 +2506,19 @@ class MidiEditorApp(tk.Tk):
                 label = f"{t:.4g}s"
 
             r.create_text(x + 3, r0 + 1, text=label, anchor="nw",
-                          fill="#8fb", font=secondsFont)
-            t += step
+                          fill="#8fb", font=secondsFont, tags="scale")
+            k += 1
 
-        # -- bar numbers (middle row)
+        # -- bar numbers (middle row), from the bar at or before the span
         num, den = s.timeSigs[0][1], s.timeSigs[0][2]
         bar = s.mf.division * 4 * num // den
-        n = 1
-        t = 0
+        n = int(t0 // bar)
 
-        while t <= s.maxTick + bar:
-            x = t * self.ppt
-            r.create_line(x, r2 - 7, x, r2, fill="#888")
-            r.create_text(x + 3, r1 + 1, text=str(n), anchor="nw",
-                          fill="#bbb", font=barFont)
-            t += bar
+        while n * bar <= min(t1, s.maxTick + bar):
+            x = n * bar * self.ppt
+            r.create_line(x, r2 - 7, x, r2, fill="#888", tags="scale")
+            r.create_text(x + 3, r1 + 1, text=str(n + 1), anchor="nw",
+                          fill="#bbb", font=barFont, tags="scale")
             n += 1
 
         # -- tempo changes and markers (bottom row)
@@ -2512,8 +2536,9 @@ class MidiEditorApp(tk.Tk):
             last_bpm = bpm
             x = tick * self.ppt
             label = f"{TEMPO_GLYPH}={bpm:g}"
-            r.create_line(x, r2 + 1, x, r3, fill="#d66")
-            r.create_text(x + 3, r2 + 1, text=label, anchor="nw", fill="#f99", font=tempoFont)
+            r.create_line(x, r2 + 1, x, r3, fill="#d66", tags="scale")
+            r.create_text(x + 3, r2 + 1, text=label, anchor="nw", fill="#f99", font=tempoFont,
+                          tags="scale")
             tempoLabels.append((x, x + 3 + tempoFont.measure(label)))
 
         # A marker sharing its tick with a tempo flag moves right of the
@@ -2526,20 +2551,21 @@ class MidiEditorApp(tk.Tk):
                     x = right + 6
 
             r.create_text(x + 2, r3 - 1, text=text, anchor="sw",
-                          fill="#e8d44d", font=tempoFont)
+                          fill="#e8d44d", font=tempoFont, tags="scale")
 
-        # -- chords (bottom row): one label per run, skipped when the run is
-        # narrower than its text so a busy passage does not become a smear.
+        # -- chords (bottom row): one label per run in the span, skipped
+        # when the run is narrower than its text so a busy passage does not
+        # become a smear.
         for start, end, name in self._ensureChords():
-            if name == analysis.NO_CHORD:
+            if name == analysis.NO_CHORD or end * self.ppt < x0 or start * self.ppt > x1:
                 continue
 
-            x1, x2 = start * self.ppt, end * self.ppt
-            r.create_line(x1, r3 + 1, x1, r4, fill="#5a7a9a")
+            cx1, cx2 = start * self.ppt, end * self.ppt
+            r.create_line(cx1, r3 + 1, cx1, r4, fill="#5a7a9a", tags="scale")
 
-            if x2 - x1 >= chordFont.measure(name) + 6:
-                r.create_text(x1 + 3, r3 + 1, text=name, anchor="nw",
-                              fill="#9cf", font=chordFont)
+            if cx2 - cx1 >= chordFont.measure(name) + 6:
+                r.create_text(cx1 + 3, r3 + 1, text=name, anchor="nw",
+                              fill="#9cf", font=chordFont, tags="scale")
 
     def _drawKeys(self, height: int):
         """Redraw the keyboard gutter to the left of the roll.
