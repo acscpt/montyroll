@@ -407,6 +407,7 @@ def dedupUnison(placed: list[Placed], reduction: Reduction) -> list[Placed]:
     """
     byKey: dict[tuple[int, int], Placed] = {}
     survivors: list[Placed] = []
+    beaten: set[int] = set()        # id() of survivors a heavier unison replaced
 
     for p in placed:
         # A drum key is a sound, not a pitch: two parts on one key are two
@@ -422,14 +423,15 @@ def dedupUnison(placed: list[Placed], reduction: Reduction) -> list[Placed]:
             byKey[key] = p
             survivors.append(p)
         elif p.weight > other.weight:
-            survivors.remove(other)
+            beaten.add(id(other))
             reduction.dropped[id(other.note)] = "unison"
             byKey[key] = p
             survivors.append(p)
         else:
             reduction.dropped[id(p.note)] = "unison"
 
-    return survivors
+    kept = [p for p in survivors if id(p) not in beaten]
+    return kept
 
 
 def dedupOctave(placed: list[Placed], reduction: Reduction) -> list[Placed]:
@@ -447,6 +449,7 @@ def dedupOctave(placed: list[Placed], reduction: Reduction) -> list[Placed]:
     """
     byKey: dict[tuple[int, int], Placed] = {}
     survivors: list[Placed] = []
+    beaten: set[int] = set()        # id() of survivors a heavier octave replaced
 
     for p in placed:
         key = (p.start, p.pitch % 12)
@@ -456,14 +459,15 @@ def dedupOctave(placed: list[Placed], reduction: Reduction) -> list[Placed]:
             byKey.setdefault(key, p)
             survivors.append(p)
         elif p.weight > other.weight or (p.weight == other.weight and p.pitch < other.pitch):
-            survivors.remove(other)
+            beaten.add(id(other))
             reduction.dropped[id(other.note)] = "octave"
             byKey[key] = p
             survivors.append(p)
         else:
             reduction.dropped[id(p.note)] = "octave"
 
-    return survivors
+    kept = [p for p in survivors if id(p) not in beaten]
+    return kept
 
 
 def mergeTremolo(placed: list[Placed], gap: int, reduction: Reduction) -> list[Placed]:
@@ -572,8 +576,10 @@ def monoTop(placed: list[Placed], reduction: Reduction) -> list[Placed]:
                     if segment is not None:
                         segment.end = tick
 
+                        # The segment is the last one begun, so it is the
+                        # last in the list.
                         if segment.end <= segment.start:
-                            out.remove(segment)
+                            out.pop()
 
                     current = p
                     segment = Placed(p.note, tick, p.end, p.pitch, p.velocity, p.channel,
