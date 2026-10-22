@@ -6,6 +6,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-22
+
 ### Added
 
 - **A new look.** A flat dark theme of blue-grey panels with etched lines between them, pastel channel colours, a cyan accent, and a painted switch and sliders. It is built on the ttk clam theme and needs nothing beyond the standard library. The colours, the fonts and the painting live in the new module `theme.py`.
