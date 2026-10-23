@@ -35,6 +35,7 @@ from montyroll.app import (
     DRAWER_OPEN_GLYPH,
     ELLIPSIS,
     GAP_STEP,
+    KEY_BLACK_SHADE,
     KEYS_W,
     LANE_GAP,
     LANE_PAD,
@@ -2767,6 +2768,91 @@ class TestTransportControls:
         assert "_resetTempo" in scale.bind("<Double-Button-1>")
         assert app._resetTempo() == "break"
         assert app.speedVar.get() == 100 and app.speedLbl.cget("text") == "100%"
+
+
+class TestPlayingKeys:
+    """The keyboard lights the keys of the notes sounding under the playback cursor."""
+
+    def _fill(self, app: MidiEditorApp, pitch: int) -> str:
+        """The colour a key is drawn in."""
+        fill = str(app.keys.itemcget(app.keyItems[pitch], "fill"))
+        return fill
+
+    def testKeysLightInTheirChannelsColour(self, app: MidiEditorApp) -> None:
+        """At tick 100 the piano's C4, the flutes' notes and the kick are lit; the rest are not."""
+        app._lightKeys(100)
+        assert set(app._litKeys) == {60, 72, 69, 36}
+        assert self._fill(app, 60) == CHANNEL_COLORS[0]
+        assert self._fill(app, 72) == CHANNEL_COLORS[1]
+        assert self._fill(app, 36) == CHANNEL_COLORS[9]
+        assert self._fill(app, 64) == theme.ROLL["white"]
+
+    def testABlackKeyTakesADarkerShade(self, app: MidiEditorApp) -> None:
+        """A sounding C sharp lights its black key in a darker shade of the channel's colour."""
+        app.song.addNote(0, 61, 100, 0, 480)
+        app._invalidateDemand((0, 480))
+        app._lightKeys(100)
+        assert self._fill(app, 61) == _shade(CHANNEL_COLORS[0], KEY_BLACK_SHADE)
+
+    def testReleasedKeysGoBack(self, app: MidiEditorApp) -> None:
+        """A key whose note has ended returns to its own colour, and the next note lights."""
+        app._lightKeys(100)
+        app._lightKeys(600)
+        assert 60 not in app._litKeys and self._fill(app, 60) == theme.ROLL["white"]
+        assert self._fill(app, 64) == CHANNEL_COLORS[0]
+
+    def testTheLatestNoteLightsASharedPitch(self, app: MidiEditorApp) -> None:
+        """Where two channels sound one pitch, the note that started last lights the key."""
+        app.song.addNote(2, 60, 100, 50, 400)
+        app._invalidateDemand((50, 400))
+        app._lightKeys(100)
+        assert self._fill(app, 60) == CHANNEL_COLORS[2]
+
+    def testMutedChannelsStayDark(self, app: MidiEditorApp) -> None:
+        """A muted channel's notes light nothing, as they are not heard."""
+        app.muteVars[0].set(True)
+        app._lightKeys(100)
+        assert 60 not in app._litKeys and self._fill(app, 60) == theme.ROLL["white"]
+        assert 72 in app._litKeys
+
+    def testTheReductionLightsWhatItPlays(self, app: MidiEditorApp) -> None:
+        """With the reduction on, a dropped note's key stays dark and a kept one lights."""
+        app.budgetVar.set(1)
+        app.reduceVar.set(True)
+        app._reductionChanged()
+        _settle(app)
+        sounding = {p.pitch for p in app.reduction.placed if p.start <= 100 < p.end}
+        app._lightKeys(100)
+        assert set(app._litKeys) == sounding
+        assert len(sounding) < 4
+
+    def testAFrameOfPlaybackLightsTheKeys(self, app: MidiEditorApp,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each tick of the cursor lights the keys under it, and stopping clears them."""
+        calls: list[int] = []
+        monkeypatch.setattr(app.player, "play", lambda *a, **k: calls.append(1) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        monkeypatch.setattr(type(app.player), "playing", property(lambda self: bool(calls)))
+        app.playFrom(100)
+        app._tickCursor()
+        assert 60 in app._litKeys
+        app.stopPlayback()
+        assert not app._litKeys
+
+    def testStoppingClearsTheKeys(self, app: MidiEditorApp) -> None:
+        """Stopping playback puts every key back in its own colour."""
+        app._lightKeys(100)
+        app.stopPlayback()
+        assert not app._litKeys
+        assert all(self._fill(app, p) == app._keyFill(p) for p in range(128))
+
+    def testARedrawStartsUnlit(self, app: MidiEditorApp) -> None:
+        """A redraw draws fresh keys, all unlit, and the next frame lights them again."""
+        app._lightKeys(100)
+        app.redraw()
+        assert not app._litKeys and self._fill(app, 60) == theme.ROLL["white"]
+        app._lightKeys(100)
+        assert self._fill(app, 60) == CHANNEL_COLORS[0]
 
 
 class TestPlayback:

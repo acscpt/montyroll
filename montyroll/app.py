@@ -65,6 +65,7 @@ NOTE_MARGIN = 1.0    # view widths of notes drawn either side of the roll's view
 ROW_PAD = "1.5p"     # space above and below a channel row's name, which sets the bar's height
 HOVER_LEVELS = ("bar", "beat", "cell")   # the lit areas under the pointer, outermost first
 BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
+KEY_BLACK_SHADE = 0.6   # a lit black key's share of its channel colour, so it still reads as black
 DRAWER_PAGES = ("Events", "Report")        # the drawer's pages, in tab order
 INSPECTOR_W = 290    # the inspector's width when open
 INSPECTOR_FOLDED_W = 44   # its width folded to the burger strip
@@ -364,6 +365,9 @@ class MidiEditorApp(tk.Tk):
         self._replayAfter: str | None = None
         self.cursorItem = None
         self.demandCursorItem = None      # the cursor's twin on the demand strip
+        self.keyItems: dict[int, int] = {}       # pitch -> its key on the keyboard
+        self._litKeys: dict[int, str] = {}       # pitch -> the colour its key is lit in
+        self._placedIndex: tuple[reduce.Reduction, analysis.StepIndex] | None = None
 
         # Voice demand: the sweep is rebuilt lazily after any change to the
         # notes, and the strip is redrawn through an idle callback so a burst
@@ -2675,8 +2679,21 @@ class MidiEditorApp(tk.Tk):
                 r.create_text(cx1 + 3, r3 + 1, text=name, anchor="nw",
                               fill="#9cf", font=chordFont, tags="scale")
 
+    @staticmethod
+    def _keyFill(pitch: int) -> str:
+        """Give a key's own colour, black or white.
+
+        Args:
+            pitch: MIDI pitch.
+
+        Returns:
+            str: the key's fill when no note lights it.
+        """
+        fill = theme.ROLL["black"] if pitch % 12 in BLACK_KEYS else theme.ROLL["white"]
+        return fill
+
     def _drawKeys(self, height: int):
-        """Redraw the keyboard gutter to the left of the roll.
+        """Redraw the keyboard gutter to the left of the roll, every key unlit.
 
         Args:
             height: scrollregion height in pixels, matching the note canvas.
@@ -2684,13 +2701,14 @@ class MidiEditorApp(tk.Tk):
         k = self.keys
         k.delete("all")
         k.configure(scrollregion=(0, 0, self.keysW, height))
+        self.keyItems.clear()
+        self._litKeys = {}
 
         for pitch in range(128):
             y = (127 - pitch) * self.rowH
-            black = pitch % 12 in (1, 3, 6, 8, 10)
-            k.create_rectangle(0, y, self.keysW, y + self.rowH,
-                               fill=theme.ROLL["black"] if black else theme.ROLL["white"],
-                               outline=theme.ROLL["keyEdge"])
+            self.keyItems[pitch] = k.create_rectangle(0, y, self.keysW, y + self.rowH,
+                                                      fill=self._keyFill(pitch),
+                                                      outline=theme.ROLL["keyEdge"])
 
             # Octave labels on each C, once the rows are tall enough to hold
             # the text.
@@ -6567,9 +6585,81 @@ class MidiEditorApp(tk.Tk):
         if elapsed < self.song.duration:
             self._startPlayback(elapsed)
 
+    def _soundingAt(self, tick: float) -> list:
+        """List what playback sounds at a tick, on the channels that are heard.
+
+        While the reduction is on that is its placed notes, as playback plays
+        the reduced song; otherwise the song's notes. Either is found by
+        bisection, the placed notes through an index kept with their
+        reduction.
+
+        Args:
+            tick: absolute tick.
+
+        Returns:
+            list: notes or placed notes, each with `pitch`, `channel` and
+            `start`.
+        """
+        if self.reduceVar.get():
+            reduction = self._shownReduction()
+
+            if reduction is None:
+                return []
+
+            if self._placedIndex is None or self._placedIndex[0] is not reduction:
+                self._placedIndex = (reduction, analysis.stepIndex(self.song, reduction.placed))
+
+            index = self._placedIndex[1]
+        else:
+            index = self._ensureNoteIndex()
+
+        audible = self._audibleChannels()
+        window = index.notes[bisect_right(index.reach, tick):bisect_right(index.starts, tick)]
+        sounding = [n for n in window if n.end > tick and n.channel in audible]
+        return sounding
+
+    def _lightKeys(self, tick: float):
+        """Light the key of every pitch sounding at a tick in its channel's colour.
+
+        Where two channels sound one pitch, the note that started last
+        lights the key. A black key takes a darker shade of the colour.
+
+        Args:
+            tick: absolute tick, the playback cursor's.
+        """
+        lit: dict[int, str] = {}
+        latest: dict[int, int] = {}
+
+        for n in self._soundingAt(tick):
+            if n.start >= latest.get(n.pitch, -1):
+                latest[n.pitch] = n.start
+                colour = CHANNEL_COLORS[n.channel]
+                lit[n.pitch] = (_shade(colour, KEY_BLACK_SHADE) if n.pitch % 12 in BLACK_KEYS
+                                else colour)
+
+        self._paintKeys(lit)
+
+    def _paintKeys(self, lit: dict[int, str]):
+        """Show the keys lit as given and every other key in its own colour.
+
+        Only the keys whose colour changes are repainted, so a frame of
+        playback touches a handful.
+
+        Args:
+            lit: pitch -> the colour to light its key in.
+        """
+        for pitch in self._litKeys.keys() - lit.keys():
+            self.keys.itemconfigure(self.keyItems[pitch], fill=self._keyFill(pitch))
+
+        for pitch, colour in lit.items():
+            if self._litKeys.get(pitch) != colour:
+                self.keys.itemconfigure(self.keyItems[pitch], fill=colour)
+
+        self._litKeys = lit
+
     def stopPlayback(self):
-        """Stop the synth, drop any pending restart and clear the cursor and
-        position readout."""
+        """Stop the synth, drop any pending restart and clear the cursor, the
+        lit keys and the position readout."""
         if self._replayAfter:
             self.after_cancel(self._replayAfter)
             self._replayAfter = None
@@ -6587,6 +6677,8 @@ class MidiEditorApp(tk.Tk):
         if self.demandCursorItem:
             self.demandCanvas.delete(self.demandCursorItem)
             self.demandCursorItem = None
+
+        self._paintKeys({})
 
     def _tickCursor(self):
         """Advance the playback cursor; reschedules itself every 33 ms.
@@ -6613,6 +6705,9 @@ class MidiEditorApp(tk.Tk):
         tick = self.song.secondsToTick(elapsed)
         x = tick * self.ppt
         self._showReadout(elapsed, self.playSpeed)
+
+        # The keys of the notes sounding at the cursor light up.
+        self._lightKeys(tick)
 
         # The cursor line is created on the first tick after a redraw and
         # moved on every tick after that.

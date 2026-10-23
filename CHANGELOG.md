@@ -6,6 +6,10 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+### Added
+
+- **Keys light as they play.** During playback the keyboard beside the roll lights each key whose note sounds under the cursor, in its channel's colour, a darker shade on a black key. Where two channels sound one pitch the note that started last lights it, a muted channel lights nothing, and with the reduction on only the notes it keeps light up. Stopping puts every key back.
+
 ## [0.4.0] - 2026-10-22
 
 ### Added
