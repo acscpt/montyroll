@@ -68,7 +68,7 @@ Notes are added, moved, resized, and deleted with the mouse, on a grid from whol
 
 **Playing**
 
-**Play** or `Space` plays the file through the synth, with a cursor that follows the tempo map and scrolls the roll, and the keyboard lights each key as its note sounds, in the colour of its channel. Each channel has a mute and a solo, and its instrument can be previewed in the pitch range of that channel. The master volume and the playback tempo (25-300%) change what is heard and leave the file as it is. A change to any of these during playback takes effect from the cursor.
+**Play** or `Space` plays the file through the synth, with a cursor that follows the tempo map and scrolls the roll, the keyboard lights each key as its note sounds, in the colour of its channel, and each channel's row shows its level on a meter. Each channel has a mute and a solo, and its instrument can be previewed in the pitch range of that channel. The master volume and the playback tempo (25-300%) change what is heard and leave the file as it is. A change to any of these during playback takes effect from the cursor.
 
 **Reducing**
 

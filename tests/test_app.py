@@ -41,13 +41,19 @@ from montyroll.app import (
     LANE_PAD,
     MASTER_MAX,
     MAX_EVENT_ROWS,
+    METER_FALL,
+    METER_H,
+    METER_PEAK_HOLD_S,
+    METER_SUSTAIN,
     NO_CHIP,
     NO_POOL,
     NO_TIER,
     NOTE_HOVER_MIX,
     PLAY_GLYPH,
     REDUCE_SWITCH_S,
+    ROW_PAD,
     STOP_GLYPH,
+    SWATCH_DIM,
     TEMPO_GLYPH,
     X16_TIERS,
     MidiEditorApp,
@@ -312,7 +318,8 @@ class TestTheme:
         assert label.cget("text").endswith(ELLIPSIS)
         font = app.rowNameBoldFont if ch == app.activeChannel else app.rowNameFont
         assert font.measure(label.cget("text")) <= label.winfo_width()
-        controls = [w for w in label.master.winfo_children() if w.winfo_x() > label.winfo_x()]
+        controls = [w for w in label.master.winfo_children()
+                    if w.winfo_x() > label.winfo_x() and w is not app.rowMeters[ch]]
         assert label.winfo_x() + label.winfo_width() <= min(w.winfo_x() for w in controls)
         app.paned.sashpos(0, wide)
         app.update()
@@ -2853,6 +2860,96 @@ class TestPlayingKeys:
         assert not app._litKeys and self._fill(app, 60) == theme.ROLL["white"]
         app._lightKeys(100)
         assert self._fill(app, 60) == CHANNEL_COLORS[0]
+
+
+class TestChannelMeters:
+    """Each channel row's level meter and swatch light during playback."""
+
+    def _level(self, vel: int, cc7: int, held: float = 0.0) -> float:
+        """A note's level from its velocity, its channel's CC7, and how far it has eased."""
+        level = vel / 127 * cc7 / 127 * (1.0 - (1.0 - METER_SUSTAIN) * held)
+        return level
+
+    def testEveryRowHasAMeterUnderItsName(self, app: MidiEditorApp) -> None:
+        """The meter line runs under the name, with space above the name and below the line."""
+        app.update_idletasks()
+        space = round(app.winfo_fpixels(ROW_PAD))
+
+        for ch, meter in app.rowMeters.items():
+            name = app.nameLabels[ch]
+            assert meter.winfo_y() >= name.winfo_y() + name.winfo_height()
+            assert int(meter.cget("height")) == METER_H
+            assert name.winfo_y() == space
+            bar = app.rowBars[ch]
+            assert bar.winfo_height() - (meter.winfo_y() + METER_H) == space
+
+    def testTargetsFollowTheSoundingNotes(self, app: MidiEditorApp) -> None:
+        """A channel's level is its loudest note's velocity times its volume, easing while held."""
+        at = app._meterTargets(0)
+        assert at[0] == pytest.approx(self._level(100, 100))
+        assert at[1] == pytest.approx(self._level(80, 90))
+        assert at[9] == pytest.approx(self._level(110, 100))      # no CC7 on the drums
+        held = app._meterTargets(900)
+        assert held[1] == pytest.approx(self._level(80, 90, 1.0))
+
+    def testMutedChannelsStayEmpty(self, app: MidiEditorApp) -> None:
+        """A muted channel's notes are not heard, so its meter does not move."""
+        app.muteVars[0].set(True)
+        assert 0 not in app._meterTargets(0)
+
+    def testMetersFallAndPeaksHold(self, app: MidiEditorApp) -> None:
+        """Once its notes end a meter falls at its rate; the peak holds, then falls too."""
+        app.update_idletasks()
+        app._moveMeters(0, 10.0)
+        top = self._level(100, 100)
+        assert app._meters[0][:2] == pytest.approx([top, top])
+        app._moveMeters(5000, 10.1)
+        level, peak, _ = app._meters[0]
+        assert level == pytest.approx(top - METER_FALL * 0.1)
+        assert peak == pytest.approx(top)
+        width = app.rowMeters[0].winfo_width()
+        assert app.rowMeters[0].coords("level")[2] == round(width * level)
+        assert app.rowMeters[0].itemcget("peak", "state") == "normal"
+        app._moveMeters(5000, 10.1 + METER_PEAK_HOLD_S + 0.5)
+        level, peak, _ = app._meters[0]
+        assert level == 0.0 and peak == 0.0
+        assert app.rowMeters[0].itemcget("peak", "state") == "hidden"
+
+    def testTheSwatchLightsWithItsChannel(self, app: MidiEditorApp) -> None:
+        """A sounding channel's swatch is lit, a silent one sinks, and stopping restores both."""
+        app._moveMeters(0, 10.0)
+        silent = sorted(set(app.rowSwatches) - {0, 1, 9})[0]
+        bar = str(app.rowBars[silent].cget("bg"))
+        dim = theme.mix(CHANNEL_COLORS[silent], bar, SWATCH_DIM)
+        assert str(app.rowSwatches[silent].cget("bg")) == dim
+        assert str(app.rowSwatches[0].cget("bg")) != theme.mix(CHANNEL_COLORS[0],
+                                                               str(app.rowBars[0].cget("bg")),
+                                                               SWATCH_DIM)
+        app.stopPlayback()
+        assert all(str(sw.cget("bg")) == CHANNEL_COLORS[ch]
+                   for ch, sw in app.rowSwatches.items())
+        assert all(m.coords("level")[2] == 0 for m in app.rowMeters.values())
+
+    def testTheTrackFollowsTheBar(self, app: MidiEditorApp) -> None:
+        """The meter's track is a darker shade of its bar, lit on the active row."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(second)
+        for ch in (first, second):
+            bar = str(app.rowBars[ch].cget("bg"))
+            assert str(app.rowMeters[ch].cget("bg")) == theme.mix(bar, "#000000", 0.35)
+
+    def testAFrameOfPlaybackMovesTheMeters(self, app: MidiEditorApp,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each tick of the cursor moves the meters, and stopping empties them."""
+        calls: list[int] = []
+        monkeypatch.setattr(app.player, "play", lambda *a, **k: calls.append(1) or True)
+        monkeypatch.setattr(player, "findPlayer", lambda: ["fakesynth"])
+        monkeypatch.setattr(type(app.player), "playing", property(lambda self: bool(calls)))
+        app.playFrom(100)
+        app._tickCursor()
+        assert app._meters[0][0] > 0
+        app.stopPlayback()
+        assert not app._meters
 
 
 class TestPlayback:

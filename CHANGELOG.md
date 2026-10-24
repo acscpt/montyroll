@@ -6,6 +6,10 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 ## [Unreleased]
 
+### Added
+
+- **Channel meters.** During playback a meter under each channel's name shows its level, the velocity of its loudest sounding note times its volume, rising at each note, easing while it is held and falling once it ends, with a mark that holds the peak for a second. The number swatch is lit by the level and dims while the channel is silent. The rows are a little taller to hold the meter, and stopping clears it.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added

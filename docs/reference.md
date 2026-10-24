@@ -169,8 +169,9 @@ Each channel in use has a row, and a click on a row makes its channel the active
 
 | Control | Values | Effect |
 | --- | --- | --- |
-| Number swatch | | The channel's number on a block in the colour of its notes, at the left of the bar. Every swatch is as wide as the largest number in the file, so the names line up. |
+| Number swatch | | The channel's number on a block in the colour of its notes, at the left of the bar. Every swatch is as wide as the largest number in the file, so the names line up. During playback it is lit by the channel's level and sinks into the bar while the channel is silent. |
 | Instrument name | | The GM instrument of the channel. The inspector changes it. A name too long for the row ends in an ellipsis. |
+| Level meter | | A line under the name that fills in the channel's colour during playback with the level of its loudest sounding note, its velocity times the channel's volume. It rises at each note, eases while the note is held, falls once it ends, and a mark holds the peak for a second. |
 | Speaker icon | on, off | Mutes the channel in playback and dims its notes. |
 | Headphones icon | on, off | Plays the soloed channels alone. |
 | Volume slider | 0 to 127 | Writes a `CC7` volume event into the file. |

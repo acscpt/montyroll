@@ -62,7 +62,14 @@ MASTER_MAX = 150     # the master volume's top, in percent
 GAP_STEP = 10        # ticks a step of the Tremolo and Legato readouts moves
 NOTE_HOVER_MIX = 0.2     # how far the note under the pointer is lit towards white
 NOTE_MARGIN = 1.0    # view widths of notes drawn either side of the roll's view
-ROW_PAD = "1.5p"     # space above and below a channel row's name, which sets the bar's height
+ROW_PAD = "3.75p"    # space above a row's name and below its meter, setting the bar's height
+METER_GAP = "1.5p"   # between a row's name and its meter line
+METER_H = 3          # the meter line's height, in pixels
+METER_SUSTAIN = 0.66     # a held note's level against its onset's
+METER_DECAY_S = 0.4      # seconds from a note's onset to its held level
+METER_FALL = 1.5         # full scales a meter falls per second once its notes end
+METER_PEAK_HOLD_S = 1.0  # seconds a meter's peak mark holds before it falls
+SWATCH_DIM = 0.7     # how far a silent channel's swatch sinks into its bar during playback
 HOVER_LEVELS = ("bar", "beat", "cell")   # the lit areas under the pointer, outermost first
 BLACK_KEYS = (1, 3, 6, 8, 10)   # pitch classes of the black keys, shaded on the roll
 KEY_BLACK_SHADE = 0.6   # a lit black key's share of its channel colour, so it still reads as black
@@ -346,6 +353,11 @@ class MidiEditorApp(tk.Tk):
         self.channelDetails: dict[int, tk.Frame] = {}    # per channel: the part shown when active
         self.nameLabels: dict[int, tk.Label] = {}        # per channel: the instrument on its row
         self.rowBars: dict[int, tk.Frame] = {}           # per channel: its row's one-line bar
+        self.rowSwatches: dict[int, tk.Label] = {}       # per channel: the number on its colour
+        self.rowMeters: dict[int, tk.Canvas] = {}        # per channel: the level meter line
+        self._meters: dict[int, list[float]] = {}        # per channel: [level, peak, peak's age]
+        self._meterDrawn: dict[int, tuple] = {}          # per channel: what its meter shows
+        self._meterTime: float | None = None             # the frame the meters last moved at
         self.rowNames: dict[int, str] = {}               # per channel: that name in full
         self.activeChannel = 0
         self.originalPrograms: dict[int, int] = {}   # per channel, as the file was opened
@@ -1563,6 +1575,9 @@ class MidiEditorApp(tk.Tk):
         self.nameLabels.clear()
         self.rowNames.clear()
         self.rowBars.clear()
+        self.rowSwatches.clear()
+        self.rowMeters.clear()
+        self._meterDrawn.clear()
         self.poolCombos.clear()
         self.usageLabels.clear()
         self.usageText.clear()
@@ -1587,8 +1602,10 @@ class MidiEditorApp(tk.Tk):
             top = tk.Frame(row, bg=p["raised"])
             top.pack(fill="x")
             self.rowBars[ch] = top
-            tk.Label(top, text=str(ch + 1), bg=colour, fg=p["ink"], width=digits, padx=5,
-                     font=(self.uiFamily, 10, "bold")).pack(side="left", fill="y")
+            swatch = tk.Label(top, text=str(ch + 1), bg=colour, fg=p["ink"], width=digits,
+                              padx=5, font=(self.uiFamily, 10, "bold"))
+            swatch.pack(side="left", fill="y")
+            self.rowSwatches[ch] = swatch
 
             # Volume slider starts at the file's CC7 value, or 100 when the
             # channel has none. Its style puts the trough on the bar's grey.
@@ -1624,12 +1641,23 @@ class MidiEditorApp(tk.Tk):
                 tk.Frame(top, width=1, bg=p["border"]).pack(side="right", fill="y")
                 Tooltip(b, tip)
 
+            # The level meter, a line under the name in the space between the
+            # swatch and the controls, which _moveMeters fills during
+            # playback: a fill in the channel's colour and a peak mark.
+            meter = tk.Canvas(top, height=METER_H, highlightthickness=0,
+                              bg=theme.mix(p["raised"], "#000000", 0.35))
+            meter.pack(side="bottom", fill="x", padx=(9, 8), pady=(METER_GAP, ROW_PAD))
+            meter.create_rectangle(0, 0, 0, METER_H, fill=colour, outline="", tags="level")
+            meter.create_rectangle(0, 0, 0, METER_H, fill=p["text"], outline="", tags="peak",
+                                   state="hidden")
+            self.rowMeters[ch] = meter
+
             # The name asks for no width of its own and is fitted to what it
-            # is given whenever that changes; its padding sets the bar's
-            # height.
+            # is given whenever that changes; the space above it and below
+            # the meter sets the bar's height.
             name = tk.Label(top, text=info.instrument, anchor="w", width=1, bg=p["raised"],
-                            fg=p["text"], font=self.rowNameFont, pady=ROW_PAD)
-            name.pack(side="left", fill="x", expand=True, padx=(8, 0))
+                            fg=p["text"], font=self.rowNameFont, pady=1)
+            name.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=(ROW_PAD, 0))
             name.bind("<Configure>", lambda e, c=ch: self._fitRowName(c))
             self.nameLabels[ch] = name
             self.rowNames[ch] = info.instrument
@@ -1954,7 +1982,7 @@ class MidiEditorApp(tk.Tk):
                 detail.pack_forget()
 
     def _paintRowBar(self, ch: int, colour: str, bold: bool):
-        """Colour a channel row's bar, its icons' and slider's styles, and its name.
+        """Colour a channel row's bar, its meter's track, its icons and slider, and its name.
 
         Args:
             ch: 0-based channel index.
@@ -1963,6 +1991,7 @@ class MidiEditorApp(tk.Tk):
         """
         s = ttk.Style(self)
         self.rowBars[ch].configure(bg=colour)
+        self.rowMeters[ch].configure(bg=theme.mix(colour, "#000000", 0.35))
         self.nameLabels[ch].configure(bg=colour,
                                       font=self.rowNameBoldFont if bold else self.rowNameFont)
 
@@ -6657,9 +6686,111 @@ class MidiEditorApp(tk.Tk):
 
         self._litKeys = lit
 
+    def _meterTargets(self, tick: float) -> dict[int, float]:
+        """Give each channel's level at a tick, 0.0 to 1.0, from the notes sounding there.
+
+        A note's level is its velocity times its channel's volume (CC7, or
+        100 when the file sets none), full at its onset and easing to
+        `METER_SUSTAIN` of that over `METER_DECAY_S` while it is held; a
+        channel's is its loudest note's. Only what is heard counts, as for
+        the lit keys.
+
+        Args:
+            tick: absolute tick, the playback cursor's.
+
+        Returns:
+            dict[int, float]: by channel, for the channels sounding.
+        """
+        now = self.song.tickToSeconds(tick)
+        targets: dict[int, float] = {}
+
+        for n in self._soundingAt(tick):
+            info = self.song.channels.get(n.channel)
+            volume = (info.volume if info is not None and info.volume >= 0 else 100) / 127
+            held = min(1.0, (now - self.song.tickToSeconds(n.start)) / METER_DECAY_S)
+            level = n.velocity / 127 * volume * (1.0 - (1.0 - METER_SUSTAIN) * held)
+            targets[n.channel] = max(targets.get(n.channel, 0.0), level)
+
+        return targets
+
+    def _moveMeters(self, tick: float, now: float):
+        """Move every channel's meter and swatch light to the frame at a tick.
+
+        A meter rises at once to its channel's level and falls by
+        `METER_FALL` a second when the level drops; its peak mark holds for
+        `METER_PEAK_HOLD_S` and then falls at the same rate. The swatch is
+        lit by the level and sinks into the bar while the channel is
+        silent.
+
+        Args:
+            tick: absolute tick, the playback cursor's.
+            now: the frame's time in seconds, monotonic.
+        """
+        elapsed = 0.0 if self._meterTime is None else max(0.0, now - self._meterTime)
+        self._meterTime = now
+        targets = self._meterTargets(tick)
+        fall = METER_FALL * elapsed
+
+        for ch in self.rowMeters:
+            level, peak, age = self._meters.get(ch, [0.0, 0.0, 0.0])
+            level = max(targets.get(ch, 0.0), level - fall)
+
+            # The peak resets at a higher level and holds, then falls.
+            if level >= peak:
+                peak, age = level, 0.0
+            else:
+                age += elapsed
+                peak = max(level, peak - fall) if age > METER_PEAK_HOLD_S else peak
+
+            self._meters[ch] = [level, peak, age]
+            self._drawMeter(ch, level, peak)
+
+    def _drawMeter(self, ch: int, level: float, peak: float):
+        """Show a channel's meter and swatch at a level and peak, repainting only what moved.
+
+        Args:
+            ch: 0-based channel index.
+            level: 0.0 to 1.0.
+            peak: 0.0 to 1.0.
+        """
+        meter = self.rowMeters[ch]
+        width = meter.winfo_width()
+        colour = CHANNEL_COLORS[ch]
+        bar = str(self.rowBars[ch].cget("bg"))
+        dim = theme.mix(colour, bar, SWATCH_DIM)
+        lit = theme.mix(dim, colour, 0.35 + 0.65 * min(level, 1.0)) if level > 0 else dim
+        shown = (round(width * level), round(width * peak) if peak > level else -1, lit)
+
+        if self._meterDrawn.get(ch) == shown:
+            return
+
+        fill, mark, swatch = shown
+        meter.coords("level", 0, 0, fill, METER_H)
+
+        if mark < 0:
+            meter.itemconfigure("peak", state="hidden")
+        else:
+            meter.coords("peak", mark - 1, 0, mark + 1, METER_H)
+            meter.itemconfigure("peak", state="normal")
+
+        self.rowSwatches[ch].configure(bg=swatch)
+        self._meterDrawn[ch] = shown
+
+    def _clearMeters(self):
+        """Empty every meter and give every swatch its full colour, as when stopped."""
+        self._meters.clear()
+        self._meterTime = None
+
+        for ch, meter in self.rowMeters.items():
+            meter.coords("level", 0, 0, 0, METER_H)
+            meter.itemconfigure("peak", state="hidden")
+            self.rowSwatches[ch].configure(bg=CHANNEL_COLORS[ch])
+
+        self._meterDrawn.clear()
+
     def stopPlayback(self):
         """Stop the synth, drop any pending restart and clear the cursor, the
-        lit keys and the position readout."""
+        lit keys, the meters and the position readout."""
         if self._replayAfter:
             self.after_cancel(self._replayAfter)
             self._replayAfter = None
@@ -6679,6 +6810,7 @@ class MidiEditorApp(tk.Tk):
             self.demandCursorItem = None
 
         self._paintKeys({})
+        self._clearMeters()
 
     def _tickCursor(self):
         """Advance the playback cursor; reschedules itself every 33 ms.
@@ -6706,8 +6838,10 @@ class MidiEditorApp(tk.Tk):
         x = tick * self.ppt
         self._showReadout(elapsed, self.playSpeed)
 
-        # The keys of the notes sounding at the cursor light up.
+        # The keys of the notes sounding at the cursor light up, and the
+        # channels' meters move.
         self._lightKeys(tick)
+        self._moveMeters(tick, time.monotonic())
 
         # The cursor line is created on the first tick after a redraw and
         # moved on every tick after that.
