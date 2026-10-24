@@ -738,6 +738,24 @@ class TestChordCache:
 class TestChannelStrip:
     """Mute, solo, instrument and volume controls."""
 
+    def testADoubleClickFoldsTheDetails(self, app: MidiEditorApp) -> None:
+        """A double click on a bar folds the active row's details; they stay folded as
+        other rows are clicked, until another double click opens them."""
+        first, second = sorted(app.song.channels)[:2]
+        app._setActiveChannel(first)
+        app.update_idletasks()
+        assert app.channelDetails[first].winfo_manager() == "pack"
+        assert app.rowBars[first].bind("<Double-Button-1>")
+        assert app.nameLabels[first].bind("<Double-Button-1>")
+        assert not app.channelDetails[first].bind("<Double-Button-1>")
+        app._toggleDetail(first)
+        assert not app.detailShown and app.activeChannel == first
+        assert app.channelDetails[first].winfo_manager() == ""
+        app._setActiveChannel(second)
+        assert app.channelDetails[second].winfo_manager() == ""
+        app._toggleDetail(second)
+        assert app.detailShown and app.channelDetails[second].winfo_manager() == "pack"
+
     def testMuteAndSoloLogic(self, app: MidiEditorApp) -> None:
         """Solo overrides mute; with no solo the unmuted channels sound."""
         assert app._audibleChannels() == set(app.song.channels)

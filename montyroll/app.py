@@ -355,6 +355,7 @@ class MidiEditorApp(tk.Tk):
         self.rowBars: dict[int, tk.Frame] = {}           # per channel: its row's one-line bar
         self.rowSwatches: dict[int, tk.Label] = {}       # per channel: the number on its colour
         self.rowMeters: dict[int, tk.Canvas] = {}        # per channel: the level meter line
+        self.detailShown = True    # the active row's details are open; a double click folds them
         self._meters: dict[int, list[float]] = {}        # per channel: [level, peak, peak's age]
         self._meterDrawn: dict[int, tuple] = {}          # per channel: what its meter shows
         self._meterTime: float | None = None             # the frame the meters last moved at
@@ -1743,8 +1744,14 @@ class MidiEditorApp(tk.Tk):
                 for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
                     w.bind(seq, self._onChanWheel)
 
+            # A double click on the bar folds the active row's details away,
+            # or opens them again.
+            for w in self._rowSurfaces(top):
+                w.bind("<Double-Button-1>", lambda e, c=ch: self._toggleDetail(c))
+
             Tooltip(row, f"Click to make channel {ch + 1} the active channel:\n"
-                    "double-clicking the piano roll adds notes there")
+                    "double-clicking the piano roll adds notes there.\n"
+                    "Double-click the bar to fold its details or open them")
             self.channelRows[ch] = row
 
         self._highlightActiveRow()
@@ -1956,7 +1963,7 @@ class MidiEditorApp(tk.Tk):
         self._setStatus(f"Active channel: {ch + 1} - double-click the roll to add notes")
 
     def _highlightActiveRow(self):
-        """Light the active channel's row and show its detail; reset every other row.
+        """Light the active channel's row and show its detail unless folded; reset every other row.
 
         The active row's bar, the row around it and its detail take the
         tint, so they read as one card, and its name is bold. Every other
@@ -1976,10 +1983,22 @@ class MidiEditorApp(tk.Tk):
             for w in self._rowSurfaces(detail):
                 w.configure(bg=colour)
 
-            if active:
+            if active and self.detailShown:
                 detail.pack(fill="x")
             else:
                 detail.pack_forget()
+
+    def _toggleDetail(self, ch: int):
+        """Fold the active row's details away, or open them, and make a channel active.
+
+        The choice holds as other rows are clicked, so the strip stays
+        compact until a double click opens the details again.
+
+        Args:
+            ch: 0-based channel index, the row double-clicked.
+        """
+        self.detailShown = not self.detailShown
+        self._setActiveChannel(ch)
 
     def _paintRowBar(self, ch: int, colour: str, bold: bool):
         """Colour a channel row's bar, its meter's track, its icons and slider, and its name.

@@ -165,7 +165,7 @@ Five buttons head the strip.
 | **Change All** | Sets every channel except Ch 10 to one instrument. |
 | **Mute All** | Mutes every channel. |
 
-Each channel in use has a row, and a click on a row makes its channel the active one. The active row's bar is lit, with its name in bold, and its figures and reduction controls open under it.
+Each channel in use has a row, and a click on a row makes its channel the active one. The active row's bar is lit, with its name in bold, and its figures and reduction controls open under it. A double click on a row's bar folds those details away, and they stay folded as other rows are clicked until another double click opens them.
 
 | Control | Values | Effect |
 | --- | --- | --- |
