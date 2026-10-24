@@ -754,23 +754,46 @@ class TestChordCache:
 class TestChannelStrip:
     """Mute, solo, instrument and volume controls."""
 
-    def testADoubleClickFoldsTheDetails(self, app: MidiEditorApp) -> None:
-        """A double click on a bar folds the active row's details; they stay folded as
-        other rows are clicked, until another double click opens them."""
+    def testABarClickFoldsTheDetails(self, app: MidiEditorApp) -> None:
+        """A click on another row's bar opens its details; a click on the active row's bar
+        folds them, and another opens them again."""
         first, second = sorted(app.song.channels)[:2]
         app._setActiveChannel(first)
         app.update_idletasks()
         assert app.channelDetails[first].winfo_manager() == "pack"
-        assert app.rowBars[first].bind("<Double-Button-1>")
-        assert app.nameLabels[first].bind("<Double-Button-1>")
-        assert not app.channelDetails[first].bind("<Double-Button-1>")
-        app._toggleDetail(first)
+        assert app.rowBars[first].bind("<Button-1>")
+        assert app.nameLabels[first].bind("<Button-1>")
+        assert not app.rowBars[first].bind("<Double-Button-1>")
+        app._barClicked(first)
         assert not app.detailShown and app.activeChannel == first
         assert app.channelDetails[first].winfo_manager() == ""
-        app._setActiveChannel(second)
-        assert app.channelDetails[second].winfo_manager() == ""
-        app._toggleDetail(second)
+        app._barClicked(first)
+        assert app.detailShown and app.channelDetails[first].winfo_manager() == "pack"
+        app._barClicked(second)
+        assert app.activeChannel == second and app.detailShown
+        assert app.channelDetails[first].winfo_manager() == ""
+        assert app.channelDetails[second].winfo_manager() == "pack"
+
+    def testAFoldedRowOpensOnAnotherBar(self, app: MidiEditorApp) -> None:
+        """With the details folded, a click on another row's bar opens that row's; a
+        channel made active from the roll keeps them folded."""
+        first, second, third = sorted(app.song.channels)[:3]
+        app._setActiveChannel(first)
+        app._barClicked(first)
+        app._setActiveChannel(third)
+        assert app.channelDetails[third].winfo_manager() == ""
+        app._barClicked(second)
         assert app.detailShown and app.channelDetails[second].winfo_manager() == "pack"
+
+    def testAClickOnTheDetailKeepsItOpen(self, app: MidiEditorApp) -> None:
+        """A click inside the active row's details leaves them open."""
+        first = sorted(app.song.channels)[0]
+        app._setActiveChannel(first)
+        app.update_idletasks()
+        detail = app.channelDetails[first]
+        detail.event_generate("<Button-1>", x=2, y=2)
+        app.update()
+        assert app.detailShown and detail.winfo_manager() == "pack"
 
     def testMuteAndSoloLogic(self, app: MidiEditorApp) -> None:
         """Solo overrides mute; with no solo the unmuted channels sound."""

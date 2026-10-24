@@ -355,7 +355,7 @@ class MidiEditorApp(tk.Tk):
         self.rowBars: dict[int, tk.Frame] = {}           # per channel: its row's one-line bar
         self.rowSwatches: dict[int, tk.Label] = {}       # per channel: the number on its colour
         self.rowMeters: dict[int, tk.Canvas] = {}        # per channel: the level meter line
-        self.detailShown = True    # the active row's details are open; a double click folds them
+        self.detailShown = True    # the active row's details are open; its bar folds them
         self._meters: dict[int, list[float]] = {}        # per channel: [level, peak, peak's age]
         self._meterDrawn: dict[int, tuple] = {}          # per channel: what its meter shows
         self._meterTime: float | None = None             # the frame the meters last moved at
@@ -1744,14 +1744,14 @@ class MidiEditorApp(tk.Tk):
                 for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
                     w.bind(seq, self._onChanWheel)
 
-            # A double click on the bar folds the active row's details away,
-            # or opens them again.
+            # A click on the bar opens the row's details under it, or folds
+            # them away when the row is already the active one.
             for w in self._rowSurfaces(top):
-                w.bind("<Double-Button-1>", lambda e, c=ch: self._toggleDetail(c))
+                w.bind("<Button-1>", lambda e, c=ch: self._barClicked(c))
 
             Tooltip(row, f"Click to make channel {ch + 1} the active channel:\n"
                     "double-clicking the piano roll adds notes there.\n"
-                    "Double-click the bar to fold its details or open them")
+                    "Click the active row's bar to fold its details or open them")
             self.channelRows[ch] = row
 
         self._highlightActiveRow()
@@ -1988,16 +1988,21 @@ class MidiEditorApp(tk.Tk):
             else:
                 detail.pack_forget()
 
-    def _toggleDetail(self, ch: int):
-        """Fold the active row's details away, or open them, and make a channel active.
+    def _barClicked(self, ch: int):
+        """Make a channel active with its details open, or fold or open the active row's details.
 
-        The choice holds as other rows are clicked, so the strip stays
-        compact until a double click opens the details again.
+        A click on another row's bar opens that row's details and closes the
+        old row's; a click on the active row's bar folds its details away,
+        or opens them again.
 
         Args:
-            ch: 0-based channel index, the row double-clicked.
+            ch: 0-based channel index, the row whose bar was clicked.
         """
-        self.detailShown = not self.detailShown
+        if ch == self.activeChannel:
+            self.detailShown = not self.detailShown
+        else:
+            self.detailShown = True
+
         self._setActiveChannel(ch)
 
     def _paintRowBar(self, ch: int, colour: str, bold: bool):

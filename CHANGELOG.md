@@ -10,7 +10,7 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Channel meters.** During playback a meter under each channel's name shows its level, the velocity of its loudest sounding note times its volume, rising at each note, easing while it is held and falling once it ends, with a mark that holds the peak for a second. The number swatch is lit by the level and dims while the channel is silent. The rows are a little taller to hold the meter, and stopping clears it.
 
-- **Folding the active row.** A double click on a channel row's bar folds the active row's figures and reduction controls away, and they stay folded as other rows are clicked until another double click opens them.
+- **Folding the active row.** A click on the active channel row's bar folds its figures and reduction controls away, and another click opens them again. A click on another row's bar opens that row's details and closes the old row's.
 
 - **Folding the Reduce panel.** A click on the Reduce panel's title bar folds the panel down to the bar, so more channel rows fit, and another click opens it. The arrow on the bar shows which way it will go.
 
