@@ -9,6 +9,6 @@ Run:  python -m montyroll [file.mid]
 from .model import Song
 from .smf import MidiFile, parse, write
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = ["MidiFile", "Song", "__version__", "parse", "write"]

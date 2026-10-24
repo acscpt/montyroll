@@ -819,17 +819,19 @@ class StepIndex:
     reach: list[int]        # the latest end among the notes up to and including each
 
 
-def stepIndex(song: model.Song) -> StepIndex:
-    """Index a song's notes for naming chords one step at a time.
+def stepIndex(song: model.Song, notes: list | None = None) -> StepIndex:
+    """Index a song's notes, or other spans with a start and an end, by start.
 
     Args:
         song: the song.
+        notes: anything with `start` and `end` to index in place of the
+            song's notes, such as a reduction's placed notes.
 
     Returns:
         StepIndex: the notes sorted by start, their starts, and the running
         maximum of their ends.
     """
-    notes = sorted(song.notes, key=lambda n: n.start)
+    notes = sorted(song.notes if notes is None else notes, key=lambda n: n.start)
     reach = list(accumulate((n.end for n in notes), max))
     index = StepIndex(notes, [n.start for n in notes], reach)
     return index

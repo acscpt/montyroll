@@ -62,7 +62,7 @@ Sometimes a whole file is at the wrong speed, as when it was sequenced at half i
 
 ## Play the file
 
-Playback goes through [a synth](install.md#add-a-synth-for-sound), and a cursor moves across the roll in step with the music.
+Playback goes through [a synth](install.md#add-a-synth-for-sound), and a cursor moves across the roll in step with the music. The keyboard down the side of the roll lights each key as its note sounds, in the colour of the channel playing it, so the keys show which part plays which pitch. A black key lights in a darker shade of the colour, and where two channels sound one pitch, the note that started last lights it. A muted channel lights nothing, and with **Reduce to the voice budget** on, only the notes the reduction keeps light up.
 
 **Play** on the toolbar starts the music from the first bar, and the same button stops it. `Space` does both from the keyboard. Playback can also start part way through. A right-click on the roll opens a menu with **Play from bar N** and **Play from beat N:B**, for the bar and the beat under the pointer.
 
