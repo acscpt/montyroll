@@ -12,6 +12,8 @@ This project is alpha. Behaviour, file handling and the user interface may chang
 
 - **Folding the active row.** A double click on a channel row's bar folds the active row's figures and reduction controls away, and they stay folded as other rows are clicked until another double click opens them.
 
+- **Folding the Reduce panel.** A click on the Reduce panel's title bar folds the panel down to the bar, so more channel rows fit, and another click opens it. The arrow on the bar shows which way it will go.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added

@@ -3805,12 +3805,23 @@ class MidiEditorApp(tk.Tk):
         """
         box = ttk.Frame(parent)
         box.pack(side="bottom", fill="x", pady=(6, 0))
-        title = ttk.Frame(box, padding=(6, 2), style="Title.TFrame")
+
+        # A click on the title bar folds the panel down to the bar, so the
+        # channel rows take its room, and another opens it; the glyph points
+        # the way the panel will move, as the drawer buttons' do.
+        title = ttk.Frame(box, padding=(6, 2), style="Title.TFrame", cursor="hand2")
         title.pack(fill="x")
-        ttk.Label(title, text="Reduce", style="Title.TLabel",
-                  font=(self.uiFamily, 10, "bold")).pack(side="left")
+        self.reduceTitle = ttk.Label(title, text=f"{DRAWER_CLOSE_GLYPH}  Reduce",
+                                     style="Title.TLabel", font=(self.uiFamily, 10, "bold"))
+        self.reduceTitle.pack(side="left")
+
+        for w in (title, self.reduceTitle):
+            w.bind("<Button-1>", lambda e: self._toggleReducePanel())
+
+        Tooltip(title, "Click to fold the Reduce panel away, or open it")
         panel = ttk.Frame(box, padding=(8, 4))
         panel.pack(fill="x")
+        self.reducePanel = panel
         # The reduction's switch, and beside it the roll's shading by weight,
         # which colours every note.
         top = ttk.Frame(panel)
@@ -3918,6 +3929,17 @@ class MidiEditorApp(tk.Tk):
                 ("Chord", self.maxChordVar, 8, 1, "all",
                  "Notes kept per chord on a channel, outer voices first")):
             self._buildGap(self._lcdColumn(gaps, text), var, limit, step, zero, tip)
+
+    def _toggleReducePanel(self):
+        """Fold the Reduce panel down to its title bar, or open it again."""
+        if self.reducePanel.winfo_manager():
+            self.reducePanel.pack_forget()
+            glyph = DRAWER_OPEN_GLYPH
+        else:
+            self.reducePanel.pack(fill="x")
+            glyph = DRAWER_CLOSE_GLYPH
+
+        self.reduceTitle.configure(text=f"{glyph}  Reduce")
 
     def _lcdColumn(self, row: ttk.Frame, label: str) -> ttk.Frame:
         """Add a column to a row of the Reduce panel's display, with its label at the top.

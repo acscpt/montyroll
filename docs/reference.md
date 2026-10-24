@@ -265,7 +265,7 @@ The **Original** sub-tab reports on the song. The **Reduced** sub-tab reports on
 
 ## Reduce panel
 
-The Reduce panel sits under the channel rows. Its first rows switch the reduction on, set the shading of the roll, and report the result. A table of the pools follows. Under it, a display shows the pool selected in the table: its name on a blue tag, then each setting of that pool as a label over its value.
+The Reduce panel sits under the channel rows. Its first rows switch the reduction on, set the shading of the roll, and report the result. A table of the pools follows. Under it, a display shows the pool selected in the table: its name on a blue tag, then each setting of that pool as a label over its value. A click on the panel's title bar folds the panel down to the bar, so the channel rows take its room, and another click opens it.
 
 | Control | Values | Effect |
 | --- | --- | --- |

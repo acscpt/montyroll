@@ -348,7 +348,23 @@ class TestTheme:
             if isinstance(w, ttk.Label) and str(w.cget("style")) == "Title.TLabel":
                 titles.append(str(w.cget("text")))
 
-        assert {"Channels", "Reduce", "Inspector"} <= set(titles)
+        assert {"Channels", "Inspector"} <= set(titles)
+        assert any(t.endswith("Reduce") for t in titles)
+
+    def testTheReducePanelFolds(self, app: MidiEditorApp) -> None:
+        """A click on the Reduce title folds the panel to its bar, giving the rows its room."""
+        app.update_idletasks()
+        before = app.chanCanvas.winfo_height()
+        assert app.reduceTitle.cget("text").startswith(DRAWER_CLOSE_GLYPH)
+        app._toggleReducePanel()
+        app.update_idletasks()
+        assert not app.reducePanel.winfo_manager()
+        assert app.reduceTitle.cget("text").startswith(DRAWER_OPEN_GLYPH)
+        assert app.chanCanvas.winfo_height() > before
+        app._toggleReducePanel()
+        app.update_idletasks()
+        assert app.reducePanel.winfo_manager() == "pack"
+        assert app.chanCanvas.winfo_height() == before
 
     def testRuleUnderTheLanes(self, app: MidiEditorApp) -> None:
         """A one-pixel rule runs under the lane switch, flush on top of the strip."""
